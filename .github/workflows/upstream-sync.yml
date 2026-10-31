@@ -1,0 +1,92 @@
+name: Sync upstream T3 Code
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'maximilianschroeder09437334-sys/t3code'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the fork default branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Merge current upstream main into a review branch
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags upstream main
+          upstream_sha="$(git rev-parse upstream/main)"
+          fork_sha="$(git rev-parse HEAD)"
+
+          if git merge-base --is-ancestor "$upstream_sha" "$fork_sha"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Fork already contains upstream $upstream_sha."
+            exit 0
+          fi
+
+          open_sync_prs="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --base "$BASE_BRANCH" --json title --jq '[.[] | select(.title | startswith("chore: sync upstream T3 Code"))] | length')"
+          if [ "$open_sync_prs" -gt 0 ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "An upstream-sync PR is already open; no second update was created."
+            exit 0
+          fi
+
+          branch="automation/upstream-${fork_sha:0:8}-${upstream_sha:0:8}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch --create "$branch"
+          if ! git merge --no-edit --no-ff "$upstream_sha"; then
+            echo "Upstream merge conflicts detected. No branch was pushed and no files were changed on the fork default branch." >&2
+            exit 1
+          fi
+
+          git push origin "HEAD:refs/heads/$branch"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "fork_sha=$fork_sha" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the upstream review PR
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_BRANCH: ${{ steps.sync.outputs.branch }}
+          FORK_SHA: ${{ steps.sync.outputs.fork_sha }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          body_file="$RUNNER_TEMP/upstream-pr-body.md"
+          cat > "$body_file" <<EOF
+          This PR merges upstream T3 Code main into the fork for review.
+
+          - Fork base: $FORK_SHA
+          - Upstream: https://github.com/pingdotgg/t3code/commit/$UPSTREAM_SHA
+          - Merge conflicts stop the workflow before any branch is pushed.
+          - Review fork-specific hooks, update feeds, app identifiers, and mobile OTA configuration.
+          - CI must pass before merging. This workflow never merges or publishes an app automatically.
+          EOF
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$BASE_BRANCH" \
+            --head "$HEAD_BRANCH" \
+            --title "chore: sync upstream T3 Code $UPSTREAM_SHA" \
+            --body-file "$body_file"
