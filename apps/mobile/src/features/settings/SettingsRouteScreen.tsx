@@ -168,7 +168,14 @@ function SettingsList(props: { readonly connections: readonly SettingsListRow[] 
   const overflowRows = useOverflowRows();
   const indexSections = useSettingsIndexSections();
   const sections = filterSettingsSections(
-    [{ rows: overflowRows }, { title: "Connections", rows: props.connections }, ...indexSections],
+    [
+      { rows: overflowRows },
+      ...indexSections.flatMap((section) =>
+        section.title === "Code"
+          ? [section, { title: "Connections", rows: props.connections }]
+          : [section],
+      ),
+    ],
     query,
   );
 
@@ -211,6 +218,9 @@ function SettingsList(props: { readonly connections: readonly SettingsListRow[] 
 
 function useSettingsIndexSections(): SettingsListSection[] {
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
+  const { selectedTargets: cachedTargets } = useSettingsEnvironmentFilter({
+    includeDisconnected: true,
+  });
   const noServerTargets = selectedTargets.length === 0;
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
   const scopedProjectMembers =
@@ -258,6 +268,12 @@ function useSettingsIndexSections(): SettingsListSection[] {
         serverPage("SettingsProviderAccounts", "person.crop.circle", "Providers"),
         serverPage("SettingsThreads", "text.bubble", "Threads"),
         page("SettingsScheduledTasks", "clock", "Scheduled tasks"),
+        page(
+          "SettingsHooks",
+          { ios: "checkmark.shield", android: "lock" },
+          "Hooks and safeguards",
+          { disabled: cachedTargets.length === 0 },
+        ),
       ],
     },
     {

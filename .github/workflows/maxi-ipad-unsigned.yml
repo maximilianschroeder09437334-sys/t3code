@@ -1,0 +1,69 @@
+name: T3 Code Maxi iPad unsigned build
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/ipad-unsigned-build-20261101
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      APP_VARIANT: preview
+      T3CODE_IOS_PERSONAL_TEAM: '1'
+      T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID: com.maximilian.t3code.mobile
+      T3CODE_MOBILE_UPDATES_ENABLED: '0'
+      MOBILE_VERSION_POLICY: appVersion
+      EXPO_NO_GIT_STATUS: '1'
+      CI: '1'
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+              - --filter=@t3tools/scripts...
+      - name: Generate iOS project
+        working-directory: apps/mobile
+        run: ./node_modules/.bin/expo prebuild --platform ios --no-install
+      - name: Install native dependencies
+        working-directory: apps/mobile/ios
+        run: pod install
+      - name: Build unsigned app for device
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          workspaces=(ios/*.xcworkspace)
+          projects=(ios/*.xcodeproj)
+          test "${#workspaces[@]}" -eq 1
+          test "${#projects[@]}" -eq 1
+          workspace="${workspaces[0]}"
+          xcodebuild -list -json -project "${projects[0]}" > "$RUNNER_TEMP/schemes.json"
+          scheme=$(node -e 'const d=require(process.argv[1]); const s=d.project.schemes; if(s.length!==1) process.exit(1); process.stdout.write(s[0]);' "$RUNNER_TEMP/schemes.json")
+          xcodebuild -workspace "$workspace" -scheme "$scheme" -configuration Release -sdk iphoneos -derivedDataPath "$RUNNER_TEMP/derived" CODE_SIGNING_ALLOWED=NO build
+          apps=("$RUNNER_TEMP"/derived/Build/Products/Release-iphoneos/*.app)
+          test "${#apps[@]}" -eq 1
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "${apps[0]}" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$RUNNER_TEMP/T3-Code-Maxi-unsigned.ipa" Payload)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: t3-code-maxi-ipad-unsigned
+          path: ${{ runner.temp }}/T3-Code-Maxi-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
