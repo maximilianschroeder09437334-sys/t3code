@@ -88,7 +88,7 @@ const VARIANT_CONFIG = {
     appName: "T3 Code Maxi",
     scheme: "t3code-preview",
     iosBundleIdentifier: "com.t3tools.t3code.preview",
-    androidPackage: "com.t3tools.t3code.preview",
+    androidPackage: "com.maximilian.t3code.mobile",
     relyingParty: "clerk.t3.codes",
     assets: PREVIEW_ASSETS,
   },

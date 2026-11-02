@@ -12,7 +12,8 @@ import {
   type AndroidHomeFabLayout as SharedAndroidHomeFabLayout,
 } from "./AndroidHomeFab.shared";
 import { useWorkspaceState } from "../../state/workspace";
-import { FabScrollContext } from "./FabScrollContext";
+import { FabScrollContext, FloatingUsageContext } from "./FabScrollContext";
+import { SidebarUsage } from "../usage/SidebarUsage";
 import { updateFabScroll } from "./fab-scroll";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
 import { useEnabledNavigationTabs } from "../workspace/navigation-tabs";
@@ -29,6 +30,7 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
   const { appearance } = useAppearancePreferences();
   const { fontScale } = useWindowDimensions();
   const [layoutWidth, setLayoutWidth] = useState<number | null>(null);
+  const [usageHeight, setUsageHeight] = useState(0);
   const { state } = useWorkspaceState();
   const [expanded, setExpanded] = useState(true);
   const { scale, fabSize } = useAndroidControlSizing();
@@ -40,12 +42,22 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
     props.paneWidth ?? layoutWidth ?? undefined,
   );
   const workspace = useWorkspaceTabs();
-  const bottomClearance =
-    insets.bottom +
-    FLOATING_TABS.bottom +
-    FLOATING_TABS.edge +
-    Math.max(floating.height, floating.fabOffset + fabSize);
-  const context = floatingTabsEnabled && workspace ? { ...workspace, bottomClearance } : workspace;
+  const floatUsage = workspace !== null && (!props.sidebar || floatingTabsEnabled);
+  const usageBottom = floatingTabsEnabled
+    ? insets.bottom + FLOATING_TABS.bottom + floating.height + FLOATING_TABS.edge
+    : insets.bottom + FLOATING_TABS.edge;
+  const defaultFabPosition = androidHomeFabPosition(insets.bottom, props.sidebar);
+  const fabBottom =
+    floatUsage && usageHeight > 0
+      ? usageBottom + usageHeight + FLOATING_TABS.gap
+      : floatingTabsEnabled
+        ? insets.bottom + FLOATING_TABS.bottom + floating.fabOffset
+        : defaultFabPosition.bottom;
+  const bottomClearance = Math.max(
+    workspace?.bottomClearance ?? 0,
+    fabBottom + fabSize + FLOATING_TABS.edge,
+  );
+  const context = workspace && floatUsage ? { ...workspace, bottomClearance } : workspace;
   const scrollState = useRef({ anchor: 0, expanded: true });
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -63,7 +75,23 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
   return (
     <View className="flex-1" onLayout={(event) => setLayoutWidth(event.nativeEvent.layout.width)}>
       <WorkspaceTabsContext value={context}>
-        <FabScrollContext value={onScroll}>{props.children}</FabScrollContext>
+        <FloatingUsageContext value={floatUsage}>
+          <FabScrollContext value={onScroll}>{props.children}</FabScrollContext>
+          {floatUsage ? (
+            <View
+              className="bg-screen"
+              onLayout={(event) => setUsageHeight(event.nativeEvent.layout.height)}
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: usageBottom,
+              }}
+            >
+              <SidebarUsage />
+            </View>
+          ) : null}
+        </FloatingUsageContext>
       </WorkspaceTabsContext>
       {!props.disabled &&
       (!props.sidebar || floatingTabsEnabled) &&
@@ -79,9 +107,9 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
             floatingTabsEnabled
               ? {
                   right: FLOATING_TABS.edge,
-                  bottom: insets.bottom + FLOATING_TABS.bottom + floating.fabOffset,
+                  bottom: fabBottom,
                 }
-              : androidHomeFabPosition(insets.bottom, props.sidebar)
+              : { ...defaultFabPosition, bottom: fabBottom }
           }
         />
       ) : null}

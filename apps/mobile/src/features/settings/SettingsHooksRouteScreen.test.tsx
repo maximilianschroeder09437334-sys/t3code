@@ -54,6 +54,8 @@ vi.mock("react-native", () => ({
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => true }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("../../components/ui/AppText", () => ({ AppText: Children }));
+vi.mock("../../components/ui/ScreenScrollView", () => ({ ScreenScrollView: Children }));
+vi.mock("../workspace/WorkspaceTabsContext", () => ({ useWorkspaceTabs: () => null }));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: () => ({
     data: mocks.hooks,

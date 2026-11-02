@@ -84,7 +84,7 @@ import {
 } from "./homeThreadList";
 import { createSwipeRowActivation } from "./swipe-row-activation";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "./thread-swipe-actions";
-import { useFabScroll } from "./FabScrollContext";
+import { useFabScroll, useFloatingUsage } from "./FabScrollContext";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { ThreadListFilters } from "./ThreadListFilters";
 
@@ -315,6 +315,7 @@ export function HomeScreen(props: HomeScreenProps) {
     openThreadPullRequests(thread, pr);
   };
   const onFabScroll = useFabScroll();
+  const floatingUsage = useFloatingUsage();
   const listRef = useRef<LegendListRef>(null);
   const searchMode = workspace?.state.tabs.threads.searchMode;
   const restoredOffset = workspace?.state.tabs.threads.scrollOffset;
@@ -766,11 +767,13 @@ export function HomeScreen(props: HomeScreenProps) {
         >
           {v2ListEmpty}
         </View>
-        <SidebarUsage
-          bottomInset={
-            Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
-          }
-        />
+        {!floatingUsage ? (
+          <SidebarUsage
+            bottomInset={
+              Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
+            }
+          />
+        ) : null}
       </View>
     );
   }
@@ -852,11 +855,13 @@ export function HomeScreen(props: HomeScreenProps) {
             />
           </GestureDetector>
         </SwipeableScrollGateProvider>
-        <SidebarUsage
-          bottomInset={
-            Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
-          }
-        />
+        {!floatingUsage ? (
+          <SidebarUsage
+            bottomInset={
+              Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
+            }
+          />
+        ) : null}
       </View>
     </View>
   );

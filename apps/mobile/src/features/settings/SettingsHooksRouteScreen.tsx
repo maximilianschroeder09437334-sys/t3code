@@ -13,10 +13,11 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useEffect, useRef, useState } from "react";
 import { hookSummary } from "@t3tools/shared/hookSummary";
-import { Alert, AppState, Pressable, ScrollView, Switch, TextInput, View } from "react-native";
+import { Alert, AppState, Pressable, Switch, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/ui/AppText";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useEnvironmentQuery } from "../../state/query";
 import { useEnvironments } from "../../state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -30,6 +31,7 @@ import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import { hooksForSection, sharedHookTargets, visibleHookTargets } from "./hooks-overview.logic";
+import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 
 const EVENT_LABELS: Readonly<Record<HookDefinition["event"], string>> = {
   before_file_write: "Before T3 file write",
@@ -44,6 +46,7 @@ export function SettingsHooksRouteScreen() {
   const { availableTargets, selectedTargets, selectedIds, projectGroups, selectedProjectKey } =
     useSettingsEnvironmentFilter({ includeDisconnected: true });
   const insets = useSafeAreaInsets();
+  const workspace = useWorkspaceTabs();
   const environmentIds = new Set(selectedTargets.map((target) => target.environmentId));
   const groups = projectGroups.filter(
     (group) => selectedProjectKey === null || group.key === selectedProjectKey,
@@ -116,7 +119,10 @@ export function SettingsHooksRouteScreen() {
           showsVerticalScrollIndicator={false}
           className="flex-1"
           contentContainerClassName="gap-5 px-5 pt-4"
-          contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
+          contentContainerStyle={{
+            paddingBottom:
+              Math.max(Math.max(insets.bottom, 18) + 18, workspace?.bottomClearance ?? 0) + 16,
+          }}
         >
           {offlineView || hasOfflineTargets ? (
             <Text className="text-foreground-muted">
@@ -444,7 +450,7 @@ function HookCard(props: {
         className="max-h-72 min-h-36 rounded-xl bg-subtle p-3 font-mono text-xs text-foreground"
       />
       {hook.status === "draft" ? (
-        <View className="flex-row justify-end gap-2">
+        <View className="flex-row flex-wrap justify-end gap-2">
           {editing ? (
             <>
               <Pressable
@@ -462,9 +468,9 @@ function HookCard(props: {
                 accessibilityRole="button"
                 disabled={!canEdit || pending || script === hook.script}
                 onPress={() => void save()}
-                className="rounded-full bg-prominent px-4 py-2 disabled:opacity-50"
+                className="min-h-12 justify-center rounded-full bg-prominent-action px-4 py-2 disabled:opacity-50"
               >
-                <Text className="text-prominent-foreground">
+                <Text className="text-prominent-action-foreground">
                   {pending ? "Saving…" : "Save draft"}
                 </Text>
               </Pressable>
@@ -484,9 +490,9 @@ function HookCard(props: {
                 accessibilityLabel={`Review and approve ${hook.name}`}
                 disabled={!canApprove || pending}
                 onPress={reviewAndApprove}
-                className="rounded-full bg-prominent px-4 py-2 disabled:opacity-50"
+                className="min-h-12 justify-center rounded-full bg-prominent-action px-4 py-2 disabled:opacity-50"
               >
-                <Text className="text-prominent-foreground">
+                <Text className="text-prominent-action-foreground">
                   {pending ? "Approving…" : "Review and approve"}
                 </Text>
               </Pressable>

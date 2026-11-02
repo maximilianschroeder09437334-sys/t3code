@@ -64,7 +64,8 @@ import {
 import { SidebarHeaderActions } from "./sidebar-header-actions";
 import { ThreadListToolbar } from "../home/ThreadListToolbar";
 import { useToolbarLayout } from "../../components/ui/useToolbarLayout";
-import { useFabScroll } from "../home/FabScrollContext";
+import { useFabScroll, useFloatingUsage } from "../home/FabScrollContext";
+import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { SidebarFilterButton } from "./sidebar-filter-button";
 import { createSidebarHeaderItems } from "./sidebar-native-header-items";
 import { SidebarNavigationShell } from "./sidebar-navigation-shell";
@@ -466,6 +467,8 @@ function ThreadNavigationSidebarPane(
     openSwipeableRef.current?.close();
   };
   const onFabScroll = useFabScroll();
+  const floatingUsage = useFloatingUsage();
+  const workspace = useWorkspaceTabs();
   const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate({
     onScroll: onFabScroll,
     onScrollBeginDrag: handleScrollBeginDrag,
@@ -773,7 +776,7 @@ function ThreadNavigationSidebarPane(
               />
             </GestureDetector>
           </SwipeableScrollGateProvider>
-          <SidebarUsage />
+          {!floatingUsage ? <SidebarUsage /> : null}
           <ThreadUndoNotice visible={props.visible} />
         </View>
       </>
@@ -828,9 +831,11 @@ function ThreadNavigationSidebarPane(
                     paddingBottom:
                       Platform.OS === "android"
                         ? floatingTabsEnabled
-                          ? FLOATING_TABS.bottom +
-                            FLOATING_TABS.edge +
-                            Math.max(floatingTabs.height, floatingTabs.fabOffset + fabSize)
+                          ? floatingUsage
+                            ? Math.max(0, (workspace?.bottomClearance ?? 0) - insets.bottom)
+                            : FLOATING_TABS.bottom +
+                              FLOATING_TABS.edge +
+                              Math.max(floatingTabs.height, floatingTabs.fabOffset + fabSize)
                           : Math.max(insets.bottom, 16) + fabClearance - insets.bottom
                         : 16 + insets.bottom,
                     paddingTop: Platform.OS === "android" ? 6 : topListInset,
@@ -848,17 +853,19 @@ function ThreadNavigationSidebarPane(
             </GestureDetector>
           </SwipeableScrollGateProvider>
         )}
-        <SidebarUsage
-          bottomInset={
-            Platform.OS === "android"
-              ? floatingTabsEnabled
-                ? FLOATING_TABS.bottom +
-                  FLOATING_TABS.edge +
-                  Math.max(floatingTabs.height, floatingTabs.fabOffset + fabSize)
-                : Math.max(insets.bottom, 16) + fabClearance - insets.bottom
-              : 0
-          }
-        />
+        {!floatingUsage ? (
+          <SidebarUsage
+            bottomInset={
+              Platform.OS === "android"
+                ? floatingTabsEnabled
+                  ? FLOATING_TABS.bottom +
+                    FLOATING_TABS.edge +
+                    Math.max(floatingTabs.height, floatingTabs.fabOffset + fabSize)
+                  : Math.max(insets.bottom, 16) + fabClearance - insets.bottom
+                : 0
+            }
+          />
+        ) : null}
       </View>
 
       {Platform.OS === "android" ? (

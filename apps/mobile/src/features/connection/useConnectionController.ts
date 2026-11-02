@@ -19,6 +19,7 @@ import {
 import { useWorkspaceEnvironments } from "../../state/workspace";
 import { relayEnvironmentDiscovery } from "../../state/relay";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { cloudAccountService } from "../cloud/cloudAccountService";
 import { relayManagedEnvironmentIds } from "./environmentSections";
 
 export interface RelayEnvironmentView {
@@ -43,7 +44,7 @@ export function useConnectionController() {
     environmentCatalog.setEnabled,
     "environment toggle",
   );
-  const refreshRelayEnvironments = useAtomCommand(
+  const refreshRelayEnvironmentsMutation = useAtomCommand(
     relayEnvironmentDiscovery.refresh,
     "relay environment refresh",
   );
@@ -84,8 +85,14 @@ export function useConnectionController() {
     );
   const removeEnvironment = (environmentId: EnvironmentId) =>
     removeEnvironmentMutation(environmentId);
-  const retryEnvironment = (environmentId: EnvironmentId) =>
-    retryEnvironmentMutation(environmentId);
+  const retryEnvironment = (environmentId: EnvironmentId) => {
+    cloudAccountService.retryFailedActivation();
+    return retryEnvironmentMutation(environmentId);
+  };
+  const refreshRelayEnvironments = () => {
+    cloudAccountService.retryFailedActivation();
+    return refreshRelayEnvironmentsMutation();
+  };
   const setEnvironmentEnabled = (environmentId: EnvironmentId, enabled: boolean) =>
     setEnvironmentEnabledMutation({ environmentId, enabled });
   const updateEnvironment = (

@@ -1,5 +1,7 @@
 import { SheetHeader } from "../../components/ui/SheetHeader";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { AppText } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -82,31 +84,40 @@ function BrowserPreviewScreen({
   const focused = useIsFocused();
   const foreground = useAppForeground();
   const [selectedTabId, setSelectedTabId] = useState(initialTabId);
+  const [pendingInitialTab, setPendingInitialTab] = useState(initialTabId !== null);
   const [pictureInPicture, setPictureInPicture] = useState(NO_PICTURE_IN_PICTURE);
   const [streaming, setStreaming] = useState(false);
   const [canControl, setCanControl] = useState(false);
   const streamRef = useRef<PreviewStreamRef>(null);
   const hasSeenTab = useRef(initialTabId === null);
-  const { tabs, loaded } = useThreadServerBrowserTabs({ environmentId, threadId, enabled: true });
-  const tab = tabs.find((entry) => entry.tabId === selectedTabId) ?? latestBrowserTab(tabs);
+  const { tabs, loaded, error, refresh } = useThreadServerBrowserTabs({
+    environmentId,
+    threadId,
+    enabled: true,
+  });
+  const tab =
+    tabs.find((entry) => entry.tabId === selectedTabId) ??
+    (pendingInitialTab ? null : latestBrowserTab(tabs));
   const pdfUri =
     tab?.navStatus._tag === "Success" ? previewPdfAssetUrl(tab.navStatus.url, httpBaseUrl) : null;
   const tabId = tab?.tabId ?? null;
+  if (tabId !== null && pendingInitialTab) setPendingInitialTab(false);
   if (tabId !== null && tabId !== selectedTabId) {
     setPictureInPicture(NO_PICTURE_IN_PICTURE);
     setSelectedTabId(tabId);
   }
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- closes the focused route through the navigator once the thread has no browser tabs left
   useEffect(() => {
-    if (tabs.length > 0) hasSeenTab.current = true;
+    if (tabId !== null) hasSeenTab.current = true;
     else if (focused && loaded && hasSeenTab.current) onClose();
-  }, [focused, loaded, tabs.length, onClose]);
+  }, [focused, loaded, tabId, onClose]);
   const onPictureInPicture = (state: PreviewPictureInPictureState, detail?: string) => {
     setPictureInPicture({ supported: state.supported, active: state.active });
     if (detail) Dialog.alert("Picture in picture is unavailable", detail);
   };
   const selectTab = (next: string) => {
     setPictureInPicture(NO_PICTURE_IN_PICTURE);
+    setPendingInitialTab(false);
     setSelectedTabId(next);
   };
   const live = (focused && foreground) || pictureInPicture.active;
@@ -139,7 +150,7 @@ function BrowserPreviewScreen({
             : []
         }
         menus={
-          tabs.length > 1
+          tabs.length > (tab === null ? 0 : 1)
             ? [
                 {
                   title: "Tabs",
@@ -193,10 +204,14 @@ function BrowserPreviewScreen({
           )}
         </>
       ) : (
-        <View className="flex-1 items-center justify-center">
-          {focused && foreground ? (
+        <View className="flex-1 items-center justify-center gap-4 px-6">
+          {focused && foreground && !error ? (
             <AppActivityIndicator color={themeVariables["--color-icon"]} />
           ) : null}
+          <AppText selectable={!!error} className="text-center text-sm text-foreground-muted">
+            {error ?? "Waiting for browser tabs..."}
+          </AppText>
+          <Button label="Retry" tone="secondary" onPress={refresh} />
         </View>
       )}
     </View>

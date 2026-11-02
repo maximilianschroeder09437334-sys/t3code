@@ -8,6 +8,7 @@ import { presentConnectionDiagnosis } from "./diagnosis.ts";
 import { mapManagedRelayError, mapRemoteEnvironmentError } from "./errors.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
+  ConnectionTransientError,
   type ConnectionAttemptError,
   type SupervisorConnectionState,
 } from "./model.ts";
@@ -51,6 +52,19 @@ const results = (state: SupervisorConnectionState, via?: "relay" | "direct") =>
   diagnose(state, via)?.hops.map((hop) => `${hop.hop}:${hop.result}`);
 
 describe("presentConnectionDiagnosis", () => {
+  it("reports pending sign-in on this device without blaming the PC", () => {
+    const failure = new ConnectionTransientError({
+      reason: "session-pending",
+      detail: "Waiting for the T3 Connect sign-in to load.",
+    });
+    const diagnosis = diagnose(backoff(failure), "direct");
+    expect(diagnosis?.headline).toBe("Waiting for T3 Connect sign-in on this device");
+    expect(diagnosis?.hops.map((hop) => `${hop.hop}:${hop.result}`)).toEqual([
+      "device:failed",
+      "server:unchecked",
+    ]);
+    expect(diagnosis?.steps.join(" ")).toContain("sign-in");
+  });
   it("tells a working tunnel apart from T3 Code not answering", () => {
     expect(diagnose(backoff(unavailable("origin_unreachable")))?.headline).toBe(
       "Tunnel works, but T3 Code on Mac mini did not answer",

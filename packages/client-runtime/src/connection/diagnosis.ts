@@ -59,6 +59,9 @@ function locate(input: ConnectionDiagnosisInput): Located | null {
   if (input.state.network === "offline" || input.state.phase === "offline") {
     return { hop: "device", cause: "offline" };
   }
+  if (failure?.reason === "session-pending") {
+    return { hop: "device", cause: null };
+  }
   if (failure?._tag === "ConnectionBlockedError" && failure.serverUpdateRequired) {
     return { hop: "server", cause: "outdated" };
   }
@@ -81,6 +84,9 @@ function locate(input: ConnectionDiagnosisInput): Located | null {
 }
 
 function headline(host: string, located: Located, failure: ConnectionAttemptError | null): string {
+  if (failure?.reason === "session-pending" && located.cause === null) {
+    return "Waiting for T3 Connect sign-in on this device";
+  }
   switch (located.cause) {
     case "offline":
       return "This device is offline";
@@ -137,6 +143,9 @@ function headline(host: string, located: Located, failure: ConnectionAttemptErro
 }
 
 function steps(host: string, located: Located, failure: ConnectionAttemptError | null): string[] {
+  if (failure?.reason === "session-pending" && located.cause === null) {
+    return ["Wait for sign-in to load, then check your T3 Connect account in Settings."];
+  }
   const checkHost = `On ${host}, check Settings > Sharing & access or run \`t3 connect status\`.`;
   switch (located.cause) {
     case "offline":
@@ -241,6 +250,7 @@ function helpSection(
     case null:
       break;
   }
+  if (failure?.reason === "session-pending") return "sign-in-account-or-link-problems";
   const onThisDevice =
     failure?.reason === "network" ||
     failure?.reason === "transport" ||

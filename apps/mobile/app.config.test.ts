@@ -22,12 +22,12 @@ it.each(["prod", ""])("rejects APP_VARIANT=%j before selecting production IDs", 
 });
 
 it.each([
-  [undefined, "com.t3tools.t3code"],
-  ["development", "com.t3tools.t3code.dev"],
-  ["preview", "com.t3tools.t3code.preview"],
-  ["production", "com.t3tools.t3code"],
-])("keeps the iOS and Android identifiers for APP_VARIANT=%j", async (value, identifier) => {
+  [undefined, "com.t3tools.t3code", "com.t3tools.t3code"],
+  ["development", "com.t3tools.t3code.dev", "com.t3tools.t3code.dev"],
+  ["preview", "com.t3tools.t3code.preview", "com.maximilian.t3code.mobile"],
+  ["production", "com.t3tools.t3code", "com.t3tools.t3code"],
+])("keeps the iOS and Android identifiers for APP_VARIANT=%j", async (value, ios, android) => {
   const config = await loadConfig(value);
-  expect(config.ios?.bundleIdentifier).toBe(identifier);
-  expect(config.android?.package).toBe(identifier);
+  expect(config.ios?.bundleIdentifier).toBe(ios);
+  expect(config.android?.package).toBe(android);
 });

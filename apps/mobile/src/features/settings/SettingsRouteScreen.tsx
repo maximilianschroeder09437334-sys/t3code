@@ -265,7 +265,9 @@ function useSettingsIndexSections(): SettingsListSection[] {
     {
       title: "Agents",
       rows: [
-        serverPage("SettingsProviderAccounts", "person.crop.circle", "Providers"),
+        page("SettingsProviderAccounts", "person.crop.circle", "Providers", {
+          disabled: cachedTargets.length === 0,
+        }),
         serverPage("SettingsThreads", "text.bubble", "Threads"),
         serverPage("SettingsBrowser", "globe", "Browser"),
         page("SettingsScheduledTasks", "clock", "Scheduled tasks"),

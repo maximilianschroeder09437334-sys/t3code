@@ -100,6 +100,7 @@ export interface CloudAccountService<S extends CloudAccountSource> {
    */
   readonly attach: (source: S) => () => void;
   readonly getState: () => CloudAccountState;
+  readonly retryFailedActivation: () => void;
 }
 
 export function createCloudAccountService<S extends CloudAccountSource>(
@@ -209,5 +210,10 @@ export function createCloudAccountService<S extends CloudAccountSource>(
       };
     },
     getState: () => state,
+    retryFailedActivation() {
+      if (attached === null || state._tag !== "Failed") return;
+      generation += 1;
+      activate(attached.source, state.step, state.wasActive);
+    },
   };
 }

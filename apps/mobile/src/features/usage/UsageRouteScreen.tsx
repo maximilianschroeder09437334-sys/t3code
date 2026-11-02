@@ -74,6 +74,12 @@ const WIDE_CHART_HEIGHT = 260;
 // Below this the page keeps the phone's single column.
 const WIDE_WIDTH = 600;
 const MAX_CONTENT_WIDTH = 1080;
+const DETAIL_CURRENCY = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 8,
+});
 const providerLabel = (provider: UsageProviderKind) => PROVIDER_LABEL[provider];
 const CURSOR_KEYCHAIN_COPY = "Requires access to your Cursor login in macOS Keychain.";
 
@@ -592,9 +598,20 @@ function ChartCard(props: {
   const colors = useProviderColors();
   const hasActivity = props.daily.some((period) => period.totalTokens > 0);
   const [fillHeight, setFillHeight] = useState(0);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const selectedIndex = selectedDay === null ? -1 : props.days.indexOf(selectedDay);
+  const selectedPeriod =
+    selectedIndex < 0 ? undefined : props.daily.find((day) => day.day === selectedDay);
   const height = props.fill ? Math.max(fillHeight, props.height) : props.height;
   const chart = hasActivity ? (
-    <UsageDailyChart days={props.days} daily={props.daily} metric={metric} height={height} />
+    <UsageDailyChart
+      days={props.days}
+      daily={props.daily}
+      metric={metric}
+      height={height}
+      selectedDay={selectedIndex < 0 ? null : selectedDay}
+      onSelectDay={setSelectedDay}
+    />
   ) : (
     <View style={{ height }} className="items-center justify-center">
       <Text className="text-base text-foreground-muted">No activity in this window.</Text>
@@ -623,6 +640,41 @@ function ChartCard(props: {
       ) : (
         chart
       )}
+
+      {selectedIndex >= 0 && selectedDay !== null ? (
+        <View className="flex-row items-center gap-2">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Previous usage period"
+            disabled={selectedIndex === 0}
+            onPress={() => setSelectedDay(props.days[selectedIndex - 1] ?? selectedDay)}
+            className="size-10 items-center justify-center disabled:opacity-40"
+          >
+            <SymbolView name="chevron.left" size={16} tintColorClassName="accent-icon" />
+          </Pressable>
+          <View className="flex-1 gap-1">
+            <Text className="text-sm font-t3-medium text-foreground">
+              {props.isPast24Hours ? formatHourShort(selectedDay, props.timeZone) : selectedDay}
+            </Text>
+            <Text className="text-sm tabular-nums text-foreground-muted">
+              {selectedPeriod
+                ? `${formatCount(selectedPeriod.totalTokens)} tokens · ${DETAIL_CURRENCY.format(selectedPeriod.costUsd)} estimated`
+                : "No recorded usage"}
+            </Text>
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Next usage period"
+            disabled={selectedIndex === props.days.length - 1}
+            onPress={() => setSelectedDay(props.days[selectedIndex + 1] ?? selectedDay)}
+            className="size-10 items-center justify-center disabled:opacity-40"
+          >
+            <SymbolView name="chevron.right" size={16} tintColorClassName="accent-icon" />
+          </Pressable>
+        </View>
+      ) : hasActivity ? (
+        <Text className="text-xs text-foreground-muted">Tap a bar to see its usage.</Text>
+      ) : null}
 
       <View className="gap-2">
         <View className="flex-row items-center justify-between">

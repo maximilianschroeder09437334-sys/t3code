@@ -32,6 +32,7 @@ const state = vi.hoisted(() => ({
   },
   serverConfig: null as ServerConfig | null,
   projection: null as OrchestrationV2ThreadProjection | null,
+  canPromoteToSteer: false,
   pendingRequests: { approvals: [], userInputs: [] } as PendingThreadRequests,
   enqueue: vi.fn(async () => undefined),
   clearDraft: vi.fn(),
@@ -53,7 +54,7 @@ const state = vi.hoisted(() => ({
     modelSelection: { instanceId: "codex", model: "gpt-5.4" },
     runtimeMode: "full-access",
     interactionMode: "default",
-    runtime: null,
+    runtime: null as null | { status: "running"; activeRunId: RunId },
     latestRun: null,
   },
 }));
@@ -111,7 +112,8 @@ vi.mock("./threads", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     environmentThreadDetails: {
-      queueWorkflowAtom: () => Atom.make(null),
+      queueWorkflowAtom: () =>
+        Atom.make(state.canPromoteToSteer ? { canPromoteToSteer: true } : null),
       checkpointSummariesAtom: () => Atom.make([]),
       sequenceAtom: () => Atom.make(0),
       pendingRequestsAtom: () => Atom.make(state.pendingRequests),
@@ -182,6 +184,8 @@ beforeEach(() => {
   state.connectionState = "connected";
   state.draft = { text: "Keep my draft", attachments: [], modelSelection: undefined };
   state.projection = null;
+  state.canPromoteToSteer = false;
+  state.thread.runtime = null;
   state.serverConfig = {
     providers: [{ instanceId: "codex", driver: "codex", enabled: true }],
     environment: { capabilities: {} },
@@ -204,6 +208,25 @@ beforeEach(() => {
 });
 
 describe("mobile task permissions", () => {
+  it("sends the default and selected steer as steer and preserves a queue choice", async () => {
+    state.grantedEnvironments.add("secondary");
+    state.canPromoteToSteer = true;
+    state.thread.runtime = { status: "running", activeRunId: RunId.make("run-active") };
+    const composer = useThreadComposerState();
+    expect(await composer.onSendMessage()).toBe("message");
+    expect(state.enqueue).toHaveBeenLastCalledWith(
+      expect.objectContaining({ dispatchMode: "steer" }),
+    );
+    expect(await composer.onSendMessage("queue")).toBe("message");
+    expect(state.enqueue).toHaveBeenLastCalledWith(
+      expect.objectContaining({ dispatchMode: "queue" }),
+    );
+    expect(await composer.onSendMessage("steer")).toBe("message");
+    expect(state.enqueue).toHaveBeenLastCalledWith(
+      expect.objectContaining({ dispatchMode: "steer" }),
+    );
+  });
+
   it("consumes an approval reply without queueing a parent message", async () => {
     state.grantedEnvironments.add("secondary");
     const composer = useThreadComposerState();

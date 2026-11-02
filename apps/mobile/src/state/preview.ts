@@ -135,8 +135,16 @@ export function useThreadServerBrowserTabs(input: {
         )
       : emptyTabsAtom,
   );
+  const list = useEnvironmentQuery(
+    input.enabled
+      ? previewEnvironment.list({
+          environmentId: input.environmentId,
+          input: { threadId: input.threadId },
+        })
+      : null,
+  );
   const sessions = tabs.sessions.filter((session) => session.runtime === "server");
-  return { tabs: sessions, loaded: tabs.listed };
+  return { tabs: sessions, loaded: tabs.listed, error: list.error, refresh: list.refresh };
 }
 
 // The earliest time the next access request may go out.
