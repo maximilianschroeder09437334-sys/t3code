@@ -6,6 +6,7 @@ import {
   type NativeSyntheticEvent,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import { NewThreadButton } from "../../components/NewThreadButton";
 import {
   androidHomeFabPosition,
@@ -27,7 +28,8 @@ import {
 export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidHomeFabLayout>) {
   const floatingTabsEnabled = useAndroidFloatingTabs();
   const insets = useSafeAreaInsets();
-  const { appearance } = useAppearancePreferences();
+  const { appearance, themeVariables } = useAppearancePreferences();
+  const screenColor = themeVariables["--color-screen"];
   const { fontScale } = useWindowDimensions();
   const [layoutWidth, setLayoutWidth] = useState<number | null>(null);
   const [usageHeight, setUsageHeight] = useState(0);
@@ -77,6 +79,33 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
       <WorkspaceTabsContext value={context}>
         <FloatingUsageContext value={floatUsage}>
           <FabScrollContext value={onScroll}>{props.children}</FabScrollContext>
+          {floatUsage && usageHeight > 0 ? (
+            <View
+              className="absolute inset-0"
+              pointerEvents="none"
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+            >
+              <View
+                className="absolute left-0 right-0 bg-screen"
+                style={{ bottom: 0, height: usageBottom + usageHeight }}
+              />
+              <View
+                className="absolute left-0 right-0"
+                style={{ bottom: usageBottom + usageHeight, height: 64 }}
+              >
+                <Svg width="100%" height="100%">
+                  <Defs>
+                    <LinearGradient id="home-usage-fade" x1="0%" x2="0%" y1="0%" y2="100%">
+                      <Stop offset="0%" stopColor={screenColor} stopOpacity={0} />
+                      <Stop offset="100%" stopColor={screenColor} stopOpacity={1} />
+                    </LinearGradient>
+                  </Defs>
+                  <Rect width="100%" height="100%" fill="url(#home-usage-fade)" />
+                </Svg>
+              </View>
+            </View>
+          ) : null}
           {floatUsage ? (
             <View
               className="bg-screen"

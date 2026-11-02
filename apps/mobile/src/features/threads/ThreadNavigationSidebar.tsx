@@ -89,6 +89,7 @@ import {
 } from "./threadListV2";
 import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
 import { NativeScrollView } from "../../native/NativeScrollViewMarker";
+import { useDeviceType } from "../../native/native-layout-metrics";
 
 type SidebarListItem =
   | ThreadListV2ListItem
@@ -150,6 +151,7 @@ function ThreadNavigationSidebarPane(
   props: ThreadNavigationSidebarProps & { readonly nativeChrome: boolean },
 ) {
   const floatingTabsEnabled = useAndroidFloatingTabs();
+  const deviceType = useDeviceType();
   const { themeVariables: materialTheme } = useAppearancePreferences();
   const drawerColor = materialTheme["--color-drawer"];
 
@@ -776,7 +778,11 @@ function ThreadNavigationSidebarPane(
               />
             </GestureDetector>
           </SwipeableScrollGateProvider>
-          {!floatingUsage ? <SidebarUsage /> : null}
+          {!floatingUsage ? (
+            <SidebarUsage
+              bottomInset={deviceType === "pad" ? (workspace?.bottomClearance ?? 0) : 0}
+            />
+          ) : null}
           <ThreadUndoNotice visible={props.visible} />
         </View>
       </>
@@ -862,7 +868,9 @@ function ThreadNavigationSidebarPane(
                     FLOATING_TABS.edge +
                     Math.max(floatingTabs.height, floatingTabs.fabOffset + fabSize)
                   : Math.max(insets.bottom, 16) + fabClearance - insets.bottom
-                : 0
+                : deviceType === "pad"
+                  ? Math.max(0, (workspace?.bottomClearance ?? 0) - insets.bottom)
+                  : 0
             }
           />
         ) : null}

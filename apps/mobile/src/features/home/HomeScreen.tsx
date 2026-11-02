@@ -43,6 +43,7 @@ import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
 import { nativeHeaderScrollEdgeEffects } from "../../native/scrollEdgeEffects";
 import {
+  useDeviceType,
   useNativeColumnLayoutMetrics,
   useNativeLayoutMetrics,
 } from "../../native/native-layout-metrics";
@@ -242,6 +243,7 @@ function renderHomeScrollView(props: ScrollViewProps) {
 
 export function HomeScreen(props: HomeScreenProps) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
+  const deviceType = useDeviceType();
   const workspace = useWorkspaceTabs();
   const [initialScrollOffset] = useState(() => workspace?.getScrollOffset("threads") ?? 0);
   const primaryColumn = use(NativePrimaryColumnContext);
@@ -770,7 +772,11 @@ export function HomeScreen(props: HomeScreenProps) {
         {!floatingUsage ? (
           <SidebarUsage
             bottomInset={
-              Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
+              Platform.OS === "android"
+                ? (workspace?.bottomClearance ?? insets.bottom)
+                : deviceType === "pad"
+                  ? iosBottomClearance
+                  : 0
             }
           />
         ) : null}
@@ -858,7 +864,11 @@ export function HomeScreen(props: HomeScreenProps) {
         {!floatingUsage ? (
           <SidebarUsage
             bottomInset={
-              Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
+              Platform.OS === "android"
+                ? (workspace?.bottomClearance ?? insets.bottom)
+                : deviceType === "pad"
+                  ? iosBottomClearance
+                  : 0
             }
           />
         ) : null}
