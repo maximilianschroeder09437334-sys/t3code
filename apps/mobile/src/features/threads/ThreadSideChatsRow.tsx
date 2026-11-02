@@ -1,4 +1,13 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ThreadId, type EnvironmentId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
+import { useRef, useState } from "react";
+import * as Dialog from "../../components/ui/Dialog";
+import { uuidv4 } from "../../lib/uuid";
+import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentThreadShells, threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { waitForThreadShellReady } from "./threadForkNavigation";
 import { Pressable, ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -7,17 +16,57 @@ import { cn } from "../../lib/cn";
 import { useSideChats } from "../../state/entities";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
 
-/**
- * The thread's side chats, started on web or desktop. Each opens as a normal thread, so its
- * approvals and questions can be answered from the phone.
- */
 export function ThreadSideChatsRow(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  readonly canCreate: boolean;
 }) {
   const sideChats = useSideChats({ environmentId: props.environmentId, threadId: props.threadId });
   const openLinkedThread = useOpenLinkedThread();
-  if (sideChats.length === 0) return null;
+  const forkSideChat = useAtomCommand(threadEnvironment.forkSideChat, { reportFailure: false });
+  const pending = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const create = async () => {
+    if (!props.canCreate || pending.current) return;
+    pending.current = true;
+    setBusy(true);
+    await (async () => {
+      const targetThreadId = ThreadId.make(uuidv4());
+      const result = await forkSideChat({
+        environmentId: props.environmentId,
+        input: {
+          sourceThreadId: props.threadId,
+          targetThreadId,
+          title: "Side chat",
+          creationSource: "mobile",
+        },
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result))
+          Dialog.alert("Could not start side chat", "Check the connection and try again.");
+        return;
+      }
+      const atom = environmentThreadShells.threadShellAtom(
+        scopeThreadRef(props.environmentId, targetThreadId),
+      );
+      const ready = await waitForThreadShellReady({
+        read: () => appAtomRegistry.get(atom) !== null,
+      });
+      if (!ready) {
+        Dialog.alert(
+          "Side chat created",
+          "Its data has not reached this device yet. Reconnect and open it from the side chats list.",
+        );
+        return;
+      }
+      openLinkedThread({ environmentId: props.environmentId, threadId: targetThreadId });
+    })().catch(() => {
+      Dialog.alert("Could not open side chat", "Check the side chats list and try again.");
+    });
+    pending.current = false;
+    setBusy(false);
+  };
+  if (sideChats.length === 0 && !props.canCreate) return null;
   return (
     <View className="flex-row items-center gap-2 pb-2 pl-4">
       <SymbolView
@@ -28,6 +77,17 @@ export function ThreadSideChatsRow(props: {
       <Text className="text-xs text-foreground-muted">Side chats</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} className="flex-1">
         <View className="flex-row gap-1 pr-4">
+          {props.canCreate ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="New side chat"
+              disabled={busy}
+              onPress={() => void create()}
+              className="rounded-full bg-subtle px-3 py-1 disabled:opacity-50"
+            >
+              <Text className="text-xs text-foreground">{busy ? "Opening..." : "+ New"}</Text>
+            </Pressable>
+          ) : null}
           {sideChats.map((sideChat) => {
             const needs =
               sideChat.hasPendingApprovals || sideChat.pendingSubagentRequest === "approval"

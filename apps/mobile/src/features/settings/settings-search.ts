@@ -41,6 +41,7 @@ const SETTINGS_SEARCH_TERMS = {
     "new threads",
     "last project",
   ],
+  SettingsBrowser: ["browser", "preview", "agent browser access", "viewport", "zoom"],
   SettingsThreads: [
     "new threads",
     "default workspace",

@@ -136,6 +136,7 @@ vi.mock("./settings-environment-filter", () => ({
 }));
 
 import {
+  SettingsBrowserRouteScreen,
   SettingsThreadsRouteScreen,
   SettingsWorktreesRouteScreen,
 } from "./SettingsServerControlsRouteScreen";
@@ -228,5 +229,26 @@ describe("SettingsServerControlsRouteScreen", () => {
       (button) => button.textContent === "Auto-settle merged threads",
     )!;
     expect(autoSettle.disabled).toBe(true);
+  });
+  it("writes browser access to the selected environment and respects read-only access", async () => {
+    act(() => root.render(<SettingsBrowserRouteScreen />));
+    const browser = [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')].find(
+      (button) => button.textContent === "Agent browser access",
+    )!;
+    expect(browser.disabled).toBe(false);
+    await act(async () => browser.click());
+    expect(mocks.updateSettings).toHaveBeenCalledWith({
+      environmentId: "local",
+      input: {
+        patch: { enableAgentBrowserAccess: !DEFAULT_SERVER_SETTINGS.enableAgentBrowserAccess },
+      },
+    });
+    mocks.readOnly = new Set(["local"]);
+    act(() => root.render(<SettingsBrowserRouteScreen key="readonly" />));
+    expect(
+      [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')].find(
+        (button) => button.textContent === "Agent browser access",
+      )!.disabled,
+    ).toBe(true);
   });
 });

@@ -1,3 +1,4 @@
+import { SidebarUsage } from "../usage/SidebarUsage";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -765,6 +766,11 @@ export function HomeScreen(props: HomeScreenProps) {
         >
           {v2ListEmpty}
         </View>
+        <SidebarUsage
+          bottomInset={
+            Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
+          }
+        />
       </View>
     );
   }
@@ -846,6 +852,11 @@ export function HomeScreen(props: HomeScreenProps) {
             />
           </GestureDetector>
         </SwipeableScrollGateProvider>
+        <SidebarUsage
+          bottomInset={
+            Platform.OS === "android" ? (workspace?.bottomClearance ?? insets.bottom) : 0
+          }
+        />
       </View>
     </View>
   );

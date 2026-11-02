@@ -267,6 +267,7 @@ function useSettingsIndexSections(): SettingsListSection[] {
       rows: [
         serverPage("SettingsProviderAccounts", "person.crop.circle", "Providers"),
         serverPage("SettingsThreads", "text.bubble", "Threads"),
+        serverPage("SettingsBrowser", "globe", "Browser"),
         page("SettingsScheduledTasks", "clock", "Scheduled tasks"),
         page(
           "SettingsHooks",

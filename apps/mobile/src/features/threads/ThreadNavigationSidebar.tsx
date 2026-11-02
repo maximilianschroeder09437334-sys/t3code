@@ -1,3 +1,4 @@
+import { SidebarUsage } from "../usage/SidebarUsage";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -772,6 +773,7 @@ function ThreadNavigationSidebarPane(
               />
             </GestureDetector>
           </SwipeableScrollGateProvider>
+          <SidebarUsage />
           <ThreadUndoNotice visible={props.visible} />
         </View>
       </>
@@ -846,6 +848,17 @@ function ThreadNavigationSidebarPane(
             </GestureDetector>
           </SwipeableScrollGateProvider>
         )}
+        <SidebarUsage
+          bottomInset={
+            Platform.OS === "android"
+              ? floatingTabsEnabled
+                ? FLOATING_TABS.bottom +
+                  FLOATING_TABS.edge +
+                  Math.max(floatingTabs.height, floatingTabs.fabOffset + fabSize)
+                : Math.max(insets.bottom, 16) + fabClearance - insets.bottom
+              : 0
+          }
+        />
       </View>
 
       {Platform.OS === "android" ? (

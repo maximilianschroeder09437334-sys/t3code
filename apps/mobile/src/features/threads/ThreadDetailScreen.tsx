@@ -137,7 +137,7 @@ import { deviceEnvironment } from "../../state/device";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadDevicePreviews } from "../devices/threadDevicePreviews";
 import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
-import { useThreadServerBrowserTabs } from "../../state/preview";
+import { previewEnvironment, useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import {
@@ -409,6 +409,31 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
       threadId: props.selectedThread.id,
       ...(tabId === undefined ? {} : { tabId }),
     });
+  };
+  const createBrowserTab = useAtomCommand(previewEnvironment.open, { reportFailure: false });
+  const canCreateBrowserTab = useAtomValue(
+    previewEnvironment.open.permissionAtom(props.environmentId),
+  );
+  const [openingBrowser, setOpeningBrowser] = useState(false);
+  const openOrCreateBrowser = async () => {
+    if (browserTabs.tabs.length > 0) {
+      openBrowserPreview();
+      return;
+    }
+    if (openingBrowser || !canCreateBrowserTab) return;
+    setOpeningBrowser(true);
+    await (async () => {
+      const result = await createBrowserTab({
+        environmentId: props.environmentId,
+        input: { threadId: props.selectedThread.id, runtime: "server" },
+      });
+      if (result._tag === "Success") openBrowserPreview(result.value.tabId);
+      else if (!isAtomCommandInterrupted(result))
+        Dialog.alert("Could not open the browser", "Check the connection and try again.");
+    })().catch(() => {
+      Dialog.alert("Could not open the browser", "Check the connection and try again.");
+    });
+    setOpeningBrowser(false);
   };
   const insets = useSafeAreaInsets();
   const isKeyboardVisible = useKeyboardState((state) => state.isVisible);
@@ -802,12 +827,16 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
     return null;
   })();
   const showWorkingControl = floatingStatus !== null;
+  const showBrowserControl =
+    !props.draftMode &&
+    props.serverConfig?.environment.capabilities.serverBrowser === true &&
+    (browserTabs.tabs.length > 0 || (browserTabs.loaded && canCreateBrowserTab));
   const showFloatingStatus =
     showWorkingControl ||
     queuedCount > 0 ||
     agentsSegment !== null ||
     devicePreviews.length > 0 ||
-    browserTabs.tabs.length > 0 ||
+    showBrowserControl ||
     props.connectionStateLabel !== "connected" ||
     props.queuedMessages.length > 0 ||
     props.selectedThreadFeed.some(
@@ -1481,8 +1510,11 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                         : null
                     }
                     browserPreview={
-                      browserTabs.tabs.length > 0
-                        ? { count: browserTabs.tabs.length, onPress: () => openBrowserPreview() }
+                      showBrowserControl
+                        ? {
+                            count: browserTabs.tabs.length,
+                            onPress: () => void openOrCreateBrowser(),
+                          }
                         : null
                     }
                     showScrollToEnd={showScrollToEndButton}
@@ -1536,6 +1568,16 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                     <ThreadSideChatsRow
                       environmentId={props.environmentId}
                       threadId={props.selectedThread.id}
+                      canCreate={
+                        props.canOperateThread &&
+                        props.creationState === null &&
+                        !props.worktreeSetup &&
+                        props.connectionStateLabel === "connected" &&
+                        props.serverConfig?.environment.capabilities.sideChats === true &&
+                        props.selectedThread.lineage.sideChat !== true &&
+                        props.selectedThread.lineage.relationshipToParent !== "subagent" &&
+                        !props.selectedThread.delegatedFrom
+                      }
                     />
                   )}
                   {props.feedbackSubmissions.map((submission) => (

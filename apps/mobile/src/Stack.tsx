@@ -103,6 +103,7 @@ import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnv
 import { SettingsFollowUpRouteScreen } from "./features/settings/SettingsFollowUpRouteScreen";
 import {
   SettingsEnvironmentMaintenanceRouteScreen,
+  SettingsBrowserRouteScreen,
   SettingsThreadsRouteScreen,
   SettingsWorktreesRouteScreen,
   SettingsEnvironmentSourceControlRouteScreen,
@@ -302,6 +303,11 @@ const SETTINGS_SCREENS = {
     screen: SettingsNotificationsRouteScreen,
     linking: "settings/notifications",
     options: { ...SETTINGS_PAGE_OPTIONS, title: "Notifications" },
+  }),
+  SettingsBrowser: createNativeStackScreen({
+    screen: SettingsBrowserRouteScreen,
+    linking: "settings/browser",
+    options: { ...SETTINGS_PAGE_OPTIONS, title: "Browser" },
   }),
   SettingsThreads: createNativeStackScreen({
     screen: SettingsThreadsRouteScreen,

@@ -43,10 +43,11 @@ import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 import { AutoSettleSettingsRows } from "./ThreadSettingsSections";
 import { supportsSharedSettingsSync } from "@t3tools/client-runtime/state/shared-settings";
 
-type SettingsPage = "threads" | "source-control" | "worktrees" | "maintenance";
+type SettingsPage = "threads" | "browser" | "source-control" | "worktrees" | "maintenance";
 
 const PAGE_TITLES: Record<SettingsPage, string> = {
   threads: "Threads",
+  browser: "Browser",
   "source-control": "Source control",
   worktrees: "Worktrees",
   maintenance: "Maintenance",
@@ -61,6 +62,7 @@ const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettin
     "sidebarAutoSettleOnMerge",
     "sidebarAutoSettleAfterDays",
   ],
+  browser: ["enableAgentBrowserAccess"],
   "source-control": ["defaultAutoPull", "removeAgentCreditsOnMerge"],
   worktrees: [
     "newWorktreesStartFromOrigin",
@@ -154,6 +156,10 @@ function planServerSettingsWrites(
       ? planMobileScopedSettingsPatch(others, projectSelected, othersPatch)
       : []),
   ];
+}
+
+export function SettingsBrowserRouteScreen() {
+  return <ServerSettingsDetail page="browser" />;
 }
 
 export function SettingsThreadsRouteScreen() {
@@ -378,6 +384,24 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                     />
                   </SettingsSection>
                   <AutoSettleSettingsRows write={write} pending={pendingWrites > 0} />
+                </>
+              ) : null}
+
+              {props.page === "browser" ? (
+                <>
+                  <SettingsSection title="Preview browser">
+                    <SettingsSwitchRow
+                      icon="globe"
+                      label="Agent browser access"
+                      subtitle="Allow agents to use the in-app preview browser."
+                      value={uniform("enableAgentBrowserAccess")}
+                      disabled={disabledFor("enableAgentBrowserAccess")}
+                      onValueChange={(value) => write({ enableAgentBrowserAccess: value })}
+                    />
+                  </SettingsSection>
+                  <Text className="px-2 text-base text-foreground-muted">
+                    Viewport, zoom and appearance are available in each browser tab.
+                  </Text>
                 </>
               ) : null}
 
