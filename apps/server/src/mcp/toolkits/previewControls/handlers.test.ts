@@ -62,6 +62,11 @@ it.effect.each([
         ),
       );
       const tab = yield* manager.open({ threadId, url: "http://localhost:3000" });
+      const otherThreadId = ThreadId.make("preview-controls-other-thread");
+      const otherTab = yield* manager.open({
+        threadId: otherThreadId,
+        url: "http://localhost:3001",
+      });
       const layerDependencies = Layer.mergeAll(
         PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer)),
         Layer.succeed(Preview.PreviewManager, manager),
@@ -84,12 +89,17 @@ it.effect.each([
       const closed = yield* toolkit
         .handle("t3_preview_close", { tabId: tab.tabId })
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      const attemptedOtherClose = yield* toolkit
+        .handle("t3_preview_close", { tabId: otherTab.tabId })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      expect((yield* manager.list({ threadId: otherThreadId })).sessions).toEqual([otherTab]);
       if (projectAccess) {
+        expect(attemptedOtherClose.at(-1)?.result).toEqual({});
         expect(listed.at(-1)?.result).toMatchObject({ sessions: [tab], nextCursor: null });
         expect(closed.at(-1)?.result).toEqual({});
         expect((yield* manager.list({ threadId })).sessions).toEqual([]);
       } else {
-        for (const result of [listed, closed]) {
+        for (const result of [listed, closed, attemptedOtherClose]) {
           expect(result.at(-1)?.result).toMatchObject({
             _tag: "PreviewAutomationUnavailableError",
             capability: "preview",

@@ -2752,6 +2752,12 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           request: { type: "provider-runtime.continue", sourceRunId: RunId.make("run:activation") },
         },
         {
+          id: "effect:activation-a-hook",
+          commandId,
+          threadId,
+          request: { type: "hook.continue", sourceRunId: RunId.make("run:hook-activation") },
+        },
+        {
           id: "effect:activation-b-cleanup",
           commandId,
           threadId,
@@ -2784,12 +2790,19 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         assert.equal(resumed.value.request.type, "provider-runtime.continue");
         yield* outbox.succeed({ effectId: resumed.value.id, workerId: "activated" });
       }
+      const hook = yield* outbox.claimNext({ workerId: "activated" });
+      assert.isTrue(Option.isSome(hook));
+      if (Option.isSome(hook)) {
+        assert.equal(hook.value.request.type, "hook.continue");
+        yield* outbox.succeed({ effectId: hook.value.id, workerId: "activated" });
+      }
     }),
   );
 
   it.effect.each([
     { type: "terminal.cleanup" },
     { type: "provider-runtime.continue", sourceRunId: RunId.make("run:restart-replay") },
+    { type: "hook.continue", sourceRunId: RunId.make("run:hook-replay") },
   ] as const)(
     "retires live provider effects and requeues $type after process loss",
     (replayRequest) =>

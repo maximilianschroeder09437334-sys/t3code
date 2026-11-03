@@ -27,6 +27,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -160,7 +161,7 @@ const PreviewActTool = browserTool(
       PreviewActionResult,
     ]),
     failure: PreviewToolFailure,
-    dependencies,
+    dependencies: [...dependencies, HookRegistry.HookRegistry],
   }).annotate(Tool.Title, "Act in preview page"),
 );
 

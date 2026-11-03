@@ -78,6 +78,7 @@ import {
 } from "../textGeneration/TextGenerationPresets.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as HookRegistry from "../hooks/HookRegistry.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
@@ -669,6 +670,7 @@ export const make = Effect.gen(function* () {
   const serverSettingsService = yield* ServerSettings.ServerSettingsService;
   const threads = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const hookRegistry = yield* Effect.serviceOption(HookRegistry.HookRegistry);
   const projectSettingsFor = Effect.fnUntraced(function* (input: {
     readonly cwd: string;
     readonly threadId?: ThreadId | undefined;
@@ -737,6 +739,45 @@ export const make = Effect.gen(function* () {
     cwd: string,
     branch: string | null,
   ) {
+    if (Option.isSome(hookRegistry)) {
+      const project = yield* projects.findActiveForHookWorkspace(cwd).pipe(
+        Effect.mapError(
+          (cause) =>
+            new GitManagerError({
+              operation: "before-github-push",
+              cwd,
+              detail: "Could not resolve the project hook scope before pushing.",
+              cause,
+            }),
+        ),
+      );
+      if (Option.isSome(project)) {
+        const decision = yield* hookRegistry.value
+          .runEvent({
+            projectId: project.value.projectId,
+            event: "before_github_push",
+            payload: { cwd, branch },
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new GitManagerError({
+                  operation: "before-github-push",
+                  cwd,
+                  detail: "An active pre-push hook could not run; the push was blocked.",
+                  cause,
+                }),
+            ),
+          );
+        if (!decision.allowed) {
+          return yield* new GitManagerError({
+            operation: "before-github-push",
+            cwd,
+            detail: decision.messages.join("\n") || "Blocked by an active pre-push hook.",
+          });
+        }
+      }
+    }
     const result = yield* gitCore.pushCurrentBranch(cwd, branch);
     if (result.status === "pushed" && result.branch) {
       yield* shareBranchBase(cwd, result.branch);

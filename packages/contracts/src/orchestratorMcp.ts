@@ -410,6 +410,10 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
   textOffset: Schema.optional(NonNegativeInt),
   view: Schema.optional(Schema.Literals(["messages", "activity"])),
   afterPosition: Schema.optional(NonNegativeInt),
+  latest: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Return the newest matching items in chronological order. Omit afterPosition and itemId; nextPosition can then be used to follow new items.",
+  }),
   limit: Schema.optional(clampedPositiveInt(100)).annotate({
     description: "Max items, 1 to 100.",
   }),

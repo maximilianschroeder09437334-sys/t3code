@@ -5921,6 +5921,48 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       });
       assert.deepEqual(followingPage.items, targetAfterRollback.visibleTurnItems.slice(2));
       assert.isFalse(followingPage.hasMore);
+      const latestMessages = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 2,
+        latest: true,
+      });
+      const expectedLatest = targetAfterRollback.visibleTurnItems
+        .filter(
+          (row) =>
+            row.item.type === "user_message" ||
+            row.item.type === "assistant_message" ||
+            row.item.type === "proposed_plan",
+        )
+        .slice(-2);
+      assert.deepEqual(latestMessages.items, expectedLatest);
+      assert.isFalse(latestMessages.hasMore);
+      const followingLatest = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 2,
+        afterPosition: latestMessages.items.at(-1)!.position,
+      });
+      assert.isEmpty(followingLatest.items);
+      const latestActivity = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "activity",
+        limit: 2,
+        latest: true,
+      });
+      assert.deepEqual(latestActivity.items, targetAfterRollback.visibleTurnItems.slice(-2));
+      const explicitCursor = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 1,
+        latest: true,
+        afterPosition: 1,
+      });
+      assert.deepEqual(explicitCursor.items, targetAfterRollback.visibleTurnItems.slice(2, 3));
+      assert.isTrue(explicitCursor.hasMore);
+      const shortHistory = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 100,
+        latest: true,
+      });
+      assert.lengthOf(shortHistory.items, 4);
+      assert.isFalse(shortHistory.hasMore);
 
       assert.deepEqual(
         targetAfterRollback.visibleTurnItems.map((row) => [

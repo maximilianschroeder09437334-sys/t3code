@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Record from "effect/Record";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PREVIEW_RECORDING_STOP_TIMEOUT_MS,
@@ -33,7 +34,38 @@ import * as ServerConfig from "../../../config.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import { assertLiveCaller, loadCaller } from "../../threadAccess.ts";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import { BrowserRecoveryTracker } from "./BrowserRecovery.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
+
+const browserRecovery = new BrowserRecoveryTracker();
+const browserActionLocks = new Map<
+  ThreadId,
+  { readonly semaphore: Semaphore.Semaphore; users: number }
+>();
+const withBrowserActionLock = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
+  Effect.suspend(() => {
+    let entry = browserActionLocks.get(threadId);
+    if (!entry) {
+      entry = { semaphore: Semaphore.makeUnsafe(1), users: 0 };
+      browserActionLocks.set(threadId, entry);
+    }
+    entry.users += 1;
+    const acquired = entry;
+    return acquired.semaphore
+      .withPermits(1)(effect)
+      .pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            acquired.users -= 1;
+            if (acquired.users === 0 && browserActionLocks.get(threadId) === acquired)
+              browserActionLocks.delete(threadId);
+          }),
+        ),
+      );
+  });
 
 /** Whether a preview the agent
  * said nothing about surfaces is the user's `browserAutoShowFloatingPreview`
@@ -192,8 +224,14 @@ const handlers = {
   preview_dialog: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("dialog", input),
   ),
-  preview_status: McpToolAccess.readsAsCaller((input) =>
-    invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
+  preview_status: McpToolAccess.readsAsCaller(
+    Effect.fn("PreviewToolkit.statusWithRecovery")(function* (input) {
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const generation = browserRecovery.generation(scope.thread.threadId);
+      const result = yield* invokeTargeted<PreviewAutomationStatus>("status", input ?? {});
+      browserRecovery.checkedStatus(scope.thread.threadId, generation);
+      return result;
+    }),
   ),
   preview_open: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
@@ -207,23 +245,72 @@ const handlers = {
   preview_set_appearance: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
   ),
-  preview_snapshot: McpToolAccess.readsAsCaller((input) => {
-    const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
-    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
-  }),
+  preview_snapshot: McpToolAccess.readsAsCaller(
+    Effect.fn("PreviewToolkit.snapshotWithRecovery")(function* (input) {
+      const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const generation = browserRecovery.generation(scope.thread.threadId);
+      const result = yield* invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
+      browserRecovery.checkedSnapshot(scope.thread.threadId, generation);
+      return result;
+    }),
+  ),
   preview_act: McpToolAccess.actsAsCaller(({ action, ...input }) =>
-    decodeActInput[action](input).pipe(
-      Effect.mapError(
-        (cause) => new OrchestratorMcpFailure({ code: "invalid_request", message: cause.message }),
-      ),
-      Effect.flatMap((decoded) =>
-        invokeTargeted<object>(
-          action,
-          decoded,
-          "timeoutMs" in decoded ? decoded.timeoutMs : undefined,
+    Effect.gen(function* () {
+      const decoded = yield* decodeActInput[action](input).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorMcpFailure({ code: "invalid_request", message: cause.message }),
         ),
-      ),
-    ),
+      );
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const threadId = scope.thread.threadId;
+      return yield* withBrowserActionLock(
+        threadId,
+        Effect.gen(function* () {
+          const threads = yield* ThreadManagementService.ThreadManagementService;
+          const projection = yield* threads.getThreadRecords(threadId, []).pipe(
+            Effect.mapError(
+              () =>
+                new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: "Could not load this thread's browser safeguard.",
+                }),
+            ),
+          );
+          const hooks = yield* HookRegistry.HookRegistry;
+          const decision = yield* hooks
+            .runEvent({
+              projectId: projection.thread.projectId,
+              event: "before_browser_action",
+              payload: { threadId, action, ...browserRecovery.state(threadId) },
+            })
+            .pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message: "The browser safeguard could not run.",
+                  }),
+              ),
+            );
+          if (!decision.allowed)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: decision.messages.join("\n") || "A browser safeguard blocked this action.",
+            });
+          yield* loadCaller().pipe(Effect.tap(assertLiveCaller));
+          const generation = browserRecovery.generation(threadId);
+          const result = yield* invokeTargeted<object>(
+            action,
+            decoded,
+            "timeoutMs" in decoded ? decoded.timeoutMs : undefined,
+          ).pipe(Effect.tapError(() => Effect.sync(() => browserRecovery.failed(threadId))));
+          browserRecovery.succeeded(threadId, generation);
+          return result;
+        }),
+      );
+    }),
   ),
   preview_evaluate: McpToolAccess.actsAsCaller(({ tabId, ...input }) =>
     invoke<unknown>("evaluate", input, undefined, tabId).pipe(

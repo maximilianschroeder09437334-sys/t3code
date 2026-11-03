@@ -6,10 +6,13 @@ import {
   EnvironmentId,
   ProjectId,
   ThreadId,
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   ProviderDriverKind,
   ProviderInstanceId,
   WS_METHODS,
   WsServerRefreshProvidersRpc,
+  WsRpcGroup,
   WsSubscribeServerConfigRpc,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadShell,
@@ -28,6 +31,8 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { Headers } from "effect/http";
 import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
+import * as RpcTest from "effect/rpc/RpcTest";
+import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -101,6 +106,7 @@ import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as HookRegistry from "./hooks/HookRegistry.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
@@ -110,6 +116,7 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfigModule from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import { liveThreadShell } from "./mcp/McpToolAccess.testkit.ts";
 
 import * as EventStore from "./orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
@@ -491,12 +498,14 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(AgentSessionImporter.AgentSessionImporter)({}),
   Layer.mock(AgentSessionScanner.AgentSessionScanner)({}),
   Layer.mock(AnalyticsService.AnalyticsService)({}),
+  Layer.mock(ExternalLauncher.ExternalLauncher)({}),
   Layer.mock(AntigravityInstallation.AntigravityInstallation)({ managedDirectory: "/unused" }),
   Layer.mock(BackgroundPolicy.BackgroundPolicy)({}),
   Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({}),
   Layer.mock(CommandOutputHub.CommandOutputHub)({}),
   Layer.mock(CodexInstallation.CodexInstallation)({ managedDirectory: "/unused" }),
   Layer.mock(DeviceService.DeviceService)({}),
+  Layer.mock(DirectEndpoints.DirectEndpoints)({}),
   Layer.mock(EnvironmentTheme.EnvironmentThemeService)({}),
   Layer.mock(GitWorkflowService.GitWorkflowService)({}),
   Layer.mock(HostResources.HostResources)({}),
@@ -513,10 +522,13 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ProcessDiagnostics.ProcessDiagnostics)({}),
   Layer.mock(ProcessResourceMonitor.ProcessResourceMonitor)({}),
   Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
+  Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: process.cwd() }),
+  Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
   Layer.mock(ProjectService.ProjectService)({}),
   Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
   Layer.mock(ProjectStore.ProjectStoreV2)({}),
   Layer.mock(ProviderAuthService.ProviderAuthService)({}),
+  Layer.mock(ProviderRegistry.ProviderRegistry)({}),
   Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({}),
   Layer.mock(ProviderLatestVersions.ProviderLatestVersions)({}),
   Layer.mock(ProviderMaintenanceRunner.ProviderMaintenanceRunner)({}),
@@ -527,8 +539,11 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(RelayClient.RelayClient)({}),
   Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
   Layer.mock(ResourceTelemetry.ResourceTelemetry)({}),
+  Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
   Layer.mock(ReviewService.ReviewService)({}),
   Layer.mock(ScheduledTasks.ScheduledTaskService)({}),
+  Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+  Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
   Layer.mock(SecretRequests.SecretRequests)({}),
   Layer.mock(SecretResolver.SecretResolver)({}),
   Layer.mock(GuestShareService.GuestShareService)({}),
@@ -549,12 +564,14 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(UsageService.UsageService)({}),
   Layer.mock(VcsProvisioningService.VcsProvisioningService)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+  Layer.mock(UsageLimitSources.UsageLimitSources)({}),
   Layer.mock(WorkspaceEntries.WorkspaceEntries)({}),
   Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({}),
   Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
 );
 
 const layerConfigSources = Layer.mergeAll(
+  Layer.mock(HookRegistry.HookRegistry)({}),
   Keybindings.layer,
   ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer)),
 ).pipe(
@@ -565,6 +582,116 @@ const layerConfigSources = Layer.mergeAll(
     ),
   ),
   Layer.provideMerge(NodeServices.layer),
+);
+
+it.effect("serves thread notes through the typed WebSocket RPC handlers", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:notes-rpc-test");
+    const thread = liveThreadShell(threadId);
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: (id) => Effect.succeed(id === threadId ? thread : null),
+      }),
+    );
+    const browser = yield* ServerBrowser.ServerBrowser;
+    const rpcLayer = layerWsRpc(
+      {
+        sessionId: AuthSessionId.make("thread-notes-rpc-test"),
+        subject: "test",
+        method: "browser-session-cookie",
+        scopes: [AuthOrchestrationOperateScope, AuthOrchestrationReadScope],
+      },
+      {},
+      browser,
+      () => Effect.void,
+    ).pipe(Layer.provide(services));
+    const saveHandler = yield* WsRpcGroup.accessHandler(WS_METHODS.threadNotesSave).pipe(
+      Effect.provide(rpcLayer),
+    );
+    const readHandler = yield* WsRpcGroup.accessHandler(WS_METHODS.threadNotesRead).pipe(
+      Effect.provide(rpcLayer),
+    );
+    const deleteHandler = yield* WsRpcGroup.accessHandler(WS_METHODS.threadNotesDelete).pipe(
+      Effect.provide(rpcLayer),
+    );
+    const noteMethods = [
+      WS_METHODS.threadNotesRead,
+      WS_METHODS.threadNotesSave,
+      WS_METHODS.threadNotesDelete,
+    ] as const;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
+          (typeof noteMethods)[number]
+        > => !(noteMethods as ReadonlyArray<string>).includes(tag),
+      ),
+    );
+    const handlers = Layer.mergeAll(
+      group.toLayerHandler(WS_METHODS.threadNotesRead, (payload, context) =>
+        readHandler(payload, context),
+      ),
+      group.toLayerHandler(WS_METHODS.threadNotesSave, (payload, context) =>
+        saveHandler(payload, context),
+      ),
+      group.toLayerHandler(WS_METHODS.threadNotesDelete, (payload, context) =>
+        deleteHandler(payload, context),
+      ),
+    );
+    const makeClient = (scopes: ReadonlyArray<string>) =>
+      RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(
+            handlers,
+            RpcAuthorization.layer(scopes as never),
+          ),
+        ),
+      );
+    const client = yield* makeClient([
+      AuthOrchestrationOperateScope,
+      AuthOrchestrationReadScope,
+    ]);
+    yield* client[WS_METHODS.threadNotesSave]({
+      threadId,
+      requestId: "durable",
+      content: "Keep the API stable.",
+      attachments: [],
+    });
+    const saved = yield* client[WS_METHODS.threadNotesRead]({ threadId });
+    assert.equal(saved.threadId, threadId);
+    assert.equal(saved.notes[0]?.requestId, "durable");
+    assert.equal(saved.notes[0]?.content, "Keep the API stable.");
+    assert.equal(saved.truncated, false);
+    yield* client[WS_METHODS.threadNotesDelete]({ threadId, requestId: "durable" });
+    assert.deepEqual(yield* client[WS_METHODS.threadNotesRead]({ threadId }), {
+      threadId,
+      notes: [],
+      truncated: false,
+    });
+    const readOnlyClient = yield* makeClient([AuthOrchestrationReadScope]);
+    yield* readOnlyClient[WS_METHODS.threadNotesSave]({
+      threadId,
+      requestId: "denied",
+      content: "Should not persist.",
+      attachments: [],
+    }).pipe(Effect.flip);
+    assert.deepEqual(yield* client[WS_METHODS.threadNotesRead]({ threadId }), {
+      threadId,
+      notes: [],
+      truncated: false,
+    });
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+  ),
 );
 
 it.effect(
@@ -977,5 +1104,89 @@ it.effect("thread resume across compacted history keeps message order and final 
         Layer.provideMerge(ReplayTestLayer),
       ),
     ),
+  ),
+);
+
+it.effect("direct project writes give hooks the same path field as staged writes", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:write-hook-test");
+    const seen: Array<unknown> = [];
+    const written: Array<string> = [];
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ProjectStore.ProjectStoreV2)({
+        findActiveForHookWorkspace: () => Effect.succeedSome({ projectId } as never),
+      }),
+      Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({
+        writeFile: (input) =>
+          Effect.sync(() => {
+            written.push(input.relativePath);
+            return { relativePath: input.relativePath };
+          }),
+      }),
+      Layer.mock(HookRegistry.HookRegistry)({
+        runEvent: (input) =>
+          Effect.sync(() => {
+            seen.push(input);
+            const payload = input.payload as { path?: string };
+            return payload.path === "protected.ts"
+              ? { allowed: false, messages: ["Protected"] }
+              : { allowed: true, messages: [] };
+          }),
+      }),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: process.cwd() }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+    );
+    const handler = yield* WsRpcGroup.accessHandler(WS_METHODS.projectsWriteFile).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("write-hook-test"),
+            subject: "test",
+            method: "browser-session-cookie",
+            scopes: [],
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
+        ).pipe(Layer.provide(services)),
+      ),
+    );
+    const call = (relativePath: string) =>
+      handler(
+        { cwd: "C:/fixture", relativePath, contents: "example" },
+        {
+          client: { id: 0 } as never,
+          requestId: RpcMessage.RequestId("write"),
+          headers: Headers.empty,
+        },
+      );
+    yield* call("protected.ts").pipe(Effect.flip);
+    assert.deepEqual(written, []);
+    yield* call("allowed.ts");
+    assert.deepEqual(written, ["allowed.ts"]);
+    assert.deepEqual(
+      seen.map((entry) => (entry as { payload: unknown }).payload),
+      [
+        { cwd: "C:/fixture", relativePath: "protected.ts", path: "protected.ts", byteLength: 7 },
+        { cwd: "C:/fixture", relativePath: "allowed.ts", path: "allowed.ts", byteLength: 7 },
+      ],
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
   ),
 );

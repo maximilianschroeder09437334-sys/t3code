@@ -345,6 +345,25 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
     yield* client[WS_METHODS.assetsCreateUrl]({
       resource: { _tag: "attachment", attachmentId: "image" },
     });
+    const unauthorized = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.merge(
+          group.toLayerHandler(WS_METHODS.assetsCreateUrl, () =>
+            Effect.sync(() => {
+              handled++;
+              return { relativeUrl: "/api/assets/unauthorized", expiresAt: 1 };
+            }),
+          ),
+          RpcAuthorization.layer([]),
+        ),
+      ),
+    );
+    expect(
+      yield* unauthorized[WS_METHODS.assetsCreateUrl](
+        { resource: { _tag: "attachment", attachmentId: "image" } },
+      ).pipe(Effect.flip),
+    ).toMatchObject({ requiredScope: AuthOrchestrationReadScope });
+    expect(handled).toBe(1);
     for (const resource of [
       { _tag: "workspace-file", threadId: ThreadId.make("thread"), path: "file.txt" },
       { _tag: "media-file", threadId: ThreadId.make("thread"), path: "/repo/image.png" },

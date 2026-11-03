@@ -31,6 +31,8 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as HookRegistry from "../hooks/HookRegistry.ts";
+import * as HookStagingManager from "../hooks/HookStagingManager.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
@@ -127,6 +129,23 @@ export class ProviderTurnStartServiceV2 extends Context.Service<
   ProviderTurnStartServiceV2Shape
 >()("t3/orchestration-v2/ProviderTurnStartService/ProviderTurnStartServiceV2") {}
 
+/** Optional at the service layer so orchestration tests and alternate runtimes can omit hooks. */
+export class ProviderTurnStartHooks extends Context.Reference<
+  Pick<HookRegistry.HookRegistry["Service"], "runEvent">
+>("t3/orchestration-v2/ProviderTurnStartService/ProviderTurnStartHooks", {
+  defaultValue: () => ({
+    runEvent: () => Effect.succeed({ allowed: true, messages: [] }),
+  }),
+}) {}
+
+export const layerProviderTurnStartHooks = Layer.effect(
+  ProviderTurnStartHooks,
+  Effect.gen(function* () {
+    const hooks = yield* HookRegistry.HookRegistry;
+    return ProviderTurnStartHooks.of({ runEvent: hooks.runEvent });
+  }),
+);
+
 export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   never,
@@ -159,6 +178,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const hooks = yield* ProviderTurnStartHooks;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
     const resolveRecreateBase = Effect.fn("ProviderTurnStartService.resolveRecreateBase")(
@@ -700,6 +720,138 @@ export const layer: Layer.Layer<
         modelSelection: run.modelSelection,
       });
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
+      const turnStartDecision = yield* hooks.runEvent({
+        projectId: projection.thread.projectId,
+        event: "before_provider_turn_start",
+        payload: {
+          threadId: projection.thread.id,
+          runId,
+          providerInstanceId: run.modelSelection.instanceId,
+          runtimeMode: resolvedRuntimePolicy.runtimeMode,
+          interactionMode: resolvedRuntimePolicy.interactionMode,
+          cwd: resolvedRuntimePolicy.cwd,
+        },
+      });
+      const providerRuntimePolicy = resolvedRuntimePolicy;
+      const requiresManagedWorktree = turnStartDecision.enforcement === "managed-worktree";
+      const managedWorktree =
+        requiresManagedWorktree &&
+        projection.thread.worktreePath !== null &&
+        projection.thread.worktreePath === resolvedRuntimePolicy.cwd &&
+        (yield* isManagedWorktreePath(projection.thread.worktreePath));
+      const providerSupportsStagedWrites = providerThread.driver === "codex";
+      if (!turnStartDecision.allowed || (requiresManagedWorktree && !managedWorktree)) {
+        const message = turnStartDecision.allowed
+          ? "This hook requires a T3-managed worktree. Start this thread in a managed worktree before continuing."
+          : turnStartDecision.messages.join("\n") || "Blocked by an active hook.";
+        yield* settleStartFailure({
+          signal: "hook-blocked-provider-start",
+          title: "Provider start blocked by a project hook",
+          error: new Error(message),
+          message,
+        });
+        return;
+      }
+      if (requiresManagedWorktree && !providerSupportsStagedWrites) {
+        yield* settleStartFailure({
+          signal: "hook-blocked-provider-start",
+          title: "Provider cannot enforce the managed worktree boundary",
+          error: new Error(
+            `Provider '${providerThread.driver}' has no verified managed-worktree enforcement.`,
+          ),
+          message: `This hook's managed-worktree boundary is supported only for Codex in this version. Choose Codex or disable the boundary hook.`,
+        });
+        return;
+      }
+      if (requiresManagedWorktree && resolvedRuntimePolicy.runtimeMode !== "approval-required") {
+        const message =
+          `This hook requires read-only staged writes, but this thread uses '${resolvedRuntimePolicy.runtimeMode}'. ` +
+          "Change the thread to Approval Required or disable the hook before continuing.";
+        yield* settleStartFailure({
+          signal: "hook-permission-mode-conflict",
+          title: "The selected permission mode conflicts with a project hook",
+          error: new Error(message),
+          message,
+        });
+        return;
+      }
+      if (run.hookStageWorkspaceRoot !== undefined && !providerSupportsStagedWrites) {
+        const message =
+          "This provider cannot resume the staged files; they were retained in the original workspace.";
+        yield* settleStartFailure({
+          signal: "hook-staging-prepare-failed",
+          title: "Hook staging could not be resumed",
+          error: new Error(message),
+          message,
+        });
+        return;
+      }
+      if (providerSupportsStagedWrites) {
+        const workspaceRoot = resolvedRuntimePolicy.cwd;
+        if (
+          run.hookStageWorkspaceRoot !== undefined &&
+          (workspaceRoot === null ||
+            !HookStagingManager.sameHookWorkspace(workspaceRoot, run.hookStageWorkspaceRoot))
+        ) {
+          const message =
+            "The workspace changed after the previous turn; staged files were retained and continuation was stopped.";
+          yield* settleStartFailure({
+            signal: "hook-staging-prepare-failed",
+            title: "Hook staging could not be resumed",
+            error: new Error(message),
+            message,
+          });
+          return;
+        }
+        if (workspaceRoot === null) {
+          if (requiresManagedWorktree) {
+            const message = "This hook requires staged writes, but no workspace could be resolved.";
+            yield* settleStartFailure({
+              signal: "hook-staging-prepare-failed",
+              title: "Hook staging could not be prepared",
+              error: new Error(message),
+              message,
+            });
+            return;
+          }
+        } else {
+          const stageSession = HookStagingManager.makeHookStageSession({
+            workspaceRoot,
+            threadId: projection.thread.id,
+            runId,
+            ...(run.hookStageOriginRunId === undefined
+              ? {}
+              : { stageOriginRunId: run.hookStageOriginRunId }),
+          });
+          const stageResult = yield* Effect.result(
+            Effect.tryPromise({
+              try: () => HookStagingManager.prepareHookStage(stageSession),
+              catch: (cause) =>
+                new HookStagingManager.HookStagingError({
+                  message: "The per-run staging directory could not be prepared.",
+                  cause,
+                }),
+            }),
+          );
+          if (stageResult._tag === "Failure") {
+            if (requiresManagedWorktree || run.hookStageWorkspaceRoot !== undefined) {
+              const message =
+                "The hook staging folder could not be prepared; provider start was blocked.";
+              yield* settleStartFailure({
+                signal: "hook-staging-prepare-failed",
+                title: "Hook staging could not be prepared",
+                error: stageResult.failure,
+                message,
+              });
+              return;
+            }
+            yield* Effect.logWarning(
+              "Codex will continue without optional hook staging for this run",
+              { threadId: projection.thread.id, runId, cause: stageResult.failure },
+            );
+          }
+        }
+      }
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
@@ -773,7 +925,7 @@ export const layer: Layer.Layer<
           threadId: projection.thread.id,
           providerSessionId,
           modelSelection: run.modelSelection,
-          runtimePolicy: resolvedRuntimePolicy,
+          runtimePolicy: providerRuntimePolicy,
           ...(existingSessionProjection === undefined
             ? {}
             : { resumeFromSession: existingSessionProjection }),
@@ -1131,7 +1283,7 @@ export const layer: Layer.Layer<
                 sourceProviderTurns: sourceProjection.providerTurns,
                 targetThreadId: projection.thread.id,
                 modelSelection: run.modelSelection,
-                runtimePolicy: resolvedRuntimePolicy,
+                runtimePolicy: providerRuntimePolicy,
                 ...(sourceProviderTurn === undefined
                   ? {}
                   : { providerTurnId: sourceProviderTurn.id }),
@@ -1166,7 +1318,7 @@ export const layer: Layer.Layer<
               threadId: projection.thread.id,
               title: projection.thread.title,
               modelSelection: run.modelSelection,
-              runtimePolicy: resolvedRuntimePolicy,
+              runtimePolicy: providerRuntimePolicy,
               providerSessionId,
               existingProviderThread: { ...providerThread, forkedFrom: null },
             }),
@@ -1212,7 +1364,7 @@ export const layer: Layer.Layer<
               threadId: projection.thread.id,
               title: projection.thread.title,
               modelSelection: run.modelSelection,
-              runtimePolicy: resolvedRuntimePolicy,
+              runtimePolicy: providerRuntimePolicy,
               providerSessionId,
               existingProviderThread: providerThread,
             }),
@@ -1239,7 +1391,7 @@ export const layer: Layer.Layer<
                 providerThread,
                 threadId: projection.thread.id,
                 modelSelection: run.modelSelection,
-                runtimePolicy: resolvedRuntimePolicy,
+                runtimePolicy: providerRuntimePolicy,
               }),
         );
         if (resumed._tag === "Success") {
@@ -1314,7 +1466,7 @@ export const layer: Layer.Layer<
             threadId: projection.thread.id,
             title: projection.thread.title,
             modelSelection: run.modelSelection,
-            runtimePolicy: resolvedRuntimePolicy,
+            runtimePolicy: providerRuntimePolicy,
             providerSessionId,
             // Clear the native ref to force a fresh session while preserving row identity.
             existingProviderThread: { ...providerThread, nativeThreadRef: null },
@@ -1679,7 +1831,7 @@ export const layer: Layer.Layer<
             : { senderThreadId: message.senderThreadId }),
         },
         modelSelection: run.modelSelection,
-        runtimePolicy: resolvedRuntimePolicy,
+        runtimePolicy: providerRuntimePolicy,
       });
     });
 

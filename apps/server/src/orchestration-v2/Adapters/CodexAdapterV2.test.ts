@@ -73,6 +73,7 @@ import { resolveProviderCompatibility } from "../../provider/providerCompatibili
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
+import { makeHookStageSession } from "../../hooks/HookStagingManager.ts";
 
 const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerReplayTranscript);
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
@@ -82,6 +83,51 @@ const isProviderAdapterEventStreamError = Schema.is(
   ProviderAdapter.ProviderAdapterEventStreamError,
 );
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+
+// Integrated replays pass through staging; direct adapter replays keep their supplied policy.
+function withStagedRuntimePolicy(
+  transcript: CodexReplay.CodexAppServerReplayTranscript,
+  workspaceRoot: string,
+  threadId: string,
+): CodexReplay.CodexAppServerReplayTranscript {
+  const session = makeHookStageSession({
+    workspaceRoot,
+    threadId,
+    runId: `run:thread:${threadId}:ordinal:1`,
+  });
+  const windows = process.platform === "win32";
+  return {
+    ...transcript,
+    entries: transcript.entries.map((entry) => {
+      if (
+        entry.type !== "expect_outbound" ||
+        !Predicate.isObject(entry.frame) ||
+        entry.frame.method !== "turn/start" ||
+        !Predicate.isObject(entry.frame.params)
+      )
+        return entry;
+      return {
+        ...entry,
+        frame: {
+          ...entry.frame,
+          params: {
+            ...entry.frame.params,
+            cwd: windows ? workspaceRoot : session.newRoot,
+            approvalPolicy: "never",
+            sandboxPolicy: windows
+              ? { type: "dangerFullAccess" }
+              : {
+                  type: "workspaceWrite",
+                  excludeSlashTmp: true,
+                  excludeTmpdirEnvVar: true,
+                  networkAccess: false,
+                },
+          },
+        },
+      };
+    }),
+  };
+}
 
 describe("CodexAdapterV2 context usage", () => {
   it("uses the current context rather than cumulative processed tokens", () => {
@@ -219,6 +265,63 @@ describe("CodexAdapterV2 runtime policy", () => {
       assert.equal(fullAccess.approvalPolicy, "never");
       assert.equal(fullAccess.approvalsReviewer, "user");
       assert.equal(fullAccess.sandboxPolicy?.type, "dangerFullAccess");
+    }),
+  );
+
+  it.effect("preserves explicitly resolved Codex workspace-write settings", () =>
+    Effect.gen(function* () {
+      const stagePath = "/projects/demo/backups/T3 Code/staging/T3Hooks/run/new";
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-managed-worktree",
+        codexInput: [{ type: "text", text: "test" }],
+        runtimePolicy: {
+          runtimeMode: "auto-accept-edits",
+          interactionMode: "default",
+          cwd: stagePath,
+          approvalPolicy: "on-request",
+          sandboxPolicy: {
+            type: "workspaceWrite",
+            excludeSlashTmp: true,
+            excludeTmpdirEnvVar: true,
+            networkAccess: false,
+          },
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+      });
+
+      assert.equal(params.cwd, stagePath);
+      assert.equal(params.approvalPolicy, "on-request");
+      assert.deepEqual(params.sandboxPolicy, {
+        type: "workspaceWrite",
+        excludeSlashTmp: true,
+        excludeTmpdirEnvVar: true,
+        networkAccess: false,
+      });
+    }),
+  );
+
+  it.effect("preserves the Approval Required policy", () =>
+    Effect.gen(function* () {
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-read-only-staging",
+        codexInput: [{ type: "text", text: "test" }],
+        runtimePolicy: {
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: "/projects/demo",
+          approvalPolicy: "untrusted",
+          sandboxPolicy: { type: "readOnly" },
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+      });
+      assert.equal(params.approvalPolicy, "untrusted");
+      assert.deepEqual(params.sandboxPolicy, { type: "readOnly" });
     }),
   );
 
@@ -644,7 +747,7 @@ function codexReplayPreamble(input: {
             name: null,
             turns: [],
           },
-          model: "gpt-5.4",
+          model: "gpt-6-luna",
           modelProvider: "openai",
           serviceTier: null,
           cwd: "/workspace",
@@ -1516,6 +1619,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             "mcp_servers.t3-code": {
               url: "http://127.0.0.1:43123/mcp",
               tool_timeout_sec: 3_900,
+              ...CodexAdapterV2.codexT3McpToolOverrides(CODEX_TEST_RUNTIME_POLICY),
               http_headers: { Authorization: "Bearer secret-codex-token" },
             },
           },
@@ -1527,6 +1631,89 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
+  );
+
+  it.effect("defers T3's tool schemas only for its supported search model", () =>
+    Effect.sync(() => {
+      assert.deepEqual(CodexAdapterV2.codexT3McpExposureForModel("gpt-6-luna"), {
+        omit_tools_from: ["direct"],
+      });
+      assert.deepEqual(CodexAdapterV2.codexT3McpExposureForModel("gpt-5.4"), {});
+      assert.deepEqual(CodexAdapterV2.codexT3McpExposureForModel(undefined), {});
+    }),
+  );
+
+  it.effect("approves scoped T3 controls only in Full Access", () =>
+    Effect.sync(() => {
+      const fullAccess = CodexAdapterV2.codexT3McpToolOverrides({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: "/workspace",
+      });
+      assert.equal(fullAccess.tools?.t3_thread_read?.approval_mode, "approve");
+      assert.equal(fullAccess.tools?.t3_thread_send?.approval_mode, "approve");
+      assert.equal(fullAccess.tools?.delegate_task?.approval_mode, "approve");
+      assert.equal(fullAccess.tools?.preview_act?.approval_mode, "approve");
+      assert.equal(fullAccess.tools?.t3_hook_stage_file?.approval_mode, "approve");
+      for (const toolName of [
+        "create_threads",
+        "t3_thread_launch",
+        "t3_project_list",
+        "t3_project_read",
+        "t3_thread_list",
+        "t3_thread_search",
+        "t3_thread_read",
+        "t3_thread_send",
+        "t3_thread_wait",
+        "t3_thread_interrupt",
+        "task_cancel",
+        "t3_preview_list",
+        "t3_preview_close",
+        "preview_open",
+        "preview_navigate",
+        "preview_snapshot",
+        "preview_act",
+        "preview_evaluate",
+      ])
+        assert.isTrue(Object.hasOwn(fullAccess.tools ?? {}, toolName), toolName);
+      for (const toolName of [
+        "t3_project_delete",
+        "t3_environment_unlink",
+        "t3_environment_preferences_update",
+        "request_secret",
+      ])
+        assert.isFalse(Object.hasOwn(fullAccess.tools ?? {}, toolName), toolName);
+      assert.deepEqual(
+        CodexAdapterV2.codexT3McpToolOverrides({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: "/workspace",
+          approvalPolicy: "untrusted",
+          sandboxPolicy: { type: "readOnly" },
+        }),
+        { tools: {} },
+      );
+      assert.deepEqual(
+        CodexAdapterV2.codexT3McpToolOverrides({
+          runtimeMode: "auto-accept-edits",
+          interactionMode: "default",
+          cwd: "/workspace",
+          approvalPolicy: "on-request",
+          sandboxPolicy: { type: "workspaceWrite" },
+        }),
+        { tools: {} },
+      );
+      assert.deepEqual(
+        CodexAdapterV2.codexT3McpToolOverrides({
+          runtimeMode: "auto",
+          interactionMode: "default",
+          cwd: "/workspace",
+          approvalPolicy: "on-request",
+          sandboxPolicy: { type: "workspaceWrite" },
+        }),
+        { tools: {} },
+      );
+    }),
   );
 
   // regression: #15839 launch-arg MCP servers survive the thread's t3-code server
@@ -2885,10 +3072,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         if (outcome === "recover") {
           const fs = yield* FileSystem.FileSystem;
           const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-capacity-retry-" });
-          const localTranscript = yield* decodeReplayTranscriptJson(
+          const localizedTranscript = yield* decodeReplayTranscriptJson(
             (yield* encodeReplayTranscriptJson(
               makeCodexReplayTranscript({ scenario, entries }),
             )).replaceAll(yield* encodeStringJson("/workspace"), yield* encodeStringJson(cwd)),
+          );
+          const localTranscript = withStagedRuntimePolicy(
+            localizedTranscript,
+            cwd,
+            "thread:capacity-retry",
           );
           const driver = yield* CodexReplay.makeReplayDriver(localTranscript);
           yield* Effect.gen(function* () {
@@ -2932,6 +3124,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               dispatchMode: { type: "start_immediately" },
             });
             yield* worker.drain();
+            assert.isNull((yield* Ref.get(driver.state)).failure);
             yield* Fiber.join(retrying);
             assert.equal(
               (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)?.status,
@@ -2945,6 +3138,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               Effect.forkChild({ startImmediately: true }),
             );
             yield* TestClock.adjust("2 seconds");
+            assert.isNull((yield* Ref.get(driver.state)).failure);
             yield* Fiber.join(completed);
             yield* worker.drain();
             const projection = yield* orchestrator.getThreadProjection(threadId);
@@ -3120,6 +3314,25 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isAtLeast(recoveredIndex, 0);
         assert.isAbove(resumedCommandIndex, recoveredIndex);
         assert.isAbove(terminalIndex, resumedCommandIndex);
+        const resumedCommand = harness.events[resumedCommandIndex];
+        assert.equal(
+          resumedCommand?.type === "turn_item.updated" &&
+            resumedCommand.turnItem.type === "command_execution"
+            ? resumedCommand.turnItem.reportedCwd
+            : undefined,
+          "/workspace",
+        );
+        const completedCommand = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "command_execution" &&
+          event.turnItem.input === "pwd" &&
+          event.turnItem.status === "completed"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.lengthOf(completedCommand, 1);
+        assert.equal(completedCommand[0]?.reportedCwd, "/workspace");
+        assert.equal(completedCommand[0]?.exitCode, 0);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -4046,11 +4259,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-bg-stop-workspace-" });
-        const localTranscript = yield* decodeReplayTranscriptJson(
+        const localizedTranscript = yield* decodeReplayTranscriptJson(
           (yield* encodeReplayTranscriptJson(transcript)).replaceAll(
             yield* encodeStringJson("/workspace"),
             yield* encodeStringJson(cwd),
           ),
+        );
+        const localTranscript = withStagedRuntimePolicy(
+          localizedTranscript,
+          cwd,
+          "thread:background-stop",
         );
         const replayDriver = yield* CodexReplay.makeReplayDriver(localTranscript);
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -4180,12 +4398,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             { type: "runtime_exit", status: "success" },
           ],
         });
-        const localTranscript = yield* decodeReplayTranscriptJson(
+        const localizedTranscript = yield* decodeReplayTranscriptJson(
           (yield* encodeReplayTranscriptJson(staleTranscript)).replaceAll(
             yield* encodeStringJson("/workspace"),
             yield* encodeStringJson(cwd),
           ),
         );
+        const localTranscript = withStagedRuntimePolicy(
+          localizedTranscript,
+          cwd,
+          "thread:background-stop-untracked",
+        );
+        const replayDriver = yield* CodexReplay.makeReplayDriver(localTranscript);
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         for (const args of [
           ["init", "--quiet"],
@@ -4242,6 +4466,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             dispatchMode: { type: "start_immediately" },
           });
           yield* worker.drain();
+          assert.isNull((yield* Ref.get(replayDriver.state)).failure);
           yield* Fiber.join(settled);
           yield* worker.drain();
           const before = yield* orchestrator.getThreadShell(threadId);
@@ -4275,7 +4500,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           Effect.provide(
             ProviderReplayHarness.layerWithRegistry(
               { name: "codex-background-stop-untracked", runtimePolicyOverride: { cwd } },
-              CodexAdapterV2Testkit.layer({ transcript: localTranscript }),
+              CodexAdapterV2Testkit.layer({ transcript: localTranscript, driver: replayDriver }),
               { runEffectWorker: false },
             ),
           ),
@@ -5625,6 +5850,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.lengthOf(completedRows, 1);
 
         assert.equal(item.type, "dynamic_tool");
+        assert.equal(
+          item.type === "dynamic_tool" ? item.providerSessionId : undefined,
+          harness.providerThread.providerSessionId,
+        );
         const output = item.type === "dynamic_tool" ? (item.output as Record<string, unknown>) : {};
         const reference = readMcpAppReference(output[MCP_APP_OUTPUT_KEY]);
         assert.deepEqual(

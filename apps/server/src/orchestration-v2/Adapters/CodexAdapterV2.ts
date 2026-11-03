@@ -1189,6 +1189,7 @@ function codexRetryTurnItem(
 interface TrackedRunningCommandItem {
   readonly id: string;
   readonly command: string;
+  readonly reportedCwd: string;
   readonly aggregatedOutput?: string;
   readonly processId?: string;
 }
@@ -1332,6 +1333,58 @@ export const CODEX_THREAD_CONFIG = {
 
 // T3 waits can block for an hour; keep Codex's MCP timeout above that.
 const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
+const CODEX_T3_FULL_ACCESS_TOOLS = {
+  delegate_task: { approval_mode: "approve" },
+  task_status: { approval_mode: "approve" },
+  task_cancel: { approval_mode: "approve" },
+  create_threads: { approval_mode: "approve" },
+  t3_thread_launch: { approval_mode: "approve" },
+  t3_project_list: { approval_mode: "approve" },
+  t3_project_read: { approval_mode: "approve" },
+  t3_thread_list: { approval_mode: "approve" },
+  t3_thread_read: { approval_mode: "approve" },
+  t3_thread_search: { approval_mode: "approve" },
+  t3_thread_send: { approval_mode: "approve" },
+  t3_thread_wait: { approval_mode: "approve" },
+  t3_thread_interrupt: { approval_mode: "approve" },
+  t3_background_wait: { approval_mode: "approve" },
+  t3_preview_list: { approval_mode: "approve" },
+  t3_preview_close: { approval_mode: "approve" },
+  preview_status: { approval_mode: "approve" },
+  preview_open: { approval_mode: "approve" },
+  preview_dialog: { approval_mode: "approve" },
+  preview_navigate: { approval_mode: "approve" },
+  preview_resize: { approval_mode: "approve" },
+  preview_set_appearance: { approval_mode: "approve" },
+  preview_snapshot: { approval_mode: "approve" },
+  preview_act: { approval_mode: "approve" },
+  preview_evaluate: { approval_mode: "approve" },
+  preview_wait_for: { approval_mode: "approve" },
+  preview_recording_start: { approval_mode: "approve" },
+  preview_recording_stop: { approval_mode: "approve" },
+  html_preview: { approval_mode: "approve" },
+  html_render: { approval_mode: "approve" },
+  t3_hook_draft: { approval_mode: "approve" },
+  t3_hook_stage_file: { approval_mode: "approve" },
+  t3_hook_write_staged_file: { approval_mode: "approve" },
+} as const;
+
+export function codexT3McpToolOverrides(
+  runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy | undefined,
+): {
+  readonly tools: Readonly<Record<string, Readonly<{ readonly approval_mode: "approve" }>>>;
+} {
+  return runtimePolicy?.runtimeMode === "full-access"
+    ? { tools: CODEX_T3_FULL_ACCESS_TOOLS }
+    : { tools: {} };
+}
+const CODEX_MODELS_WITH_T3_DEFERRED_TOOL_SEARCH = new Set(["gpt-6-luna"]);
+
+export function codexT3McpExposureForModel(model: string | undefined) {
+  return model !== undefined && CODEX_MODELS_WITH_T3_DEFERRED_TOOL_SEARCH.has(model)
+    ? { omit_tools_from: ["direct"] as const }
+    : {};
+}
 
 function codexThreadRuntimeParams(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
@@ -1355,6 +1408,10 @@ function codexThreadRuntimeParams(input: {
             "mcp_servers.t3-code": {
               url: mcpSession.endpoint,
               tool_timeout_sec: CODEX_T3_MCP_TOOL_TIMEOUT_SEC,
+              ...codexT3McpToolOverrides(input.runtimePolicy),
+              // Codex hides deferred-only MCP tools when the model cannot search. Keep
+              // direct exposure for every unrecognized model to preserve tool access.
+              ...codexT3McpExposureForModel(input.modelSelection?.model),
               http_headers: {
                 Authorization: mcpSession.authorizationHeader,
               },
@@ -2328,6 +2385,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               updatedAt: completedAt,
               type: "command_execution",
               input: tracked.command,
+              reportedCwd: tracked.reportedCwd,
               ...(tracked.aggregatedOutput === undefined
                 ? {}
                 : { output: tracked.aggregatedOutput }),
@@ -3594,6 +3652,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             updatedAt,
             type: "command_execution",
             input: item.command,
+            reportedCwd: item.cwd,
             ...(item.aggregatedOutput === null || item.aggregatedOutput === undefined
               ? {}
               : { output: item.aggregatedOutput }),
@@ -3782,6 +3841,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               completedAt,
               updatedAt,
               type: "dynamic_tool",
+              ...(context.input.providerThread.providerSessionId === null
+                ? {}
+                : { providerSessionId: context.input.providerThread.providerSessionId }),
               ...projection,
             };
             return { node, turnItem };
@@ -4809,6 +4871,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 yield* trackRunningCommandItem(payload.turnId, {
                   id: payload.item.id,
                   command: payload.item.command,
+                  reportedCwd: payload.item.cwd,
                   ...(payload.item.aggregatedOutput === null ||
                   payload.item.aggregatedOutput === undefined
                     ? {}

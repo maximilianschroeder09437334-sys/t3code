@@ -19,8 +19,15 @@ import {
   OrchestratorMcpFailure,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
+  HookDraftInput,
+  HookDefinition,
+  HookStageFileInput,
+  HookStageFileResult,
+  HookWriteStagedFileInput,
+  HookWriteStagedFileResult,
 } from "@t3tools/contracts";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as DocumentText from "../../../provider/DocumentText.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
@@ -36,6 +43,7 @@ import * as ThreadManagementService from "../../../orchestration-v2/ThreadManage
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
 
 const shared = {
   success: Project,
@@ -120,6 +128,55 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 })
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
+const HookDraftTool = Tool.make("t3_hook_draft", {
+  ...shared,
+  description:
+    'Propose a hook script for human review. Hooks default to all projects in this environment; use scope "project" when the user requests a project-specific hook. Scripts do not run until a person reviews and approves the exact SHA-256 in the Hooks manager. before_file_write covers staged-file tools and T3 project-file writes; before_github_push covers T3 branch pushes. before_browser_action covers T3 preview_act only and provides recoveryRequired, statusChecked and snapshotChecked; failure tracking resets on server restart. A before_provider_turn_start script can require a managed worktree with { decision: "allow", enforcement: "managed-worktree" }; this requires Approval Required and never changes the selected mode. turn_end scripts can gate staged installation or return { decision: "allow", continueWork: true } when the first explicit next step belongs to Codex. T3 defers installation while continuing, preserves staged candidates, honors Stop, user questions and pending requests, and limits retries. This does not prove task completion or retract displayed text. Agents cannot approve, enable, disable, or replace active hooks.',
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    ...HookDraftInput.fields,
+  }),
+  success: HookDefinition,
+  dependencies: [...shared.dependencies, HookRegistry.HookRegistry],
+}).annotate(Tool.Destructive, true);
+const HookStageFileTool = Tool.make("t3_hook_stage_file", {
+  ...shared,
+  description:
+    "For a Codex run with an available staging session, prepare a project file for staged editing. Pass a workspace-relative path and create:false for an existing file or create:true for a new file. T3 records the original hash and returns the candidate path. Write candidate contents with t3_hook_write_staged_file. Installation requires an explicit install-staged-files turn-end hook decision and successful manifest and original-hash checks. Active hooks may deny staging or installation.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    ...HookStageFileInput.fields,
+  }),
+  success: HookStageFileResult,
+  dependencies: [
+    ...shared.dependencies,
+    FileSystem.FileSystem,
+    Path.Path,
+    ServerConfig.ServerConfig,
+    ServerSettings.ServerSettingsService,
+    HookRegistry.HookRegistry,
+  ],
+}).annotate(Tool.Destructive, true);
+const HookWriteStagedFileTool = Tool.make("t3_hook_write_staged_file", {
+  ...shared,
+  description:
+    "Write complete candidate contents for a file prepared with t3_hook_stage_file. This writes only the manifest-listed candidate under this run's staging new/ directory; it never writes the project source file. Use this for an available staged-edit session; it does not change the selected permission mode.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    ...HookWriteStagedFileInput.fields,
+  }),
+  success: HookWriteStagedFileResult,
+  dependencies: [
+    ...shared.dependencies,
+    FileSystem.FileSystem,
+    Path.Path,
+    ServerConfig.ServerConfig,
+    ServerSettings.ServerSettingsService,
+    ThreadManagementService.ThreadManagementService,
+    ProjectService.ProjectService,
+    HookRegistry.HookRegistry,
+  ],
+}).annotate(Tool.Destructive, true);
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
@@ -180,6 +237,9 @@ export const ProjectToolkit = Toolkit.make(
   ThreadLaunchTool,
   ProjectListTool,
   ProjectReadTool,
+  HookDraftTool,
+  HookStageFileTool,
+  HookWriteStagedFileTool,
   ProjectCreateTool,
   ProjectUpdateTool,
   ProjectDeleteTool,

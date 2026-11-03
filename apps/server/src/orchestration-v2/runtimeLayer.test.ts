@@ -1,6 +1,7 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -4133,6 +4134,193 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
       assert.equal(first._tag, "OrchestratorProjectionError");
       assert.equal(retry._tag, "OrchestratorCommandPreviouslyRejectedError");
+    }),
+  );
+
+  it.effect("admits a hook continuation once and rejects stale replay after newer work", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-hook-continuation");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("hook-create"),
+        threadId,
+        projectId: ProjectId.make("hook-project"),
+        title: "Hook",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/hook-workspace",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("hook-user"),
+        threadId,
+        messageId: MessageId.make("hook-user"),
+        text: "Build it",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const original = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const now = yield* DateTime.now;
+      yield* eventSink.commitCommand({
+        commandId: CommandId.make("hook-complete"),
+        threadId,
+        commandType: "provider-runtime.reconcile",
+        acceptedAt: now,
+        events: [
+          {
+            id: EventId.make("hook-complete-event"),
+            type: "run.updated",
+            threadId,
+            runId: original.id,
+            occurredAt: now,
+            payload: { ...original, status: "completed", completedAt: now },
+          },
+        ],
+        effects: [],
+      });
+      const command = {
+        type: "message.dispatch" as const,
+        createdBy: "agent" as const,
+        creationSource: "server" as const,
+        commandId: CommandId.make("hook-auto"),
+        threadId,
+        messageId: MessageId.make("hook-auto"),
+        text: "Continue",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" as const },
+        hookContinuationOfRunId: original.id,
+        hookStageWorkspaceRoot: "/tmp/hook-workspace",
+      };
+      yield* orchestrator.dispatch(command);
+      yield* orchestrator.dispatch(command);
+      const admitted = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(admitted.runs, 2);
+      assert.equal(admitted.runs[1]?.hookContinuationOfRunId, original.id);
+      assert.equal(admitted.runs[1]?.hookStageOriginRunId, original.id);
+      assert.equal(admitted.runs[1]?.hookStageWorkspaceRoot, "/tmp/hook-workspace");
+      yield* orchestrator.dispatch({
+        ...command,
+        commandId: CommandId.make("hook-stale"),
+        messageId: MessageId.make("hook-stale"),
+      });
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+    }),
+  );
+
+  it.effect("admits an automatic correction after a turn-end hook blocks a report", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-hook-correction");
+      const projectId = ProjectId.make("runtime-layer-hook-correction-project");
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId,
+        title: "Hook correction",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("hook-correction-create"),
+        threadId,
+        projectId,
+        title: "Hook correction",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("hook-correction-user"),
+        threadId,
+        messageId: MessageId.make("hook-correction-user"),
+        text: "Write the requested report.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const source = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const providerThreadId = ProviderThreadId.make("hook-correction-provider-thread");
+      const providerTurnId = ProviderTurnId.make("hook-correction-provider-turn");
+      yield* eventSink.commitCommand({
+        commandId: CommandId.make("hook-correction-failed"),
+        threadId,
+        commandType: "provider-runtime.reconcile",
+        acceptedAt: now,
+        events: [
+          {
+            id: EventId.make("hook-correction-failed-run"),
+            type: "run.updated",
+            threadId,
+            runId: source.id,
+            occurredAt: now,
+            payload: { ...source, status: "failed", completedAt: now },
+          },
+          {
+            id: EventId.make("hook-correction-failure-item"),
+            type: "turn-item.updated",
+            threadId,
+            runId: source.id,
+            nodeId: source.rootNodeId!,
+            providerInstanceId: source.providerInstanceId,
+            occurredAt: now,
+            payload: makeProviderFailureTurnItem({
+              driver,
+              threadId,
+              runId: source.id,
+              nodeId: source.rootNodeId,
+              providerThreadId,
+              providerTurnId,
+              itemOrdinal: 100,
+              failure: {
+                code: "hook_blocked",
+                class: "unknown",
+                message: "Use both headings and add the missing correction.",
+                retryable: false,
+              },
+              occurredAt: now,
+            }),
+          },
+        ],
+        effects: [],
+      });
+      const continuation = {
+        type: "message.dispatch" as const,
+        createdBy: "agent" as const,
+        creationSource: "server" as const,
+        commandId: CommandId.make("hook-correction-steer"),
+        threadId,
+        messageId: MessageId.make("hook-correction-steer"),
+        text: "Correct the report: Use both headings and add the missing correction.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" as const },
+        hookContinuationOfRunId: source.id,
+      };
+
+      yield* orchestrator.dispatch(continuation);
+
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(projection.runs, 2);
+      assert.equal(projection.runs[1]?.hookContinuationOfRunId, source.id);
     }),
   );
 

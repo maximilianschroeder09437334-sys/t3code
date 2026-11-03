@@ -5259,6 +5259,61 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    const hookSource =
+      command.hookContinuationOfRunId === undefined
+        ? undefined
+        : projection.runs.find((run) => run.id === command.hookContinuationOfRunId);
+    if (command.hookContinuationOfRunId !== undefined) {
+      const now = yield* DateTime.now;
+      if (
+        command.createdBy !== "agent" ||
+        command.creationSource !== "server" ||
+        command.dispatchMode.type !== "start_immediately" ||
+        hookSource === undefined ||
+        (hookSource.hookStageWorkspaceRoot !== undefined &&
+          hookSource.hookStageWorkspaceRoot !== command.hookStageWorkspaceRoot) ||
+        (hookSource.status !== "completed" &&
+          !(
+            hookSource.status === "failed" &&
+            latestRootProviderFailure(hookSource, projection.turnItems)?.code === "hook_blocked"
+          )) ||
+        latestExecutedRun(projection.runs)?.id !== hookSource.id ||
+        projection.runs.some((run) => run.status === "queued") ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null ||
+        projection.thread.settledOverride === "settled" ||
+        projection.thread.lineage.relationshipToParent === "subagent" ||
+        projection.thread.providerInstanceId !== hookSource.providerInstanceId ||
+        projection.runtimeRequests.some(
+          (request) =>
+            request.status === "pending" ||
+            ((request.status === "cancelled" || request.status === "expired") &&
+              projection.nodes.some(
+                (node) => node.id === request.nodeId && node.runId === hookSource.id,
+              )),
+        ) ||
+        projection.turnItems.some(
+          (item) =>
+            item.runId === hookSource.id &&
+            item.type === "secret_request" &&
+            item.secretStatus !== "saved",
+        ) ||
+        (projection.thread.snoozedUntil != null &&
+          DateTime.isGreaterThan(projection.thread.snoozedUntil, now)) ||
+        (yield* stopReachedRun(command, command.threadId, hookSource.id))
+      ) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: projection.thread,
+        });
+        return;
+      }
+    }
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -5549,7 +5604,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (command.creationSource !== "server" && command.creationSource !== "provider") ||
         (dispatchMode.type !== "queue_after_active" &&
           !(
-            command.restartContinuationOfRunId !== undefined &&
+            (command.restartContinuationOfRunId !== undefined ||
+              command.hookContinuationOfRunId !== undefined) &&
             dispatchMode.type === "start_immediately"
           )))
     ) {
@@ -5907,6 +5963,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(hookSource === undefined
+          ? {}
+          : {
+              hookContinuationOfRunId: hookSource.id,
+              ...(command.hookStageWorkspaceRoot === undefined
+                ? {}
+                : {
+                    hookStageOriginRunId: hookSource.hookStageOriginRunId ?? hookSource.id,
+                    hookStageWorkspaceRoot: command.hookStageWorkspaceRoot,
+                  }),
+            }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       };
       const attempt: OrchestrationV2RunAttempt = {
@@ -6250,6 +6317,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(hookSource === undefined
+          ? {}
+          : {
+              hookContinuationOfRunId: hookSource.id,
+              ...(command.hookStageWorkspaceRoot === undefined
+                ? {}
+                : {
+                    hookStageOriginRunId: hookSource.hookStageOriginRunId ?? hookSource.id,
+                    hookStageWorkspaceRoot: command.hookStageWorkspaceRoot,
+                  }),
+            }),
         ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
           ? { workspacePreparation: dispatchMode.workspaceStrategy }
           : {}),
@@ -7004,6 +7082,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.restartContinuationOfRunId === undefined
         ? {}
         : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+      ...(hookSource === undefined
+        ? {}
+        : {
+            hookContinuationOfRunId: hookSource.id,
+            ...(command.hookStageWorkspaceRoot === undefined
+              ? {}
+              : {
+                  hookStageOriginRunId: hookSource.hookStageOriginRunId ?? hookSource.id,
+                  hookStageWorkspaceRoot: command.hookStageWorkspaceRoot,
+                }),
+          }),
       ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       ...wakeWorkStartedAt(projection.runs, command),
     };
@@ -10653,6 +10742,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       queuedMessages.filter(isBufferedProviderNotification).map((message) => message.id),
     );
     for (const run of runs) {
+      if (
+        (run.status === "completed" || run.status === "waiting") &&
+        (yield* awaitsHookContinuation(run).pipe(mapDispatchError(input.command)))
+      ) {
+        yield* markStoppedRun({ ...input, thread, run });
+      }
       // A resumed queue can have a lower ordinal than a pending continuation source.
       // Stop must reach those sources even when interrupting the resumed run succeeds.
       if (
@@ -11721,7 +11816,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* Ref.update(effects, (existing) => [...existing, ...enqueued]);
         yield* cancelIdleOrphans({ command, events, projection });
         yield* stopDelegatedTasks;
-        return interrupted.value;
+        return {
+          effectTypes: [...(interrupted.value?.effectTypes ?? []), "hook.continue" as const],
+          reason: "The thread was stopped.",
+        };
       }
       yield* Effect.logWarning("thread.stop could not interrupt the running turn", {
         threadId: command.threadId,
@@ -11742,7 +11840,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* holdStoppedThread({ command, events, projection, cohortRunIds: [], now });
     yield* cancelIdleOrphans({ command, events, projection });
     yield* stopDelegatedTasks;
-    return undefined;
+    return { effectTypes: ["hook.continue" as const], reason: "The thread was stopped." };
   });
 
   const dispatchCheckpointRollback = Effect.fn("Orchestrator.dispatchCheckpointRollback")(
@@ -11978,6 +12076,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const awaitsRestartContinuation = (run: OrchestrationV2Run) =>
     effectOutbox
       .get(`effect:restart-continuation:${run.id}`)
+      .pipe(
+        Effect.map(
+          Option.exists((effect) => effect.status === "pending" || effect.status === "running"),
+        ),
+      );
+
+  const awaitsHookContinuation = (run: OrchestrationV2Run) =>
+    effectOutbox
+      .get(`effect:hook.continue:${run.id}`)
       .pipe(
         Effect.map(
           Option.exists((effect) => effect.status === "pending" || effect.status === "running"),

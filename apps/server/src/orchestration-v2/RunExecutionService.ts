@@ -630,6 +630,9 @@ export const layer: Layer.Layer<
         // Root turn snapshot written with the run when T3 ends the run itself.
         readonly abandonedProviderTurn?: OrchestrationV2ProviderTurn;
         readonly terminal: ProviderTerminalEvent;
+        readonly continueWork?: boolean;
+        readonly hookDenialMessages?: ReadonlyArray<string>;
+        readonly stageWorkspaceRoot?: string;
         readonly completedAt?: DateTime.Utc;
         readonly failureItemPersisted: boolean;
         readonly refreshAfterTurn: Effect.Effect<void>;
@@ -736,8 +739,8 @@ export const layer: Layer.Layer<
         );
         // Stopped runs capture rollback points for the next message; enqueue before later starts on this effect lane.
         const finalization = {
-          effects:
-            input.terminal.status === "completed" ||
+          effects: [
+            ...(input.terminal.status === "completed" ||
             input.terminal.status === "interrupted" ||
             input.terminal.status === "cancelled"
               ? [
@@ -752,7 +755,29 @@ export const layer: Layer.Layer<
                     },
                   },
                 ]
-              : [],
+              : []),
+            ...((input.terminal.status === "completed" && input.continueWork) ||
+            (input.terminal.status === "failed" &&
+              input.terminal.failure.code === "hook_blocked")
+              ? [
+                  {
+                    id: `effect:hook.continue:${input.run.id}`,
+                    commandId: CommandId.make(`command:effect:hook.continue:${input.run.id}`),
+                    threadId: input.run.threadId,
+                    request: {
+                      type: "hook.continue" as const,
+                      sourceRunId: input.run.id,
+                      ...(input.hookDenialMessages === undefined
+                        ? {}
+                        : { messages: input.hookDenialMessages }),
+                      ...(input.stageWorkspaceRoot === undefined
+                        ? {}
+                        : { stageWorkspaceRoot: input.stageWorkspaceRoot }),
+                    },
+                  },
+                ]
+              : []),
+          ],
           events: [
             ...cascadedSubagentEvents,
             ...(input.abandonedProviderTurn === undefined
@@ -810,17 +835,22 @@ export const layer: Layer.Layer<
                     nodeId: input.rootNode.id,
                     providerInstanceId: input.run.providerInstanceId,
                     occurredAt: completedAt,
-                    payload: makeProviderFailureTurnItem({
-                      driver: input.terminal.driver,
-                      threadId: input.run.threadId,
-                      runId: input.run.id,
-                      nodeId: input.rootNode.id,
-                      providerThreadId: input.terminal.providerThreadId,
-                      providerTurnId: input.terminal.providerTurnId,
-                      itemOrdinal: input.terminal.failureItemOrdinal,
-                      failure: input.terminal.failure,
-                      occurredAt: completedAt,
-                    }),
+                    payload: {
+                      ...makeProviderFailureTurnItem({
+                        driver: input.terminal.driver,
+                        threadId: input.run.threadId,
+                        runId: input.run.id,
+                        nodeId: input.rootNode.id,
+                        providerThreadId: input.terminal.providerThreadId,
+                        providerTurnId: input.terminal.providerTurnId,
+                        itemOrdinal: input.terminal.failureItemOrdinal,
+                        failure: input.terminal.failure,
+                        occurredAt: completedAt,
+                      }),
+                      ...(input.terminal.failure.code === "hook_blocked"
+                        ? { title: "Blocked by hook" }
+                        : {}),
+                    },
                   },
                 ]
               : []),
@@ -1046,6 +1076,10 @@ export const layer: Layer.Layer<
         const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
         const finalizeRootRun = Effect.fn("RunExecutionService.finalizeRootRun")(function* (
           terminal: ProviderTerminalEvent,
+          continueWork = false,
+          stageWorkspaceRoot?: string,
+          failureItemPersisted = terminal.status === "failed",
+          hookDenialMessages?: ReadonlyArray<string>,
         ) {
           if (yield* Ref.get(rootRunFinalized)) {
             return;
@@ -1079,7 +1113,10 @@ export const layer: Layer.Layer<
               : { loadRunInterruptReason: input.loadRunInterruptReason }),
             openRunOwnedSubagents: openSubagents,
             terminal,
-            failureItemPersisted: terminal.status === "failed",
+            continueWork,
+            ...(hookDenialMessages === undefined ? {} : { hookDenialMessages }),
+            ...(stageWorkspaceRoot === undefined ? {} : { stageWorkspaceRoot }),
+            failureItemPersisted,
             refreshAfterTurn,
           }).pipe(
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
@@ -1466,9 +1503,61 @@ export const layer: Layer.Layer<
                 );
               }
               if (event.type === "turn.terminal") {
-                yield* Ref.set(terminalEvent, event);
+                let rootTerminal = event;
+                let continueWork = false;
+                let stageWorkspaceRoot: string | undefined;
+                let hookDenialMessages: ReadonlyArray<string> | undefined;
+                if (typeof providerEventIngestor.finishRootTurn === "function") {
+                  const finishEffect = providerEventIngestor.finishRootTurn({
+                    threadId: input.run.threadId,
+                    runId: input.run.id,
+                    providerTurnId: event.providerTurnId,
+                    driver: event.driver,
+                    status: event.status,
+                  });
+                  const decision = Effect.isEffect(finishEffect)
+                    ? yield* Effect.map(
+                        finishEffect,
+                        (value) => value ?? { allowed: true, messages: [] },
+                      )
+                    : { allowed: true, messages: [] };
+                  if (decision.allowed === false && event.status === "completed") {
+                    hookDenialMessages = decision.messages;
+                    const latestItemOrdinal = yield* Ref.get(latestTurnItemOrdinal);
+                    rootTerminal = makeFailedTerminalEvent(
+                      makeProviderFailure({
+                        message:
+                          decision.messages.join("\n") ||
+                          "The turn-end hook blocked this run before completion.",
+                        code: "hook_blocked",
+                        class: "unknown",
+                      }),
+                      latestItemOrdinal + 1,
+                    );
+                    yield* Effect.logWarning("Root run blocked by its turn-end hook", {
+                      threadId: input.run.threadId,
+                      runId: input.run.id,
+                      messages: decision.messages,
+                    });
+                  }
+                  if (
+                    decision.allowed &&
+                    event.status === "completed" &&
+                    "continueWork" in decision
+                  ) {
+                    continueWork = decision.continueWork === true;
+                    stageWorkspaceRoot = decision.stageWorkspaceRoot;
+                  }
+                }
+                yield* Ref.set(terminalEvent, rootTerminal);
                 yield* Ref.set(rootTerminalSeen, true);
-                yield* finalizeRootRun(event);
+                yield* finalizeRootRun(
+                  rootTerminal,
+                  continueWork,
+                  stageWorkspaceRoot,
+                  event.status === "failed",
+                  hookDenialMessages,
+                );
               }
               if (event.type === "background_work.updated") {
                 if (event.pending) {

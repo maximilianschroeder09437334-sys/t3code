@@ -76,6 +76,7 @@ const SETTINGS_SEARCH_TERMS = {
     "default branch",
     "automatically pull",
   ],
+  SettingsHooks: ["scripts", "safeguards", "file writes", "handoff", "git push", "approval"],
   SettingsWorktrees: [
     "worktree",
     "branch naming",

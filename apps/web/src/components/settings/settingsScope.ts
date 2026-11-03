@@ -40,6 +40,15 @@ export type ResolvedSettingsScope = ScopeTargets &
       }
   );
 
+/** A write must identify exactly one physical project, even within one environment. */
+export function singleScopedProject(
+  scope: ResolvedSettingsScope,
+): SidebarProjectGroupMember | null {
+  if (scope.kind === "checkout") return scope.checkout;
+  if (scope.kind !== "project") return null;
+  return scope.members.length === 1 ? scope.members[0]! : null;
+}
+
 /** Stale IDs remain visible to the resolver so a removed target reads as unavailable, not as "all". */
 export function validateSettingsScopeSearch(raw: Record<string, unknown>): SettingsScopeSearch {
   const stringValue = (value: unknown) =>

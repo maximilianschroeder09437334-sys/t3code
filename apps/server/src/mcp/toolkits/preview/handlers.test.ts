@@ -1,10 +1,17 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  PreviewAutomationNoAvailableHostError,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 
 import {
   createPendingAttachmentId,
@@ -12,6 +19,132 @@ import {
 } from "../../../attachmentStore.ts";
 import * as ServerConfig from "../../../config.ts";
 import { claimPreviewRecording } from "./handlers.ts";
+import * as PreviewHandlers from "./handlers.ts";
+import { PreviewStandardToolkit, PreviewSnapshotToolkit } from "./tools.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
+
+it.effect("blocks a browser retry until status and snapshot have been inspected", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("browser-recovery-integration");
+    const environmentId = EnvironmentId.make("browser-recovery-env");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const scope: McpInvocationContext.McpInvocationScope = {
+      environmentId,
+      requestNamespace: "browser-recovery",
+      thread: { threadId, providerSessionId: "browser-recovery", providerInstanceId },
+      client: undefined,
+      capabilities: new Set(["preview"]),
+      issuedAt: 0,
+    };
+    const status = {
+      available: true,
+      visible: true,
+      tabId: null,
+      url: null,
+      title: null,
+      loading: false,
+    };
+    const snapshot = {
+      url: "https://example.com",
+      title: "Example",
+      loading: false,
+      visibleText: "",
+      interactiveElements: [],
+      accessibilityTree: {},
+      consoleEntries: [],
+      networkEntries: [],
+      actionTimeline: [],
+      screenshot: { mimeType: "image/png" as const, data: "", width: 1, height: 1 },
+    };
+    let clicks = 0;
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+        getThreadRecords: () =>
+          Effect.succeed({ thread: { projectId: ProjectId.make("browser-project") } } as never),
+      }),
+      Layer.mock(HookRegistry.HookRegistry)({
+        runEvent: (input) => {
+          const payload = input.payload as {
+            recoveryRequired: boolean;
+            statusChecked: boolean;
+            snapshotChecked: boolean;
+          };
+          return Effect.succeed(
+            payload.recoveryRequired && !(payload.statusChecked && payload.snapshotChecked)
+              ? { allowed: false, messages: ["Inspect browser status and snapshot first."] }
+              : { allowed: true, messages: [] },
+          );
+        },
+      }),
+      Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({
+        invoke: (request) => {
+          if (request.operation === "click" && ++clicks === 1)
+            return Effect.fail(
+              new PreviewAutomationNoAvailableHostError({
+                operation: "click",
+                environmentId,
+                threadId,
+                providerSessionId: "browser-recovery",
+                providerInstanceId,
+              }),
+            );
+          return Effect.succeed(
+            (request.operation === "status"
+              ? status
+              : request.operation === "snapshot"
+                ? snapshot
+                : {}) as never,
+          );
+        },
+      }),
+    );
+    const standard = yield* PreviewStandardToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(PreviewHandlers.layerStandard).pipe(
+          Layer.provide(dependencies),
+        ),
+      ),
+    );
+    const snapshots = yield* PreviewSnapshotToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(PreviewHandlers.layerSnapshot).pipe(
+          Layer.provide(dependencies),
+        ),
+      ),
+    );
+    const act = () =>
+      standard
+        .handle("preview_act", { action: "click", locator: "aria-ref=1" })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    const [first, blocked] = yield* Effect.all(
+      [act().pipe(Effect.result), act().pipe(Effect.result)],
+      { concurrency: "unbounded" },
+    );
+    expect(first._tag).toBe("Failure");
+    expect(blocked._tag).toBe("Failure");
+    if (first._tag === "Failure" && blocked._tag === "Failure")
+      expect([first.failure._tag, blocked.failure._tag].sort()).toEqual([
+        "OrchestratorMcpFailure",
+        "PreviewAutomationNoAvailableHostError",
+      ]);
+    expect(clicks).toBe(1);
+    yield* standard
+      .handle("preview_status", {})
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    yield* snapshots
+      .handle("preview_snapshot", {})
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    yield* act();
+    expect(clicks).toBe(2);
+  }),
+);
 
 describe("claimPreviewRecording", () => {
   it.effect("overlapping and repeated claims return the same retained recording", () =>

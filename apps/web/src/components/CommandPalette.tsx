@@ -1590,6 +1590,16 @@ function OpenCommandPaletteDialog(props: {
       await navigate({ to: "/settings" });
     },
   });
+  actionItems.push({
+    kind: "action",
+    value: "action:hooks",
+    searchTerms: ["hooks", "agents", "scripts", "writes", "safety", "handoff"],
+    title: "Hooks and safeguards",
+    icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/settings/hooks" });
+    },
+  });
 
   // Every group, so an archived project's thread still opens its own settings.
   const currentProjectGroup =

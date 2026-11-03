@@ -85,6 +85,10 @@ import {
   FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
+  OrchestratorMcpFailure,
+  type ThreadNotesListInput,
+  type ThreadNotesCreateInput,
+  type ThreadNotesDeleteInput,
   SOURCE_CONTROL_MEDIA_ASSET,
   ChatAttachmentId,
   PersistChatAttachmentsError,
@@ -113,6 +117,7 @@ import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ThreadManagementService from "./orchestration-v2/ThreadManagementService.ts";
+import * as ThreadNotes from "./mcp/ThreadNotes.ts";
 import * as CommandOutputHub from "./orchestration-v2/CommandOutputHub.ts";
 import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
@@ -183,6 +188,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as ServerSettings from "./serverSettings.ts";
+import * as HookRegistry from "./hooks/HookRegistry.ts";
 import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
@@ -1340,6 +1346,7 @@ export const layerWsRpc = (
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const hookRegistry = yield* HookRegistry.HookRegistry;
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
@@ -2512,6 +2519,17 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
+        [WS_METHODS.hooksList]: (input) =>
+          hookRegistry
+            .list(input.projectId)
+            .pipe(
+              Effect.map((hooks) =>
+                HookRegistry.hooksVisibleToClient(hooks, input.supportedEvents),
+              ),
+            ),
+        [WS_METHODS.hooksUpdateDraft]: (input) => hookRegistry.updateDraft(input),
+        [WS_METHODS.hooksApprove]: (input) => hookRegistry.approve(input),
+        [WS_METHODS.hooksSetEnabled]: (input) => hookRegistry.setEnabled(input),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
@@ -2810,18 +2828,65 @@ export const layerWsRpc = (
                 }),
             ),
           ),
-        [WS_METHODS.projectsWriteFile]: (input) =>
-          workspaceFileSystem.writeFile(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectWriteFileError({
-                  cwd: input.cwd,
-                  relativePath: input.relativePath,
-                  ...projectFileFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
+        [WS_METHODS.projectsWriteFile]: (input) => {
+          const writeFile = () =>
+            workspaceFileSystem.writeFile(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectWriteFileError({
+                    cwd: input.cwd,
+                    relativePath: input.relativePath,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            );
+          const hookFailure = (cause: unknown) =>
+            new ProjectWriteFileError({
+              cwd: input.cwd,
+              relativePath: input.relativePath,
+              failure: "operation_failed",
+              cause,
+            });
+          return projectStore.findActiveForHookWorkspace(input.cwd).pipe(
+            Effect.mapError(hookFailure),
+            Effect.flatMap((projectOption) => {
+              if (Option.isNone(projectOption)) {
+                return Effect.fail(
+                  hookFailure(new Error("The write target is not an active registered project.")),
+                );
+              }
+              return hookRegistry
+                .runEvent({
+                  projectId: projectOption.value.projectId,
+                  event: "before_file_write",
+                  payload: {
+                    cwd: input.cwd,
+                    relativePath: input.relativePath,
+                    path: input.relativePath,
+                    byteLength: Buffer.byteLength(input.contents, "utf8"),
+                  },
+                })
+                .pipe(
+                  Effect.mapError(hookFailure),
+                  Effect.flatMap((decision) =>
+                    decision.allowed
+                      ? writeFile()
+                      : Effect.fail(
+                          new ProjectWriteFileError({
+                            cwd: input.cwd,
+                            relativePath: input.relativePath,
+                            failure: "operation_failed",
+                            cause: new Error(
+                              decision.messages.join("\n") || "Blocked by an active hook.",
+                            ),
+                          }),
+                        ),
+                  ),
+                );
+            }),
+          );
+        },
         [WS_METHODS.projectsMutate]: (mutation) =>
           startup.enqueueCommand(mutateProject(mutation)).pipe(
             Effect.mapError(
@@ -2935,6 +3000,72 @@ export const layerWsRpc = (
               workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
             });
           }),
+        [WS_METHODS.threadNotesRead]: (input: ThreadNotesListInput) =>
+          threadManagement.getThreadShell(input.threadId).pipe(
+            Effect.mapError(() => new OrchestratorMcpFailure({
+              code: "thread_not_found",
+              message: "The target thread was not found.",
+            })),
+            Effect.flatMap((thread) =>
+              thread === null || thread.deletedAt !== null
+                ? Effect.fail(new OrchestratorMcpFailure({
+                    code: "thread_not_found",
+                    message: "The target thread was not found.",
+                  }))
+                : ThreadNotes.read(input.threadId).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql),
+                    Effect.mapError(() => new OrchestratorMcpFailure({
+                      code: "orchestration_error",
+                      message: "Thread notes are temporarily unavailable.",
+                    })),
+                    Effect.map((result) => ({ threadId: input.threadId, ...result })),
+                  ),
+            ),
+          ),
+        [WS_METHODS.threadNotesSave]: (input: ThreadNotesCreateInput) =>
+          threadManagement.getThreadShell(input.threadId).pipe(
+            Effect.mapError(() => new OrchestratorMcpFailure({
+              code: "thread_not_found",
+              message: "The target thread was not found.",
+            })),
+            Effect.flatMap((thread) =>
+              thread === null || thread.deletedAt !== null
+                ? Effect.fail(new OrchestratorMcpFailure({
+                    code: "thread_not_found",
+                    message: "The target thread was not found.",
+                  }))
+                : ThreadNotes.append({
+                    threadId: input.threadId,
+                    requestId: input.requestId,
+                    text: input.content,
+                    ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
+                  }).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql),
+                    Effect.mapError(() => new OrchestratorMcpFailure({
+                      code: "orchestration_error",
+                      message: "Thread notes are temporarily unavailable.",
+                    })),
+                    Effect.map((result) => ({
+                      threadId: input.threadId,
+                      requestId: input.requestId,
+                      ...result,
+                    })),
+                  ),
+            ),
+          ),
+        [WS_METHODS.threadNotesDelete]: (input: ThreadNotesDeleteInput) =>
+          ThreadNotes.remove({ threadId: input.threadId, requestId: input.requestId }).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+            Effect.mapError(() => new OrchestratorMcpFailure({
+              code: "orchestration_error",
+              message: "Thread notes are temporarily unavailable.",
+            })),
+            Effect.map((result) => ({
+              threadId: input.threadId,
+              requestId: input.requestId,
+              ...result,
+            })),
+          ),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
         [WS_METHODS.subscribeVcsStatus]: (input) => vcsStatusBroadcaster.streamStatus(input),

@@ -2869,6 +2869,7 @@ const make = Effect.gen(function* () {
           afterPosition,
           limit,
           view,
+          ...(input.latest === true ? { latest: true } : {}),
           ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
         })
         .pipe(Effect.mapError(threadManagementFailure));

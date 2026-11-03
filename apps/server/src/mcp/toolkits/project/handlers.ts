@@ -10,7 +10,11 @@ import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
+import * as HookStagingManager from "../../../hooks/HookStagingManager.ts";
+import { makeIsManagedWorktreePath } from "../../../worktreesDirectory.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
@@ -293,6 +297,200 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           message: "The project was not found.",
         });
       return result.value;
+    }),
+  ),
+  t3_hook_draft: McpToolAccess.writesHookDraft(
+    (input) => input.projectId,
+    (input) =>
+      Effect.gen(function* () {
+        const context = yield* readCaller();
+        const projectId = yield* resolveProjectId(context, input.projectId);
+        const registry = yield* HookRegistry.HookRegistry;
+        return yield* registry
+          .createDraft({ ...input, projectId, scope: input.scope ?? "all-projects" })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+            ),
+          );
+      }),
+  ),
+  t3_hook_stage_file: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const caller = scope.thread;
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Staged files can only be prepared by an active provider thread.",
+        });
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { projection } = yield* threads
+        .getThreadSnapshotWindow(caller.threadId, { rowLimit: 1 })
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.at(-1);
+      if (run === undefined || run.status !== "running")
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "A running thread is required for staged editing.",
+        });
+      let workspaceRoot = projection.thread.worktreePath;
+      if (workspaceRoot === null) {
+        const projects = yield* Project.ProjectService;
+        const project = yield* projects
+          .getById(projection.thread.projectId)
+          .pipe(Effect.mapError(unavailable));
+        if (Option.isNone(project))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread's project workspace could not be resolved.",
+          });
+        workspaceRoot = project.value.workspaceRoot;
+      } else {
+        const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+        if (!(yield* isManagedWorktreePath(workspaceRoot)))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread is not bound to a verified T3-managed worktree.",
+          });
+      }
+      const hooks = yield* HookRegistry.HookRegistry;
+      const decision = yield* hooks
+        .runEvent({
+          projectId: projection.thread.projectId,
+          event: "before_file_write",
+          payload: {
+            threadId: caller.threadId,
+            runId: run.id,
+            path: input.path,
+            create: input.create,
+          },
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
+      if (!decision.allowed)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: decision.messages.join("\n") || "An active hook blocked this staged file.",
+        });
+      if (
+        run.hookStageWorkspaceRoot !== undefined &&
+        !HookStagingManager.sameHookWorkspace(workspaceRoot, run.hookStageWorkspaceRoot)
+      )
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The workspace changed; staged files were retained in the original workspace.",
+        });
+      const session = HookStagingManager.makeHookStageSession({
+        workspaceRoot,
+        threadId: caller.threadId,
+        runId: run.id,
+        ...(run.hookStageOriginRunId === undefined
+          ? {}
+          : { stageOriginRunId: run.hookStageOriginRunId }),
+      });
+      return yield* Effect.tryPromise({
+        try: () => HookStagingManager.stageHookFile(session, input),
+        catch: (cause) =>
+          new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              cause instanceof HookStagingManager.HookStagingError
+                ? cause.message
+                : "The staged file could not be prepared.",
+          }),
+      });
+    }),
+  ),
+  t3_hook_write_staged_file: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const caller = scope.thread;
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Staged files can only be written by an active provider thread.",
+        });
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { projection } = yield* threads
+        .getThreadSnapshotWindow(caller.threadId, { rowLimit: 1 })
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.at(-1);
+      if (run === undefined || run.status !== "running")
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "A running thread is required for staged editing.",
+        });
+      let workspaceRoot = projection.thread.worktreePath;
+      if (workspaceRoot === null) {
+        const projects = yield* Project.ProjectService;
+        const project = yield* projects
+          .getById(projection.thread.projectId)
+          .pipe(Effect.mapError(unavailable));
+        if (Option.isNone(project))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread's project workspace could not be resolved.",
+          });
+        workspaceRoot = project.value.workspaceRoot;
+      } else {
+        const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+        if (!(yield* isManagedWorktreePath(workspaceRoot)))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread is not bound to a verified T3-managed worktree.",
+          });
+      }
+      const hooks = yield* HookRegistry.HookRegistry;
+      const decision = yield* hooks
+        .runEvent({
+          projectId: projection.thread.projectId,
+          event: "before_file_write",
+          payload: { threadId: caller.threadId, runId: run.id, path: input.path, create: false },
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
+      if (!decision.allowed)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: decision.messages.join("\n") || "An active hook blocked this staged file.",
+        });
+      if (
+        run.hookStageWorkspaceRoot !== undefined &&
+        !HookStagingManager.sameHookWorkspace(workspaceRoot, run.hookStageWorkspaceRoot)
+      )
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The workspace changed; staged files were retained in the original workspace.",
+        });
+      const session = HookStagingManager.makeHookStageSession({
+        workspaceRoot,
+        threadId: caller.threadId,
+        runId: run.id,
+        ...(run.hookStageOriginRunId === undefined
+          ? {}
+          : { stageOriginRunId: run.hookStageOriginRunId }),
+      });
+      return yield* Effect.tryPromise({
+        try: () => HookStagingManager.writeHookStagedFile(session, input),
+        catch: (cause) =>
+          new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              cause instanceof HookStagingManager.HookStagingError
+                ? cause.message
+                : "The staged file could not be written.",
+          }),
+      });
     }),
   ),
   t3_project_create: McpToolAccess.writesEnvironment(
