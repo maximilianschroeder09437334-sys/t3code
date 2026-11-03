@@ -1168,7 +1168,9 @@ it.effect("direct project writes give hooks the same path field as staged writes
           headers: Headers.empty,
         },
       );
-    yield* call("protected.ts").pipe(Effect.flip);
+    const blocked = yield* call("protected.ts").pipe(Effect.flip);
+    assert.include(blocked.message, "Protected");
+    assert.include(blocked.message, "Follow the hook rule and relevant AGENTS.md instructions");
     assert.deepEqual(written, []);
     yield* call("allowed.ts");
     assert.deepEqual(written, ["allowed.ts"]);

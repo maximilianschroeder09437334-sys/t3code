@@ -1026,7 +1026,18 @@ effectIt.effect("blocks a provider turn when an active start hook denies it", ()
       {
         type: "error",
         title: "Provider start blocked by a project hook",
-        failure: { message: "Require the staged workspace first." },
+        failure: {
+          message: expect.stringContaining("Require the staged workspace first."),
+        },
+      },
+    ]);
+    expect(harness.projection().turnItems).toMatchObject([
+      {
+        failure: {
+          message: expect.stringContaining(
+            "Follow the hook rule and relevant AGENTS.md instructions",
+          ),
+        },
       },
     ]);
   }),

@@ -376,7 +376,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       if (!decision.allowed)
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
-          message: decision.messages.join("\n") || "An active hook blocked this staged file.",
+          message: HookRegistry.blockedHookGuidance(
+            decision.messages,
+            "An active hook blocked this staged file.",
+          ),
         });
       if (
         run.hookStageWorkspaceRoot !== undefined &&
@@ -462,7 +465,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       if (!decision.allowed)
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
-          message: decision.messages.join("\n") || "An active hook blocked this staged file.",
+          message: HookRegistry.blockedHookGuidance(
+            decision.messages,
+            "An active hook blocked this staged file.",
+          ),
         });
       if (
         run.hookStageWorkspaceRoot !== undefined &&

@@ -2877,6 +2877,10 @@ export const layerWsRpc = (
                             cwd: input.cwd,
                             relativePath: input.relativePath,
                             failure: "operation_failed",
+                            message: HookRegistry.blockedHookGuidance(
+                              decision.messages,
+                              "Blocked by an active hook.",
+                            ),
                             cause: new Error(
                               decision.messages.join("\n") || "Blocked by an active hook.",
                             ),

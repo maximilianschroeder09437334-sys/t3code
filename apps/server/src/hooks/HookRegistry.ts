@@ -40,6 +40,11 @@ export function hooksVisibleToClient(
   return hooks.filter((hook) => supported.has(hook.event));
 }
 
+export function blockedHookGuidance(messages: readonly string[], fallback: string): string {
+  const reason = messages.filter((message) => message.trim().length > 0).join("\n") || fallback;
+  return `${reason}\n\nThe action was blocked. Follow the hook rule and relevant AGENTS.md instructions; change your approach before retrying. If compliant progress requires user approval, ask rather than bypassing the hook.`;
+}
+
 type HookRegistryServices = FileSystem.FileSystem | Path.Path | HookScriptRunner.HookScriptRunner;
 const RegistryState = Schema.Struct({ hooks: Schema.Array(HookDefinition) });
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(RegistryState));

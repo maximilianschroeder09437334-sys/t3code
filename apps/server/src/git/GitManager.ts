@@ -773,7 +773,10 @@ export const make = Effect.gen(function* () {
           return yield* new GitManagerError({
             operation: "before-github-push",
             cwd,
-            detail: decision.messages.join("\n") || "Blocked by an active pre-push hook.",
+            detail: HookRegistry.blockedHookGuidance(
+              decision.messages,
+              "Blocked by an active pre-push hook.",
+            ),
           });
         }
       }

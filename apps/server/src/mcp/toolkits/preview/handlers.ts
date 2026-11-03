@@ -297,7 +297,10 @@ const handlers = {
           if (!decision.allowed)
             return yield* new OrchestratorMcpFailure({
               code: "invalid_request",
-              message: decision.messages.join("\n") || "A browser safeguard blocked this action.",
+              message: HookRegistry.blockedHookGuidance(
+                decision.messages,
+                "A browser safeguard blocked this action.",
+              ),
             });
           yield* loadCaller().pipe(Effect.tap(assertLiveCaller));
           const generation = browserRecovery.generation(threadId);

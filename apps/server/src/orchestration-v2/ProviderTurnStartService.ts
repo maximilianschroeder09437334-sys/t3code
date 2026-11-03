@@ -743,7 +743,10 @@ export const layer: Layer.Layer<
       if (!turnStartDecision.allowed || (requiresManagedWorktree && !managedWorktree)) {
         const message = turnStartDecision.allowed
           ? "This hook requires a T3-managed worktree. Start this thread in a managed worktree before continuing."
-          : turnStartDecision.messages.join("\n") || "Blocked by an active hook.";
+          : HookRegistry.blockedHookGuidance(
+              turnStartDecision.messages,
+              "Blocked by an active hook.",
+            );
         yield* settleStartFailure({
           signal: "hook-blocked-provider-start",
           title: "Provider start blocked by a project hook",

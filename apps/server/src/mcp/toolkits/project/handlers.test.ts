@@ -387,7 +387,12 @@ it.effect("MCP staged writes edit only a candidate already in the active run man
           } as never),
       }),
       Layer.mock(HookRegistry.HookRegistry)({
-        runEvent: () => Effect.succeed({ allowed: true, messages: [] }),
+        runEvent: (input) =>
+          Effect.succeed(
+            (input.payload as { path?: string }).path === "src/blocked.ts"
+              ? { allowed: false, messages: ["Use the approved staging path."] }
+              : { allowed: true, messages: [] },
+          ),
       }),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
@@ -423,6 +428,19 @@ it.effect("MCP staged writes edit only a candidate already in the active run man
       toolkit
         .handle("t3_hook_write_staged_file", input)
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    const blocked = yield* invokeStage({
+      environmentId: EnvironmentId.make("environment"),
+      path: "src/blocked.ts",
+      create: true,
+    });
+    expect(blocked.at(-1)?.result).toMatchObject({
+      code: "invalid_request",
+      message: expect.stringContaining("Use the approved staging path."),
+    });
+    expect(blocked.at(-1)?.result).toMatchObject({
+      message: expect.stringContaining("Follow the hook rule and relevant AGENTS.md instructions"),
+    });
 
     const staged = yield* invokeStage({
       environmentId: EnvironmentId.make("environment"),

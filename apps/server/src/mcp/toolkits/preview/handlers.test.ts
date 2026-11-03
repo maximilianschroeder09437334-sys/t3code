@@ -129,11 +129,18 @@ it.effect("blocks a browser retry until status and snapshot have been inspected"
     );
     expect(first._tag).toBe("Failure");
     expect(blocked._tag).toBe("Failure");
-    if (first._tag === "Failure" && blocked._tag === "Failure")
+    if (first._tag === "Failure" && blocked._tag === "Failure") {
       expect([first.failure._tag, blocked.failure._tag].sort()).toEqual([
         "OrchestratorMcpFailure",
         "PreviewAutomationNoAvailableHostError",
       ]);
+      const denial = [first.failure, blocked.failure].find(
+        (failure) => failure._tag === "OrchestratorMcpFailure",
+      );
+      expect(denial?.message).toContain("Inspect browser status and snapshot first.");
+      expect(denial?.message).toContain("Follow the hook rule and relevant AGENTS.md instructions");
+      expect(denial?.message).toContain("ask rather than bypassing the hook");
+    }
     expect(clicks).toBe(1);
     yield* standard
       .handle("preview_status", {})
