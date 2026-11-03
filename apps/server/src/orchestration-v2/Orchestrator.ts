@@ -5282,7 +5282,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         projection.thread.settledOverride === "settled" ||
-        projection.thread.lineage.relationshipToParent === "subagent" ||
+        (projection.thread.lineage.relationshipToParent === "subagent" &&
+          hookSource.status !== "failed") ||
         projection.thread.providerInstanceId !== hookSource.providerInstanceId ||
         projection.runtimeRequests.some(
           (request) =>
@@ -5435,7 +5436,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     const continuedTaskId = projection.runs.find(
-      (run) => run.id === command.restartContinuationOfRunId,
+      (run) => run.id === (command.restartContinuationOfRunId ?? command.hookContinuationOfRunId),
     )?.delegatedTaskId;
 
     if (projection.thread.settledOverride !== null) {
@@ -12091,7 +12092,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
-  const childAwaitsRestartContinuation = (
+  const childAwaitsContinuation = (
     runs: ReadonlyArray<OrchestrationV2Run>,
     resultRun: OrchestrationV2Run,
     settledContinuationOf?: RunId,
@@ -12102,8 +12103,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           run.id !== settledContinuationOf &&
           (run.id === resultRun.id || runRanAfter(run, resultRun)),
       ),
-      awaitsRestartContinuation,
-    ).pipe(Effect.map((pending) => pending.includes(true)));
+      (run) => Effect.all([awaitsRestartContinuation(run), awaitsHookContinuation(run)]),
+    ).pipe(Effect.map((pending) => pending.some((flags) => flags.includes(true))));
 
   const planDelegatedCompletionDelivery = Effect.fn(
     "orchestrationV2.planDelegatedCompletionDelivery",
@@ -12377,7 +12378,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return;
       }
       if (
-        yield* childAwaitsRestartContinuation(
+        yield* childAwaitsContinuation(
           taskRuns.length === 0 ? childControls.runs : taskRuns,
           childRun,
           options?.settledContinuationOf,
@@ -12634,7 +12635,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const status = delegatedTaskTerminalStatus(runOutcome(resultRun));
     if (status !== "cancelled" && status !== "interrupted") return;
     if (
-      yield* childAwaitsRestartContinuation(
+      yield* childAwaitsContinuation(
         childControls.runs,
         resultRun,
         options?.settledContinuationOf,
@@ -13857,12 +13858,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const runs = child.runs.filter((run) => run.delegatedTaskId === taskId);
         const run = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
         if (run === undefined || delegatedTaskTerminalStatus(run.status) === null) return true;
-        return yield* childAwaitsRestartContinuation(runs, run);
+        return yield* childAwaitsContinuation(runs, run);
       }
       const progress = delegatedTaskProgress(child);
       if (progress.state !== "result_available") return true;
       if (progress.resultRun === undefined) return false;
-      return yield* childAwaitsRestartContinuation(child.runs, progress.resultRun);
+      return yield* childAwaitsContinuation(child.runs, progress.resultRun);
     },
     (effect, childThreadId, _taskId?) =>
       effect.pipe(

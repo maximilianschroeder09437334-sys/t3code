@@ -99,16 +99,24 @@ export const layerExecutor: Layer.Layer<
       execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
-          case "hook.continue":
+          case "hook.continue": {
+            const sourceRunId = effect.request.sourceRunId;
             return continueHookRun({
               threadId: effect.threadId,
-              sourceRunId: effect.request.sourceRunId,
-              ...(effect.request.messages === undefined ? {} : { messages: effect.request.messages }),
+              sourceRunId,
+              ...(effect.request.messages === undefined
+                ? {}
+                : { messages: effect.request.messages }),
               ...(effect.request.stageWorkspaceRoot === undefined
                 ? {}
                 : { stageWorkspaceRoot: effect.request.stageWorkspaceRoot }),
             }).pipe(
               Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+              Effect.tapError(() =>
+                willRetry
+                  ? Effect.void
+                  : threads.recoverDelegatedTask(effect.threadId, sourceRunId),
+              ),
               Effect.mapError(
                 (cause) =>
                   new OrchestrationEffectExecutionError({
@@ -118,6 +126,7 @@ export const layerExecutor: Layer.Layer<
                   }),
               ),
             );
+          }
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(

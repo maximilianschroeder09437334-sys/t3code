@@ -567,6 +567,47 @@ it.effect("settles a delegated child once its restart continuation fails for goo
   }),
 );
 
+it.effect("settles a delegated child once its hook correction fails for good", () =>
+  Effect.gen(function* () {
+    const timestamp = DateTime.formatIso(yield* DateTime.now);
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const recovered = yield* Ref.make<ReadonlyArray<ThreadId>>([]);
+    const layer = layerExecutorFor({
+      events,
+      threads: {
+        getThreadRecords: () => Effect.fail(new Error("projection unavailable") as never),
+        recoverDelegatedTask: (childThreadId) =>
+          Ref.update(recovered, (ids) => [...ids, childThreadId]),
+      },
+    });
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      id: `effect:hook.continue:${runId}`,
+      commandId: CommandId.make("command:hook-continuation-failure"),
+      threadId,
+      request: { type: "hook.continue", sourceRunId: runId },
+      status: "running",
+      attemptCount: 1,
+      availableAt: timestamp,
+      leaseOwner: "test-worker",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      completedAt: null,
+      lastError: null,
+    };
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      assert.isTrue(
+        Exit.isFailure(yield* Effect.exit(executor.execute(effect, { willRetry: true }))),
+      );
+      assert.deepEqual(yield* Ref.get(recovered), []);
+      assert.isTrue(
+        Exit.isFailure(yield* Effect.exit(executor.execute(effect, { willRetry: false }))),
+      );
+      assert.deepEqual(yield* Ref.get(recovered), [threadId]);
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
 it.effect.each(["confirmed", "unconfirmed", "failed"] as const)(
   "a native subagent stop only repairs %s provider evidence",
   (outcome) =>
