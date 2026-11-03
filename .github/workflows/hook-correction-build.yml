@@ -1,0 +1,56 @@
+name: Hook correction desktop candidate
+
+on:
+  push:
+    branches:
+      - feature/hook-build-validation-20261103
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+      - name: Install build dependencies
+        run: vp install
+      - name: Check server types
+        run: vp run --filter t3 typecheck
+      - name: Test hook denial and Stop behavior
+        shell: pwsh
+        working-directory: apps/server
+        run: |
+          vp test run src/mcp/toolkits/preview/handlers.test.ts src/mcp/toolkits/project/handlers.test.ts src/orchestration-v2/ProviderTurnStartService.test.ts src/git/GitManager.test.ts src/ws.test.ts src/orchestration-v2/HookContinuation.test.ts src/orchestration-v2/RunExecutionService.test.ts src/orchestration-v2/runtimeLayer.test.ts src/orchestration-v2/ThreadStop.test.ts -t 'blocks a browser retry|MCP staged writes edit|blocks a provider turn when an active start hook denies it|runs the parent project push hook|direct project writes give hooks|steers a hook-blocked report|shows and retries the exact turn-end hook denial|dispatches the hook correction continuation|admits an automatic correction after a turn-end hook|thread.stop prevents a pending hook correction after a blocked report'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install Electron runtime
+        run: vp run --filter @t3tools/desktop ensure:electron
+      - name: Build unsigned Windows candidate
+        run: vp run dist:desktop:win:x64
+      - name: Hash the installer
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -Path release -Filter '*.exe' -File -Recurse)
+          if ($files.Count -eq 0) { throw 'No installer was produced' }
+          $files | Get-FileHash -Algorithm SHA256 | Format-List | Out-File release/SHA256SUMS.txt -Encoding utf8
+      - name: Upload candidate for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3-hook-correction-windows-candidate
+          path: |
+            release/**/*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
