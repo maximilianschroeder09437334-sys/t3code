@@ -48,6 +48,7 @@ import { useSavedRemoteConnections } from "../../state/use-remote-environment-re
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { NotificationCompanionSection } from "./NotificationCompanionSection";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { resolveAgentAwarenessPlatformPresentation } from "./SettingsRouteScreen.logic";
 
@@ -113,19 +114,31 @@ export function SettingsNotificationsRouteScreen() {
   if (!hasCloudPublicConfig()) {
     return (
       <SettingsScreen title="Notifications">
-        <ScrollView
-          contentInsetAdjustmentBehavior="automatic"
-          contentContainerClassName="px-5 pt-4"
-        >
-          <Text className="text-base text-foreground-muted">
-            Notifications require T3 Connect in this app build.
-          </Text>
-        </ScrollView>
+        <LocalNotificationSettings />
       </SettingsScreen>
     );
   }
 
   return <ConfiguredSettingsNotificationsRouteScreen />;
+}
+
+function LocalNotificationSettings() {
+  const insets = useSafeAreaInsets();
+  return (
+    <ScrollView
+      contentInsetAdjustmentBehavior="automatic"
+      showsVerticalScrollIndicator={false}
+      className="flex-1"
+      contentContainerClassName="gap-6 px-5 pt-4"
+      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
+    >
+      <NotificationCompanionSection />
+      <Text className="text-sm text-foreground-muted">
+        Native background push is not configured in this build. Use the Home Screen companion for
+        background alerts.
+      </Text>
+    </ScrollView>
+  );
 }
 
 function ConfiguredSettingsNotificationsRouteScreen() {
@@ -426,6 +439,7 @@ function ConfiguredSettingsNotificationsRouteScreen() {
           paddingBottom: Math.max(insets.bottom, 18) + 18,
         }}
       >
+        <NotificationCompanionSection />
         <SettingsSection title="Agent activity">
           <SettingsSwitchRow
             icon="bell.badge"

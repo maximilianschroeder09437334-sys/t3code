@@ -12,6 +12,8 @@ process.env.EXPO_NO_TYPESCRIPT_SETUP = "1";
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
+const isMaxiAndroidBuild = repoEnv.T3CODE_MAXI_ANDROID === "1";
+const isMaxiBuild = isIosPersonalTeamBuild || isMaxiAndroidBuild;
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
@@ -228,10 +230,10 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 // Match iOS PostScript names on Android so RN and the native composer share fonts before runtime loading.
 
 const config: ExpoConfig = {
-  name: isIosPersonalTeamBuild ? "T3 Code Maxi" : variant.appName,
+  name: isMaxiBuild ? "T3 Code Maxi" : variant.appName,
   slug: "t3-code",
   platforms: ["ios", "android"],
-  scheme: isIosPersonalTeamBuild ? ["t3code-maxi", variant.scheme] : variant.scheme,
+  scheme: isMaxiBuild ? ["t3code-maxi", variant.scheme] : variant.scheme,
   version: repoEnv.T3CODE_MOBILE_VERSION ?? "2.2.0",
   runtimeVersion: {
     // Skip costly fingerprinting on dev launches; preview and production OTAs require matching native projects.
@@ -251,7 +253,7 @@ const config: ExpoConfig = {
     supportsTablet: true,
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
-    ...(isIosPersonalTeamBuild ? { buildNumber: "3" } : {}),
+    ...(isIosPersonalTeamBuild ? { buildNumber: "4" } : {}),
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
     ...(isIosPersonalTeamBuild
       ? {}
@@ -296,7 +298,8 @@ const config: ExpoConfig = {
   },
   android: {
     icon: variant.assets.appIcon,
-    package: variant.androidPackage,
+    package: isMaxiAndroidBuild ? "com.maximilian.t3code.mobile" : variant.androidPackage,
+    ...(isMaxiAndroidBuild ? { versionCode: 7 } : {}),
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),

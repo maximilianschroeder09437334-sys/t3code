@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./notificationCompanion": "./src/notificationCompanion.ts",
     "./hookToolBridge": "./src/hookToolBridge.ts",
     "./threadNotifications": "./src/threadNotifications.ts",
     "./hookRecipe": "./src/hookRecipe.ts",

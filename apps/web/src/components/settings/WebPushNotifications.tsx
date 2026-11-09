@@ -1,8 +1,13 @@
 import { useServerConfigs } from "~/state/entities";
 import { useState } from "react";
+import { isWebPushOrigin } from "@t3tools/shared/notificationCompanion";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  type AtomCommand,
+  type AtomCommandResult,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { usePrimaryEnvironmentId } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -49,10 +54,11 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
   );
   const supported =
     serverSupported &&
-    window.isSecureContext &&
+    isWebPushOrigin(window.location.protocol, window.isSecureContext) &&
     "serviceWorker" in navigator &&
     "PushManager" in window &&
     "Notification" in window;
+  const isDesktopApp = window.location.protocol === "t3code:";
   const standalone =
     window.matchMedia("(display-mode: standalone)").matches ||
     ("standalone" in navigator && navigator.standalone === true);
@@ -63,76 +69,18 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
     if (busy || !canSubscribe || !supported) return;
     setBusy(true);
     setMessage(null);
-    try {
-      // iPad requires the permission request to begin in this direct click handler.
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted")
-        throw new Error(
-          "Allow notifications for this Home Screen app in iPad Settings, then try again.",
-        );
-      const configured = await prepare({ environmentId, input: undefined });
-      if (configured._tag === "Failure")
-        throw new Error(String(squashAtomCommandFailure(configured)));
-      const registration = await navigator.serviceWorker.register(
-        isAppleMobile ? "/notifications-sw.js?nativeApp=maxi" : "/notifications-sw.js",
-        {
-          scope: `/notifications/${encodeURIComponent(environmentId)}/`,
-        },
-      );
-      // This registration need not control the current page. `ready` would wait
-      // for a controlling worker and hang outside this environment's scope.
-      if (registration.active === null) {
-        const worker = registration.installing ?? registration.waiting;
-        if (worker === null)
-          throw new Error("The notification worker did not start. Try enabling again.");
-        await new Promise<void>((resolve, reject) => {
-          const changed = () => {
-            if (worker.state === "activated" || worker.state === "redundant") {
-              worker.removeEventListener("statechange", changed);
-              if (worker.state === "activated") resolve();
-              else reject(new Error("The notification worker could not activate. Try again."));
-            }
-          };
-          worker.addEventListener("statechange", changed);
-          changed();
-        });
-      }
-      let browserSubscription = await registration.pushManager.getSubscription();
-      const savedDevice = info.data?.subscriptions.find((value) => value.id === currentId);
-      if (
-        browserSubscription !== null &&
-        (savedDevice?.lastStatus === 404 || savedDevice?.lastStatus === 410)
-      ) {
-        await browserSubscription.unsubscribe();
-        browserSubscription = null;
-      }
-      if (browserSubscription === null)
-        browserSubscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: applicationServerKey(configured.value.publicKey),
-        });
-      const json = browserSubscription.toJSON();
-      if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth)
-        throw new Error("This browser did not return a complete push subscription.");
-      const saved = await subscribe({
-        environmentId,
-        input: {
-          endpoint: json.endpoint,
-          keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
-          label: "Home Screen companion",
-        },
-      });
-      if (saved._tag === "Failure") throw new Error(String(squashAtomCommandFailure(saved)));
-      localStorage.setItem(`t3:web-push:${environmentId}`, saved.value.id);
-      setCurrentId(saved.value.id);
-      setMessage(
-        "Connected. Send a test and tap it to open T3 Code Maxi. iOS may ask you to confirm opening the app.",
-      );
+    const result = await registerBrowserPush({
+      environmentId,
+      isAppleMobile,
+      prepare,
+      subscribe,
+      savedStatus: info.data?.subscriptions.find((value) => value.id === currentId)?.lastStatus,
+    });
+    setBusy(false);
+    setMessage(result.message);
+    if (result.id !== null) {
+      setCurrentId(result.id);
       info.refresh();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Notifications could not be enabled.");
-    } finally {
-      setBusy(false);
     }
   };
   const sendTest = async () => {
@@ -171,7 +119,7 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
               disabled={busy || !canSubscribe || !supported || (isAppleMobile && !standalone)}
               onClick={() => void enable()}
             >
-              {busy ? "Working..." : "Enable on this device"}
+              {busy ? "Working..." : isDesktopApp ? "Enable in a browser" : "Enable on this device"}
             </Button>
             {currentId !== null ? (
               <>
@@ -194,7 +142,9 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
         </span>
         {!supported ? (
           <span className="mt-2 block">
-            Use an updated T3 server, a supported browser and a valid HTTPS connection.
+            {isDesktopApp
+              ? "Set up the companion on your iPad or phone in a browser using this server's HTTPS address. The desktop app uses Thread notifications above."
+              : "Use an updated T3 server, a supported browser and a valid HTTPS connection."}
           </span>
         ) : null}
         {isAppleMobile && !standalone ? (
@@ -227,4 +177,92 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
       </div>
     </div>
   );
+}
+
+type RunCommand<C> =
+  C extends AtomCommand<infer W, infer A, infer E>
+    ? (value: W) => Promise<AtomCommandResult<A, E>>
+    : never;
+
+async function registerBrowserPush({
+  environmentId,
+  isAppleMobile,
+  prepare,
+  subscribe,
+  savedStatus,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly isAppleMobile: boolean;
+  readonly prepare: RunCommand<typeof webPushPrepare>;
+  readonly subscribe: RunCommand<typeof webPushSubscribe>;
+  readonly savedStatus: number | null | undefined;
+}): Promise<{ readonly id: string | null; readonly message: string }> {
+  try {
+    // iPad requires the permission request to begin in this direct click handler.
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted")
+      throw new Error(
+        "Allow notifications for this Home Screen app in iPad Settings, then try again.",
+      );
+    const configured = await prepare({ environmentId, input: undefined });
+    if (configured._tag === "Failure")
+      throw new Error(String(squashAtomCommandFailure(configured)));
+    const registration = await navigator.serviceWorker.register(
+      isAppleMobile ? "/notifications-sw.js?nativeApp=maxi" : "/notifications-sw.js",
+      {
+        scope: `/notifications/${encodeURIComponent(environmentId)}/`,
+      },
+    );
+    // This registration need not control the current page. `ready` would wait
+    // for a controlling worker and hang outside this environment's scope.
+    if (registration.active === null) {
+      const worker = registration.installing ?? registration.waiting;
+      if (worker === null)
+        throw new Error("The notification worker did not start. Try enabling again.");
+      await new Promise<void>((resolve, reject) => {
+        const changed = () => {
+          if (worker.state === "activated" || worker.state === "redundant") {
+            worker.removeEventListener("statechange", changed);
+            if (worker.state === "activated") resolve();
+            else reject(new Error("The notification worker could not activate. Try again."));
+          }
+        };
+        worker.addEventListener("statechange", changed);
+        changed();
+      });
+    }
+    let browserSubscription = await registration.pushManager.getSubscription();
+    if (browserSubscription !== null && (savedStatus === 404 || savedStatus === 410)) {
+      await browserSubscription.unsubscribe();
+      browserSubscription = null;
+    }
+    if (browserSubscription === null)
+      browserSubscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: applicationServerKey(configured.value.publicKey),
+      });
+    const json = browserSubscription.toJSON();
+    if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth)
+      throw new Error("This browser did not return a complete push subscription.");
+    const saved = await subscribe({
+      environmentId,
+      input: {
+        endpoint: json.endpoint,
+        keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+        label: "Home Screen companion",
+      },
+    });
+    if (saved._tag === "Failure") throw new Error(String(squashAtomCommandFailure(saved)));
+    localStorage.setItem(`t3:web-push:${environmentId}`, saved.value.id);
+    return {
+      id: saved.value.id,
+      message:
+        "Connected. Send a test and tap it to open T3 Code Maxi. iOS may ask you to confirm opening the app.",
+    };
+  } catch (error) {
+    return {
+      id: null,
+      message: error instanceof Error ? error.message : "Notifications could not be enabled.",
+    };
+  }
 }

@@ -4,6 +4,7 @@ import type { SidebarProjectGroupingMode } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { SettingsRow } from "./components/SettingsRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import {
   mobileProjectGroupingModePatch,
@@ -66,6 +67,15 @@ export function SettingsProjectGroupingRouteScreen() {
               onPress={() => savePreferences(mobileProjectGroupingModePatch(option.mode))}
             />
           ))}
+        </SettingsSection>
+        <SettingsSection title="Notifications">
+          <SettingsRow
+            icon="bell.badge"
+            label="Notification settings"
+            value="Replies, input requests and agent pings"
+            valuePosition="below"
+            target="SettingsNotifications"
+          />
         </SettingsSection>
         <WorkingSectionSettings />
         <NewThreadSettingsSection />
