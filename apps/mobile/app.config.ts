@@ -251,7 +251,7 @@ const config: ExpoConfig = {
     supportsTablet: true,
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
-    ...(isIosPersonalTeamBuild ? { buildNumber: "2" } : {}),
+    ...(isIosPersonalTeamBuild ? { buildNumber: "3" } : {}),
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
     ...(isIosPersonalTeamBuild
       ? {}

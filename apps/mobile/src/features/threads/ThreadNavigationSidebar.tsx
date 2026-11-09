@@ -1,3 +1,4 @@
+import { SidebarUsage } from "../usage/SidebarUsage";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -617,6 +618,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
           </SwipeableScrollGateProvider>
           <ThreadUndoNotice visible={props.visible} />
         </View>
+        <SidebarUsage bottomInset={insets.bottom} />
       </>
     );
   }

@@ -56,6 +56,25 @@ vi.mock("react-native", () => ({
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => true }));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("../../components/ui/AppText", () => ({ AppText: Children }));
+vi.mock("../../components/ui/Button", () => ({
+  Button: ({
+    label,
+    accessibilityLabel,
+    onPress,
+    disabled,
+  }: {
+    label: string;
+    accessibilityLabel?: string;
+    onPress: () => void;
+    disabled?: boolean;
+  }) => (
+    <button aria-label={accessibilityLabel ?? label} onClick={onPress} disabled={disabled}>
+      {label}
+    </button>
+  ),
+}));
+vi.mock("../../components/ui/ScreenScrollView", () => ({ ScreenScrollView: Children }));
+
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: () => ({
     data: mocks.hooks,
@@ -167,6 +186,11 @@ it("keeps the last hooks read-only across a brief disconnection and blocks a pen
     },
   ];
   act(() => root.render(<SettingsHooksRouteScreen />));
+  act(() =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="Show script for Cached draft"]')!
+      .click(),
+  );
   const review = container.querySelector<HTMLButtonElement>(
     '[aria-label="Review and approve Cached draft"]',
   );
@@ -236,6 +260,19 @@ it("shows draft review and sends the reviewed event, scope and hash only after c
     },
   ];
   act(() => root.render(<SettingsHooksRouteScreen />));
+  expect(container.textContent).not.toContain(script);
+  expect(
+    container.querySelector(
+      '[aria-label="Review and approve Require browser recovery after failure"]',
+    ),
+  ).toBeNull();
+  act(() =>
+    container
+      .querySelector<HTMLButtonElement>(
+        '[aria-label="Show script for Require browser recovery after failure"]',
+      )!
+      .click(),
+  );
   expect(container.textContent).toContain(script);
   const button = container.querySelector<HTMLButtonElement>(
     '[aria-label="Review and approve Require browser recovery after failure"]',

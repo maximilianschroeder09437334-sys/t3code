@@ -70,10 +70,10 @@ jobs:
           schemes = {scheme for entry in info.get("CFBundleURLTypes", []) for scheme in entry.get("CFBundleURLSchemes", [])}
           assert info["CFBundleIdentifier"] == "com.maximilian.t3code.mobile"
           assert info["CFBundleDisplayName"] == "T3 Code Maxi"
-          assert info["CFBundleVersion"] == "2"
+          assert info["CFBundleVersion"] == "3"
           assert {1, 2}.issubset(set(info["UIDeviceFamily"]))
           assert {"t3code-maxi", "t3code-preview"}.issubset(schemes)
-          print("Verified Maxi identity, build 2, phone/tablet support and native thread-link schemes.")
+          print("Verified Maxi identity, build 3, phone/tablet support and native thread-link schemes.")
           PY
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "${apps[0]}" "$RUNNER_TEMP/ipa/Payload/"

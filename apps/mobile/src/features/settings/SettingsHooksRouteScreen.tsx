@@ -1,3 +1,5 @@
+import { Button } from "../../components/ui/Button";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAtomValue } from "@effect/atom-react";
 import {
   AuthSettingsWriteScope,
@@ -13,7 +15,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { useEffect, useRef, useState } from "react";
 import { hookSummary } from "@t3tools/shared/hookSummary";
-import { Alert, AppState, Pressable, ScrollView, Switch, TextInput, View } from "react-native";
+import { Alert, AppState, Pressable, Switch, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -218,7 +220,7 @@ function HookProjectSection(props: {
   const offlineHooks = lastHooks ?? query.data;
   const hooks = hooksForSection((props.offline ? offlineHooks : query.data) ?? [], props.hookScope);
   return (
-    <SettingsSection title={`${props.projectLabel} Â· ${props.environmentLabel}`}>
+    <SettingsSection title={`${props.projectLabel}  /  ${props.environmentLabel}`}>
       {props.offline ? (
         <View className="gap-3 px-4 py-3">
           {offlineHooks === null ? (
@@ -230,7 +232,7 @@ function HookProjectSection(props: {
               <View key={hook.id} className="gap-1">
                 <Text className="font-t3-medium">{hook.name}</Text>
                 <Text>
-                  {EVENT_LABELS[hook.event]} Â·{" "}
+                  {EVENT_LABELS[hook.event]} /{" "}
                   {hook.status === "draft" ? "Draft" : hook.enabled ? "Enabled" : "Disabled"}
                 </Text>
                 <Text>{hook.script}</Text>
@@ -273,7 +275,7 @@ function HookProjectSection(props: {
           {query.error ? (
             <Text className="p-4 text-danger">{query.error}</Text>
           ) : query.isPending ? (
-            <Text className="p-4 text-foreground-muted">Loading hooksâ€¦</Text>
+            <Text className="p-4 text-foreground-muted">Loading hooks...</Text>
           ) : hooks.length === 0 ? (
             <Text className="p-4 text-foreground-muted">
               {props.hookScope === "all-projects"
@@ -284,7 +286,7 @@ function HookProjectSection(props: {
             <View className="gap-3">
               {hooks.map((hook) => (
                 <HookCard
-                  key={hook.id}
+                  key={`${hook.id}:${hook.scriptSha256}`}
                   environmentId={props.environmentId}
                   projectId={props.projectId}
                   hook={hook}
@@ -333,6 +335,7 @@ function HookCard(props: {
   const removalSupported =
     useServerConfigs().get(props.environmentId)?.environment.capabilities.hookRemoval === true;
   const [editing, setEditing] = useState(false);
+  const [scriptExpanded, setScriptExpanded] = useState(false);
   const [script, setScript] = useState(hook.script);
   const [pending, setPending] = useState(false);
   const hasScope = useEnvironmentScope(props.environmentId, AuthSettingsWriteScope);
@@ -374,7 +377,8 @@ function HookCard(props: {
       !canApprove ||
       !readEnvironmentScope(props.environmentId, AuthSettingsWriteScope) ||
       pending ||
-      editing
+      editing ||
+      !scriptExpanded
     )
       return;
     Alert.alert(
@@ -476,8 +480,8 @@ function HookCard(props: {
         <View className="min-w-0 flex-1 gap-1">
           <Text className="font-t3-medium text-foreground">{hook.name}</Text>
           <Text className="text-sm text-foreground-muted">
-            {EVENT_LABELS[hook.event]} Â·{" "}
-            {hook.scope === "all-projects" ? "All projects" : "This project"} Â·{" "}
+            {EVENT_LABELS[hook.event]} /{" "}
+            {hook.scope === "all-projects" ? "All projects" : "This project"} /{" "}
             {hook.status === "draft" ? "Needs review" : hook.enabled ? "Active" : "Disabled"}
           </Text>
           <Text className="text-sm text-foreground-muted">
@@ -494,80 +498,80 @@ function HookCard(props: {
         ) : null}
       </View>
       <Text selectable className="text-xs text-foreground-muted">
-        SHA-256 Â· {hook.scriptSha256}
+        SHA-256 / {hook.scriptSha256}
       </Text>
-      <TextInput
-        accessibilityLabel={`${hook.name} script`}
-        editable={hook.status === "draft" && editing && canEdit && !pending}
-        multiline
-        scrollEnabled
-        selectTextOnFocus={false}
-        value={editing ? script : hook.script}
-        onChangeText={setScript}
-        textAlignVertical="top"
-        className="max-h-72 min-h-36 rounded-xl bg-subtle p-3 font-mono text-xs text-foreground"
+      <Button
+        label={scriptExpanded ? "Hide script" : "Show script"}
+        accessibilityLabel={`${scriptExpanded ? "Hide" : "Show"} script for ${hook.name}`}
+        tone="secondary"
+        size="compact"
+        disabled={pending || editing}
+        onPress={() => setScriptExpanded((expanded) => !expanded)}
       />
+      {scriptExpanded || editing ? (
+        <TextInput
+          accessibilityLabel={`${hook.name} script`}
+          editable={hook.status === "draft" && editing && canEdit && !pending}
+          multiline
+          scrollEnabled
+          selectTextOnFocus={false}
+          value={editing ? script : hook.script}
+          onChangeText={setScript}
+          textAlignVertical="top"
+          style={{ height: 240 }}
+          className="rounded-xl bg-subtle p-3 font-mono text-xs text-foreground"
+        />
+      ) : null}
       {hook.status === "draft" ? (
-        <View className="flex-row justify-end gap-2">
+        <View className="flex-row flex-wrap gap-3">
           {editing ? (
             <>
-              <Pressable
-                accessibilityRole="button"
+              <Button
+                label="Cancel"
                 disabled={pending}
                 onPress={() => {
                   setScript(hook.script);
                   setEditing(false);
                 }}
-                className="rounded-full border border-border px-4 py-2"
-              >
-                <Text className="text-foreground">Cancel</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
+              />
+              <Button
+                label={pending ? "Saving..." : "Save draft"}
+                tone="contrast"
                 disabled={!canEdit || pending || script === hook.script}
                 onPress={() => void save()}
-                className="rounded-full bg-prominent px-4 py-2 disabled:opacity-50"
-              >
-                <Text className="text-prominent-foreground">
-                  {pending ? "Savingâ€¦" : "Save draft"}
-                </Text>
-              </Pressable>
+              />
             </>
           ) : (
             <>
-              <Pressable
-                accessibilityRole="button"
+              <Button
+                label="Edit draft"
                 disabled={!canEdit || pending}
-                onPress={() => setEditing(true)}
-                className="rounded-full border border-border px-4 py-2 disabled:opacity-50"
-              >
-                <Text className="text-foreground">Edit draft</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Review and approve ${hook.name}`}
-                disabled={!canApprove || pending}
-                onPress={reviewAndApprove}
-                className="rounded-full bg-prominent px-4 py-2 disabled:opacity-50"
-              >
-                <Text className="text-prominent-foreground">
-                  {pending ? "Approvingâ€¦" : "Review and approve"}
-                </Text>
-              </Pressable>
+                onPress={() => {
+                  setScriptExpanded(true);
+                  setEditing(true);
+                }}
+              />
+              {scriptExpanded ? (
+                <Button
+                  label={pending ? "Approving..." : "Review and approve"}
+                  accessibilityLabel={`Review and approve ${hook.name}`}
+                  tone="contrast"
+                  disabled={!canApprove || pending}
+                  onPress={reviewAndApprove}
+                />
+              ) : null}
             </>
           )}
         </View>
       ) : null}
       {!hook.enabled && removalSupported ? (
-        <Pressable
-          accessibilityRole="button"
+        <Button
+          label="Remove"
           accessibilityLabel={`Remove ${hook.name}`}
+          tone="danger"
           disabled={!canRemove || pending}
           onPress={remove}
-          className="self-end rounded-full border border-border px-4 py-2 disabled:opacity-50"
-        >
-          <Text className="text-danger">Remove</Text>
-        </Pressable>
+        />
       ) : null}
       {!hasScope ? (
         <Text className="text-xs text-foreground-muted">

@@ -100,6 +100,8 @@
         "scripts/warm-dep-cache.ts",
         "test/fixtures/**/*.mjs",
         "public/notifications-sw.js",
+        // Loaded directly by the static native-app handoff page.
+        "public/notification-open.js",
       ],
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still

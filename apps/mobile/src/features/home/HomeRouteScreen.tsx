@@ -1,3 +1,5 @@
+import { SidebarUsage } from "../usage/SidebarUsage";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { uuidv4 } from "../../lib/uuid";
 import { ThreadUndoNotice } from "./ThreadUndoNotice";
 import { use } from "react";
@@ -50,6 +52,7 @@ export function HomeRouteScreen() {
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const navigation = useNavigation();
+  const insets = useSafeAreaInsets();
   const selectTab = useSelectWorkspaceTab();
   const workspace = useWorkspaceTabs();
   const [localSearchQuery, setLocalSearchQuery] = useState("");
@@ -231,6 +234,7 @@ export function HomeRouteScreen() {
           selectedProjectKey={selectedProjectKey}
           threads={threads}
         />
+        <SidebarUsage bottomInset={workspace?.bottomClearance ?? insets.bottom} />
         <ThreadUndoNotice visible={visible} />
       </>
     </AndroidHomeFabLayout>
