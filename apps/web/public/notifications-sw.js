@@ -24,23 +24,34 @@ self.addEventListener("push", (event) => {
 });
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  let destination = new URL(event.notification.data?.path ?? "/", self.location.origin);
-  if (destination.origin !== self.location.origin) return;
-  if (new URL(self.location.href).searchParams.get("nativeApp") === "maxi") {
-    const handoff = new URL("/notification-open.html", self.location.origin);
-    handoff.hash = new URLSearchParams({ path: destination.pathname }).toString();
-    destination = handoff;
-  }
+  const path = event.notification.data?.path ?? "/";
+  if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")) return;
+  const destination = new URL(path, self.location.origin);
+  if (destination.origin !== self.location.origin || destination.search || destination.hash) return;
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (windows) => {
       const existing = windows.find(
         (client) => new URL(client.url).origin === self.location.origin,
       );
       if (existing) {
-        await existing.navigate(destination.href);
-        return existing.focus();
+        try {
+          const navigated = await existing.navigate(destination.href);
+          if (navigated) return await navigated.focus();
+        } catch {
+          // A window can close after matchAll; opening a new one still delivers the chat.
+        }
       }
-      return self.clients.openWindow(destination.href);
+      // Legacy ?nativeApp=maxi registrations now stay in the full Home Screen app too.
+      const opened = await self.clients.openWindow(destination.href);
+      if (opened && destination.pathname !== "/") {
+        const actual = new URL(opened.url, self.location.origin);
+        // Some OS launches land at the manifest start URL. Correct that once, without a loop.
+        if (actual.origin === self.location.origin && actual.pathname === "/") {
+          const navigated = await opened.navigate(destination.href);
+          if (navigated) return navigated.focus();
+        }
+      }
+      return opened;
     }),
   );
 });

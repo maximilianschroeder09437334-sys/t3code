@@ -177,7 +177,7 @@ const make = Effect.gen(function* () {
       yield* queue(id, `test:${now}`, {
         title: "T3 notifications are connected",
         body: "Only direct replies, requests and important agent pings notify by default.",
-        path: "/settings",
+        path: "/",
       });
     },
     Effect.mapError(storage),

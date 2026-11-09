@@ -121,6 +121,7 @@ it.effect(
         yield* service.deliverDue();
         yield* service.deliverDue();
         expect(test.sent).toHaveLength(1);
+        expect(JSON.parse(test.sent[0]!).path).toBe("/");
         yield* TestClock.adjust("11 seconds");
         test.setStatus(201);
         yield* service.deliverDue();

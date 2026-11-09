@@ -71,7 +71,6 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
     setMessage(null);
     const result = await registerBrowserPush({
       environmentId,
-      isAppleMobile,
       prepare,
       subscribe,
       savedStatus: info.data?.subscriptions.find((value) => value.id === currentId)?.lastStatus,
@@ -110,7 +109,7 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
   return (
     <div>
       <SettingsRow
-        title="Home Screen notification companion"
+        title="Background notifications"
         description="Receive direct replies, input requests and important agent pings. Routine agent updates stay muted."
         control={
           <div className="flex flex-wrap gap-2">
@@ -119,7 +118,13 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
               disabled={busy || !canSubscribe || !supported || (isAppleMobile && !standalone)}
               onClick={() => void enable()}
             >
-              {busy ? "Working..." : isDesktopApp ? "Enable in a browser" : "Enable on this device"}
+              {busy
+                ? "Working..."
+                : isDesktopApp
+                  ? "Enable in a browser"
+                  : currentId
+                    ? "Refresh notifications"
+                    : "Enable notifications"}
             </Button>
             {currentId !== null ? (
               <>
@@ -136,9 +141,9 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
       />
       <div className="px-4 pb-4 text-sm text-muted-foreground">
         <span className="mt-2 block">
-          On iPad, open this server through its HTTPS address, add it to the Home Screen, open that
-          icon, then enable notifications here. On iPhone and iPad, notification taps open T3 Code
-          Maxi through an app link; an Open T3 button remains available if iOS needs another tap.
+          Install T3 Code Maxi from this server's HTTPS address using Add to Home Screen, then
+          enable notifications from that app. Alerts open the matching chat here without switching
+          apps.
         </span>
         {!supported ? (
           <span className="mt-2 block">
@@ -149,7 +154,7 @@ function DeviceWebPush({ environmentId }: { readonly environmentId: EnvironmentI
         ) : null}
         {isAppleMobile && !standalone ? (
           <span className="mt-2 block">
-            Open the Home Screen icon to enable iPad push notifications.
+            Open the T3 Code Maxi Home Screen icon to enable iPad notifications.
           </span>
         ) : null}
         {message !== null ? (
@@ -186,13 +191,11 @@ type RunCommand<C> =
 
 async function registerBrowserPush({
   environmentId,
-  isAppleMobile,
   prepare,
   subscribe,
   savedStatus,
 }: {
   readonly environmentId: EnvironmentId;
-  readonly isAppleMobile: boolean;
   readonly prepare: RunCommand<typeof webPushPrepare>;
   readonly subscribe: RunCommand<typeof webPushSubscribe>;
   readonly savedStatus: number | null | undefined;
@@ -207,12 +210,10 @@ async function registerBrowserPush({
     const configured = await prepare({ environmentId, input: undefined });
     if (configured._tag === "Failure")
       throw new Error(String(squashAtomCommandFailure(configured)));
-    const registration = await navigator.serviceWorker.register(
-      isAppleMobile ? "/notifications-sw.js?nativeApp=maxi" : "/notifications-sw.js",
-      {
-        scope: `/notifications/${encodeURIComponent(environmentId)}/`,
-      },
-    );
+    const registration = await navigator.serviceWorker.register("/notifications-sw.js", {
+      scope: `/notifications/${encodeURIComponent(environmentId)}/`,
+      updateViaCache: "none",
+    });
     // This registration need not control the current page. `ready` would wait
     // for a controlling worker and hang outside this environment's scope.
     if (registration.active === null) {
@@ -249,15 +250,14 @@ async function registerBrowserPush({
       input: {
         endpoint: json.endpoint,
         keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
-        label: "Home Screen companion",
+        label: "T3 Code Maxi Home Screen",
       },
     });
     if (saved._tag === "Failure") throw new Error(String(squashAtomCommandFailure(saved)));
     localStorage.setItem(`t3:web-push:${environmentId}`, saved.value.id);
     return {
       id: saved.value.id,
-      message:
-        "Connected. Send a test and tap it to open T3 Code Maxi. iOS may ask you to confirm opening the app.",
+      message: "Connected. Alerts open this app. Send a test to check delivery on this device.",
     };
   } catch (error) {
     return {
