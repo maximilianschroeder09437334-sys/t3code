@@ -3,6 +3,13 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./hookToolBridge": "./src/hookToolBridge.ts",
+    "./threadNotifications": "./src/threadNotifications.ts",
+    "./hookRecipe": "./src/hookRecipe.ts",
+    "./hookSummary": {
+      "types": "./src/hookSummary.ts",
+      "import": "./src/hookSummary.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

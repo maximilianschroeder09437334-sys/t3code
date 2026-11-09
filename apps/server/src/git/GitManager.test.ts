@@ -60,6 +60,7 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as HookRegistry from "../hooks/HookRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -597,6 +598,7 @@ function preparePullRequestThread(
 }
 
 function makeManager(input?: {
+  hookRegistry?: HookRegistry.HookRegistry["Service"];
   providerScenario?: FakeProviderScenario;
   sourceControlProvider?: SourceControlProvider["Service"];
   textGeneration?: Partial<FakeGitTextGeneration>;
@@ -730,10 +732,10 @@ function makeManager(input?: {
     if (input?.seed !== undefined) {
       yield* input.seed.pipe(Effect.provideContext(stores), Effect.orDie);
     }
-    const manager = yield* GitManager.make.pipe(
-      Effect.provide(layerManager),
-      Effect.provideContext(stores),
-    );
+    const make = input?.hookRegistry
+      ? GitManager.make.pipe(Effect.provideService(HookRegistry.HookRegistry, input.hookRegistry))
+      : GitManager.make;
+    const manager = yield* make.pipe(Effect.provide(layerManager), Effect.provideContext(stores));
     return { manager, providerCalls };
   });
 }
@@ -3054,6 +3056,87 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect("runs the parent project push hook for a recorded worktree", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-hook-worktree-push-");
+      yield* initRepo(repoDir);
+      const projectId = ProjectId.make("project:worktree-push-hook");
+      const threadId = ThreadId.make("thread:worktree-push-hook");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const at = DateTime.makeUnsafe("2026-09-27T00:00:00.000Z");
+      const called: Array<{ projectId: ProjectId; event: string }> = [];
+      const { manager } = yield* makeManager({
+        hookRegistry: {
+          runEvent: (input: Parameters<HookRegistry.HookRegistry["Service"]["runEvent"]>[0]) =>
+            Effect.sync(() => {
+              called.push(input);
+              return { allowed: false, messages: ["Hook blocked this push"] };
+            }),
+        } as unknown as HookRegistry.HookRegistry["Service"],
+        seed: Effect.gen(function* () {
+          yield* (yield* ProjectStore.ProjectStoreV2).apply({
+            sequence: 1,
+            eventId: EventId.make("event:worktree-hook-project"),
+            aggregateKind: "project",
+            aggregateId: projectId,
+            occurredAt: DateTime.formatIso(at),
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "project.created",
+            payload: {
+              projectId,
+              title: "Parent",
+              workspaceRoot: "/different-project-root",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: DateTime.formatIso(at),
+              updatedAt: DateTime.formatIso(at),
+            },
+          });
+          yield* (yield* ProjectionStore.ProjectionStoreV2).apply({
+            id: EventId.make("event:worktree-hook-thread"),
+            type: "thread.created",
+            threadId,
+            providerInstanceId,
+            occurredAt: at,
+            payload: {
+              createdBy: "user",
+              creationSource: "web",
+              id: threadId,
+              projectId,
+              title: "Worktree",
+              providerInstanceId,
+              modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: repoDir,
+              activeProviderThreadId: null,
+              lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+              forkedFrom: null,
+              createdAt: at,
+              updatedAt: at,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              lastVisitedAt: null,
+              deletedAt: null,
+            },
+          });
+        }),
+      });
+      yield* runStackedAction(manager, { cwd: repoDir, action: "push" }).pipe(Effect.flip);
+      expect(called).toEqual([
+        {
+          projectId,
+          event: "before_github_push",
+          payload: expect.objectContaining({ cwd: repoDir }),
+        },
+      ]);
+    }),
+  );
   it.effect("prefers a V2-native thread's project settings over an explicit project", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");

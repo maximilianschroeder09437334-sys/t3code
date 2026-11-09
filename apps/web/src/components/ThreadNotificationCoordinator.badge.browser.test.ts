@@ -106,6 +106,8 @@ const thread = {
   archivedAt: null as string | null,
   hasPendingApprovals: false,
   hasPendingUserInput: false,
+  latestRunHumanAuthored: true,
+  notificationsMuted: true,
   session: null as { status: string } | null,
   latestTurn: { turnId: "turn", state: "running", completedAt: null as string | null },
 };
@@ -136,6 +138,8 @@ function toV2ThreadShell(input: typeof thread) {
     createdBy: "user",
     creationSource: "web",
     latestRunId: latestTurn.turnId,
+    latestRunHumanAuthored: input.latestRunHumanAuthored,
+    notificationsMuted: input.notificationsMuted,
     activeRunId: null,
     status:
       latestTurn.state === "completed"
@@ -252,6 +256,22 @@ it("presents completion notifications and sound as soon as the shell completes",
   );
   expect(TestNotification.sent.map((sent) => sent.title)).toEqual(["Thread completed"]);
   expect(state.sound).toHaveBeenCalledWith("completion", expect.any(Function));
+});
+
+it.each([true, false])("filters internal completions when muted: %s", async (muted) => {
+  await using app = setup();
+  app.start();
+  state.shells.set(
+    "one",
+    shell({
+      latestRunHumanAuthored: false,
+      notificationsMuted: muted,
+      latestTurn: { turnId: "turn", state: "completed", completedAt: "2026-09-13T07:00:01.000Z" },
+    }),
+  );
+  expect(TestNotification.sent.map((sent) => sent.title)).toEqual(
+    muted ? [] : ["Thread completed"],
+  );
 });
 
 it.each(["hasPendingApprovals", "hasPendingUserInput"] as const)(

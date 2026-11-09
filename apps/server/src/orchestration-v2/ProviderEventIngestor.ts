@@ -1,3 +1,4 @@
+import type { HookDecision } from "@t3tools/contracts";
 import {
   NodeId,
   CommandId,
@@ -6,6 +7,7 @@ import {
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
+  type OrchestrationV2TurnItem,
   type OrchestrationV2ThreadProjection,
   type ModelSelection,
   ProviderInstanceId,
@@ -16,12 +18,15 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
+  ThreadContextRecord,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlError from "effect/sql/SqlError";
 
 import { AgentScope } from "@t3tools/shared/AgentScope";
@@ -33,6 +38,19 @@ import {
 } from "../telemetry/ProviderUsageAnalytics.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as HookRegistry from "../hooks/HookRegistry.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import {
+  handoffThreadReferences,
+  handoffIsThreadWait,
+  readHandoffThreadStates,
+} from "../hooks/HandoffThreadRouting.ts";
+import * as HookStagingManager from "../hooks/HookStagingManager.ts";
+import {
+  handoffFirstStepOwner,
+  handoffNeedsUser,
+  userRequestedFullStopHold,
+} from "../hooks/HandoffNextStep.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -222,7 +240,42 @@ export interface ProviderEventIngestorV2Shape {
       };
     },
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, ProviderEventIngestorV2Error>;
+  readonly finishRootTurn?: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly providerTurnId: ProviderTurnId;
+    readonly driver: ProviderAdapter.ProviderAdapterV2Event["driver"];
+    readonly status: Extract<
+      ProviderAdapter.ProviderAdapterV2Event,
+      { readonly type: "turn.terminal" }
+    >["status"];
+  }) => Effect.Effect<{
+    readonly allowed: boolean;
+    readonly messages: ReadonlyArray<string>;
+    readonly continueWork?: boolean;
+    readonly repair?: HookDecision["repair"];
+    readonly stageWorkspaceRoot?: string;
+  }>;
 }
+
+/** Optional so isolated ingestion tests and alternate runtimes remain hook-free. */
+export class ProviderTurnEndHooks extends Context.Reference<
+  Pick<HookRegistry.HookRegistry["Service"], "runEvent"> & { readonly environmentId?: string }
+>("t3/orchestration-v2/ProviderEventIngestor/ProviderTurnEndHooks", {
+  defaultValue: () => ({
+    runEvent: () => Effect.succeed({ allowed: true, messages: [] }),
+  }),
+}) {}
+
+export const layerProviderTurnEndHooks = Layer.effect(
+  ProviderTurnEndHooks,
+  Effect.gen(function* () {
+    const hooks = yield* HookRegistry.HookRegistry;
+    const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+    const environmentId = yield* identity.getEnvironmentId;
+    return ProviderTurnEndHooks.of({ runEvent: hooks.runEvent, environmentId });
+  }),
+);
 
 export class ProviderEventIngestorV2 extends Context.Service<
   ProviderEventIngestorV2,
@@ -253,10 +306,47 @@ export const layer: Layer.Layer<
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const analytics = yield* ProviderTurnAnalytics;
+    const turnEndHooks = yield* ProviderTurnEndHooks;
     const agentScope = yield* AgentScope;
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const scope = yield* Effect.scope;
     const completedTurnAnalytics = new Set<string>();
+    const completedTurnHookRuns = new Map<
+      string,
+      {
+        readonly allowed: boolean;
+        readonly messages: ReadonlyArray<string>;
+        readonly continueWork?: boolean;
+        readonly repair?: HookDecision["repair"];
+        readonly stageWorkspaceRoot?: string;
+      }
+    >();
+    const turnHookLocks = new Map<string, { semaphore: Semaphore.Semaphore; users: number }>();
+    const turnHookKey = (input: {
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+      readonly providerTurnId: ProviderTurnId;
+    }) =>
+      [input.threadId, input.runId, input.providerTurnId]
+        .map((value) => `${value.length}:${value}`)
+        .join("");
+    const rememberTurnHookResult = (
+      key: string,
+      result: {
+        readonly allowed: boolean;
+        readonly messages: ReadonlyArray<string>;
+        readonly continueWork?: boolean;
+        readonly repair?: HookDecision["repair"];
+        readonly stageWorkspaceRoot?: string;
+      },
+    ) => {
+      completedTurnHookRuns.set(key, result);
+      if (completedTurnHookRuns.size > 4096) {
+        const oldest = completedTurnHookRuns.keys().next().value;
+        if (oldest !== undefined) completedTurnHookRuns.delete(oldest);
+      }
+      return result;
+    };
 
     const makeDomainEvent =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -668,8 +758,283 @@ export const layer: Layer.Layer<
           ),
       );
 
+    const finishRootTurnOnce: NonNullable<ProviderEventIngestorV2Shape["finishRootTurn"]> =
+      Effect.fn("ProviderEventIngestor.finishRootTurnOnce")(function* (input) {
+        if (input.status !== "completed") {
+          HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+          return { allowed: true, messages: [] };
+        }
+        const key = turnHookKey(input);
+        const completedResult = completedTurnHookRuns.get(key);
+        if (completedResult !== undefined) return completedResult;
+        const context = yield* projections.getTurnStartContext(input.threadId, input.runId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Turn-end hook context could not be loaded", {
+              threadId: input.threadId,
+              runId: input.runId,
+              cause,
+            }).pipe(Effect.as(null)),
+          ),
+        );
+        if (context === null) {
+          HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+          return rememberTurnHookResult(key, {
+            allowed: false,
+            messages: ["The turn-end hook could not load the completed run context."],
+          });
+        }
+        const lastMessage = context.turnItems
+          .filter(
+            (
+              item,
+            ): item is Extract<OrchestrationV2TurnItem, { readonly type: "assistant_message" }> =>
+              item.type === "assistant_message" && item.providerTurnId === input.providerTurnId,
+          )
+          .sort((left, right) => left.ordinal - right.ordinal)
+          .at(-1);
+        // Progress messages in the same turn are not part of the final handoff.
+        const finalText = (lastMessage?.text ?? "").slice(-64 * 1024);
+        type TurnEndDecision = {
+          readonly allowed: boolean;
+          readonly messages: ReadonlyArray<string>;
+          readonly action?: "install-staged-files";
+          readonly continueWork?: boolean;
+          readonly repair?: HookDecision["repair"];
+        };
+        const references = handoffThreadReferences(finalText);
+        const handoffThreads = yield* readHandoffThreadStates(
+          references,
+          turnEndHooks.environmentId,
+          context.messages
+            .flatMap((message) => message.context?.records ?? [])
+            .filter(isThreadContextRecord),
+        ).pipe(Effect.provideService(ProjectionStore.ProjectionStoreV2, projections));
+        const decision: TurnEndDecision = yield* turnEndHooks
+          .runEvent({
+            projectId: context.thread.projectId,
+            event: "turn_end",
+            payload: {
+              threadId: input.threadId,
+              runId: input.runId,
+              providerTurnId: input.providerTurnId,
+              finalText,
+              firstNextStepOwner: handoffFirstStepOwner(finalText),
+              unfinishedWork:
+                handoffFirstStepOwner(finalText) === "codex" &&
+                !handoffIsThreadWait(finalText) &&
+                !handoffNeedsUser(finalText),
+              ...(references.length === 0 ? {} : { handoffThreadStateVersion: 1, handoffThreads }),
+            },
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Turn-end hook failed closed", {
+                threadId: input.threadId,
+                runId: input.runId,
+                cause,
+              }).pipe(
+                Effect.as({
+                  allowed: false,
+                  messages: ["The turn-end hook failed; the run was blocked."],
+                } as TurnEndDecision),
+              ),
+            ),
+          );
+        if (!decision.allowed) {
+          HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+          return rememberTurnHookResult(key, {
+            allowed: false,
+            messages: decision.messages,
+            ...(decision.repair === undefined ? {} : { repair: decision.repair }),
+          });
+        }
+        if (decision.continueWork && handoffIsThreadWait(finalText)) {
+          HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+          return rememberTurnHookResult(key, { allowed: true, messages: decision.messages });
+        }
+        if (decision.continueWork && handoffFirstStepOwner(finalText) !== "codex") {
+          HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+          return rememberTurnHookResult(key, {
+            allowed: false,
+            messages: ["Continuation requires an explicit first next step assigned to Codex."],
+          });
+        }
+        if (decision.continueWork && handoffNeedsUser(finalText)) {
+          HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+          return rememberTurnHookResult(key, { allowed: true, messages: decision.messages });
+        }
+        if (decision.action === "install-staged-files" && !decision.continueWork) {
+          const sourceRun = context.runs.find((run) => run.id === input.runId);
+          const visitedRuns = new Set<RunId>();
+          if (
+            !sourceRun ||
+            sourceRun.threadId !== input.threadId ||
+            !["running", "waiting", "completed"].includes(sourceRun.status)
+          ) {
+            HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+            return rememberTurnHookResult(key, {
+              allowed: false,
+              messages: [
+                "Staged installation was blocked because its run context is missing or invalid.",
+              ],
+            });
+          }
+          let rootRun: OrchestrationV2Run = sourceRun;
+          visitedRuns.add(rootRun.id);
+          let continuationDepth = 0;
+          while (rootRun.hookContinuationOfRunId !== undefined) {
+            const parentRunId = rootRun.hookContinuationOfRunId;
+            if (visitedRuns.has(parentRunId) || continuationDepth >= 3) {
+              HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+              return rememberTurnHookResult(key, {
+                allowed: false,
+                messages: [
+                  "Staged installation was blocked because its source run chain is invalid or too deep.",
+                ],
+              });
+            }
+            const parentRecords = yield* projections
+              .getThreadRecords(input.threadId, ["runs"], {
+                runIds: [parentRunId],
+              })
+              .pipe(Effect.catchCause(() => Effect.succeed(null)));
+            const parentRun: OrchestrationV2Run | undefined = parentRecords?.runs.find(
+              (run) => run.id === parentRunId,
+            );
+            if (
+              !parentRun ||
+              parentRun.threadId !== input.threadId ||
+              (parentRun.status !== "completed" && parentRun.status !== "failed")
+            ) {
+              HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+              return rememberTurnHookResult(key, {
+                allowed: false,
+                messages: [
+                  "Staged installation was blocked because its source run chain is incomplete.",
+                ],
+              });
+            }
+            visitedRuns.add(parentRun.id);
+            continuationDepth += 1;
+            rootRun = parentRun;
+          }
+          const originalRecords = yield* projections
+            .getThreadRecords(input.threadId, ["messages"], {
+              messageIds: [rootRun.userMessageId],
+            })
+            .pipe(Effect.catchCause(() => Effect.succeed(null)));
+          const originalMessage = originalRecords?.messages.find(
+            (message) => message.id === rootRun.userMessageId,
+          );
+          if (!originalMessage || originalMessage.role !== "user") {
+            HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+            return rememberTurnHookResult(key, {
+              allowed: false,
+              messages: [
+                "Staged installation was blocked because the original request is unavailable.",
+              ],
+            });
+          }
+          if (userRequestedFullStopHold(originalMessage.text)) {
+            HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+            return rememberTurnHookResult(key, {
+              allowed: true,
+              messages: [
+                ...decision.messages,
+                "Full Stop is in effect: staged files were kept uninstalled. Continue only with staged preparation and validation.",
+              ],
+            });
+          }
+          const stageSession = HookStagingManager.getActiveHookStageSession(
+            input.threadId,
+            input.runId,
+          );
+          if (stageSession === null) {
+            return rememberTurnHookResult(key, {
+              allowed: false,
+              messages: ["Staged installation has no prepared workspace for this run."],
+            });
+          }
+          const installResult = yield* Effect.result(
+            Effect.tryPromise({
+              try: () => HookStagingManager.installHookStage(stageSession),
+              catch: (cause) =>
+                isHookStagingError(cause)
+                  ? cause
+                  : new HookStagingManager.HookStagingError({
+                      message:
+                        "Host-side staged installation failed; check the retained staging files.",
+                      cause,
+                    }),
+            }),
+          );
+          HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+          if (Result.isFailure(installResult)) {
+            yield* Effect.logError("Host-side staged file installation failed", {
+              threadId: input.threadId,
+              runId: input.runId,
+              cause: installResult.failure,
+            });
+            return rememberTurnHookResult(key, {
+              allowed: false,
+              messages: [installResult.failure.message],
+            });
+          }
+          yield* Effect.logInfo("Host-side staged files installed and hash-verified", {
+            threadId: input.threadId,
+            runId: input.runId,
+            files: installResult.success,
+          });
+        }
+        const stageWorkspaceRoot = decision.continueWork
+          ? HookStagingManager.getActiveHookStageSession(input.threadId, input.runId)?.workspaceRoot
+          : undefined;
+        if (
+          decision.continueWork &&
+          stageWorkspaceRoot === undefined &&
+          context.runs.find((run) => run.id === input.runId)?.hookStageWorkspaceRoot !== undefined
+        ) {
+          return rememberTurnHookResult(key, {
+            allowed: false,
+            messages: ["The staged workspace could not be recovered; continuation was stopped."],
+          });
+        }
+        HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
+        return rememberTurnHookResult(key, {
+          allowed: true,
+          messages: decision.messages,
+          ...(decision.continueWork ? { continueWork: true } : {}),
+          ...(stageWorkspaceRoot === undefined ? {} : { stageWorkspaceRoot }),
+        });
+      });
+
+    const finishRootTurn: NonNullable<ProviderEventIngestorV2Shape["finishRootTurn"]> = Effect.fn(
+      "ProviderEventIngestor.finishRootTurn",
+    )(function* (input) {
+      const key = turnHookKey(input);
+      let entry = turnHookLocks.get(key);
+      if (entry === undefined) {
+        entry = { semaphore: Semaphore.makeUnsafe(1), users: 0 };
+        turnHookLocks.set(key, entry);
+      }
+      entry.users += 1;
+      const acquiredEntry = entry;
+      return yield* acquiredEntry.semaphore
+        .withPermits(1)(finishRootTurnOnce(input))
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              acquiredEntry.users -= 1;
+              if (acquiredEntry.users === 0 && turnHookLocks.get(key) === acquiredEntry)
+                turnHookLocks.delete(key);
+            }),
+          ),
+        );
+    });
+
     return ProviderEventIngestorV2.of({
       normalize,
+      finishRootTurn,
       ingestNormalized:
         /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
         Effect.fnUntraced(
@@ -826,3 +1191,7 @@ export const layer: Layer.Layer<
     });
   }),
 );
+
+const isThreadContextRecord = Schema.is(ThreadContextRecord);
+
+const isHookStagingError = Schema.is(HookStagingManager.HookStagingError);

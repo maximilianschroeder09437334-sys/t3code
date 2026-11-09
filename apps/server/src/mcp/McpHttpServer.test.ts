@@ -83,7 +83,15 @@ const client = McpSchema.McpServerClient.of({
 });
 const layerTest = McpHttpServer.layerPreviewToolkit.pipe(
   Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
-  Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+  Layer.provideMerge(
+    Layer.mock(ThreadManagementService.ThreadManagementService)({
+      getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+      getThreadRecords: (id) =>
+        Effect.succeed(
+          McpToolAccessTestkit.idleThreadProjection(McpToolAccessTestkit.liveThreadShell(id)),
+        ),
+    }),
+  ),
   Layer.provideMerge(PreviewAutomationBroker.layer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),

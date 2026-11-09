@@ -79,7 +79,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const baseDir = yield* fs.makeTempDirectoryScoped();
-      const prefix = `${baseDir}/node`;
+      const prefix = `${baseDir.replaceAll("\\", "/")}/node`;
       const entry = `${prefix}/lib/node_modules/t3/dist/bin.mjs`;
       yield* fs.makeDirectory(`${prefix}/lib/node_modules/t3/dist`, { recursive: true });
       yield* fs.makeDirectory(`${prefix}/bin`, { recursive: true });
@@ -102,6 +102,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
               Layer.provide(ServerConfig.layer({ ...config, mode })),
             ),
           ),
+          // Model Linux path spelling while exercising real filesystem identity on Windows.
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            realPath: (file) =>
+              fs.realPath(file).pipe(Effect.map((value) => value.replaceAll("\\", "/"))),
+          }),
           Effect.provideService(HostProcess.Arguments, ["node", entry]),
           Effect.provideService(HostProcess.IsExecutable, false),
           Effect.provideService(HostProcess.Platform, "linux"),

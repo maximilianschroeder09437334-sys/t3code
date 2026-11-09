@@ -3,9 +3,11 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  ProjectId,
   PreviewTabId,
   ProviderInstanceId,
   ThreadId,
+  PreviewAutomationNoAvailableHostError,
   type PreviewAutomationRequest,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -23,9 +25,13 @@ import * as ServerConfig from "../../../config.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { liveThreadsLayer } from "../../McpToolAccess.testkit.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { claimPreviewRecording, layerStandard } from "./handlers.ts";
-import { PreviewStandardToolkit } from "./tools.ts";
+import * as PreviewHandlers from "./handlers.ts";
+import { PreviewStandardToolkit, PreviewSnapshotToolkit } from "./tools.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
 
 it.effect("preview_open navigates the opened tab to a dev server in one tool call", () =>
   Effect.scoped(
@@ -96,12 +102,141 @@ it.effect("preview_open navigates the opened tab to a dev server in one tool cal
         issuedAt: 1,
       }),
       Effect.provide(
-        Layer.mergeAll(PreviewAutomationBroker.layer, liveThreadsLayer).pipe(
-          Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-        ),
+        Layer.mergeAll(
+          PreviewAutomationBroker.layer,
+          liveThreadsLayer,
+          Layer.mock(HookRegistry.HookRegistry)({
+            runEvent: () => Effect.succeed({ allowed: true, messages: [] }),
+          }),
+        ).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
       ),
     ),
   ),
+);
+
+it.effect("blocks a browser retry until status and snapshot have been inspected", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("browser-recovery-integration");
+    const environmentId = EnvironmentId.make("browser-recovery-env");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const scope: McpInvocationContext.McpInvocationScope = {
+      environmentId,
+      requestNamespace: "browser-recovery",
+      thread: { threadId, providerSessionId: "browser-recovery", providerInstanceId },
+      client: undefined,
+      capabilities: new Set(["preview"]),
+      issuedAt: 0,
+    };
+    const status = {
+      available: true,
+      visible: true,
+      tabId: null,
+      url: null,
+      title: null,
+      loading: false,
+    };
+    const snapshot = {
+      url: "https://example.com",
+      title: "Example",
+      loading: false,
+      visibleText: "",
+      interactiveElements: [],
+      accessibilityTree: {},
+      consoleEntries: [],
+      networkEntries: [],
+      actionTimeline: [],
+      screenshot: { mimeType: "image/png" as const, data: "", width: 1, height: 1 },
+    };
+    let clicks = 0;
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+        getThreadRecords: () =>
+          Effect.succeed({ thread: { projectId: ProjectId.make("browser-project") } } as never),
+      }),
+      Layer.mock(HookRegistry.HookRegistry)({
+        runEvent: (input) => {
+          const payload = input.payload as {
+            recoveryRequired: boolean;
+            statusChecked: boolean;
+            snapshotChecked: boolean;
+          };
+          return Effect.succeed(
+            payload.recoveryRequired && !(payload.statusChecked && payload.snapshotChecked)
+              ? { allowed: false, messages: ["Inspect browser status and snapshot first."] }
+              : { allowed: true, messages: [] },
+          );
+        },
+      }),
+      Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({
+        invoke: (request) => {
+          if (request.operation === "click" && ++clicks === 1)
+            return Effect.fail(
+              new PreviewAutomationNoAvailableHostError({
+                operation: "click",
+                environmentId,
+                threadId,
+                providerSessionId: "browser-recovery",
+                providerInstanceId,
+              }),
+            );
+          return Effect.succeed(
+            (request.operation === "status"
+              ? status
+              : request.operation === "snapshot"
+                ? snapshot
+                : {}) as never,
+          );
+        },
+      }),
+    );
+    const standard = yield* PreviewStandardToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(PreviewHandlers.layerStandard).pipe(
+          Layer.provide(dependencies),
+        ),
+      ),
+    );
+    const snapshots = yield* PreviewSnapshotToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(PreviewHandlers.layerSnapshot).pipe(
+          Layer.provide(dependencies),
+        ),
+      ),
+    );
+    const act = () =>
+      standard
+        .handle("preview_act", { action: "click", locator: "aria-ref=1" })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    const [first, blocked] = yield* Effect.all(
+      [act().pipe(Effect.result), act().pipe(Effect.result)],
+      { concurrency: "unbounded" },
+    );
+    expect(first._tag).toBe("Failure");
+    expect(blocked._tag).toBe("Failure");
+    if (first._tag === "Failure" && blocked._tag === "Failure") {
+      expect([first.failure._tag, blocked.failure._tag].sort()).toEqual([
+        "OrchestratorMcpFailure",
+        "PreviewAutomationNoAvailableHostError",
+      ]);
+      const denial = [first.failure, blocked.failure].find(
+        (failure) => failure._tag === "OrchestratorMcpFailure",
+      );
+      expect(denial?.message).toContain("Inspect browser status and snapshot first.");
+      expect(denial?.message).toContain("Follow the hook rule and relevant AGENTS.md instructions");
+      expect(denial?.message).toContain("ask rather than bypassing the hook");
+    }
+    expect(clicks).toBe(1);
+    yield* standard
+      .handle("preview_status", {})
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    yield* snapshots
+      .handle("preview_snapshot", {})
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    yield* act();
+    expect(clicks).toBe(2);
+  }),
 );
 
 describe("claimPreviewRecording", () => {

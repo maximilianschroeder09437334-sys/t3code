@@ -82,7 +82,12 @@ import Migration0076 from "./Migrations/076_ProjectionProjectsPinArchive.ts";
 import Migration0077 from "./Migrations/077_RepairBooleanSettledOverride.ts";
 import Migration0078 from "./Migrations/078_DropOrchestrationEventCorrelationIndex.ts";
 import Migration0079 from "./Migrations/079_DelegatedRecoveryIndexes.ts";
-import Migration0080 from "./Migrations/080_ScheduledTaskThreadMode.ts";
+import Migration0080 from "./Migrations/080_ThreadNotes.ts";
+import Migration0081 from "./Migrations/081_ScheduledTaskThreadMode.ts";
+
+import Migration0082 from "./Migrations/082_HookAutomation.ts";
+
+import Migration0083 from "./Migrations/083_WebPushNotifications.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -165,7 +170,10 @@ const migrationEntries = [
   [77, "RepairBooleanSettledOverride", Migration0077],
   [78, "DropOrchestrationEventCorrelationIndex", Migration0078],
   [79, "DelegatedRecoveryIndexes", Migration0079],
-  [80, "ScheduledTaskThreadMode", Migration0080],
+  [80, "ThreadNotes", Migration0080],
+  [81, "ScheduledTaskThreadMode", Migration0081],
+  [82, "HookAutomation", Migration0082],
+  [83, "WebPushNotifications", Migration0083],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -214,6 +222,38 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
   });
 });
 
+const reconcileNightlyHookMigration = Effect.fn("reconcileNightlyHookMigration")(function* (
+  throughId?: number,
+) {
+  if (throughId !== undefined && throughId < 81) return;
+  const sql = yield* SqlClient.SqlClient;
+  const tables =
+    yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
+  if (tables.length === 0) return;
+  const recorded = yield* sql<{
+    readonly name: string;
+  }>`SELECT name FROM effect_sql_migrations WHERE migration_id = 80`;
+  if (recorded[0]?.name !== "ScheduledTaskThreadMode") return;
+  const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(scheduled_tasks)`;
+  const later = yield* sql`SELECT migration_id FROM effect_sql_migrations WHERE migration_id > 80`;
+  if (!columns.some((column) => column.name === "thread_mode") || later.length > 0) {
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message:
+        "The official nightly migration history cannot be reconciled with this custom build.",
+    });
+  }
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const notes =
+        yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'thread_notes'`;
+      if (notes.length === 0) yield* Migration0080;
+      yield* sql`UPDATE effect_sql_migrations SET name = 'ThreadNotes' WHERE migration_id = 80`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (81, 'ScheduledTaskThreadMode')`;
+    }),
+  );
+});
+
 const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
@@ -227,6 +267,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
   if (includesV2) {
+    yield* reconcileNightlyHookMigration(toMigrationInclusive);
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }
   const executedMigrations = [

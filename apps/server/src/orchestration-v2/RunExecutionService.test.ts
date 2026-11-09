@@ -87,6 +87,7 @@ const layerRunExecutionTest = RunExecutionService.layer.pipe(
       mockEventSink({}),
       IdAllocator.layer,
       Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+        finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
         ingestNormalized: () => Effect.succeed([]),
       }),
       ServerSettings.layerTest(),
@@ -914,6 +915,7 @@ it.effect("passes the thread's MCP app context to the provider under a safe key"
             mockEventSink({}),
             IdAllocator.layer,
             Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
               ingestNormalized: () => Effect.succeed([]),
             }),
             ServerSettings.layerTest(),
@@ -948,6 +950,7 @@ it.effect("fails the run when its ownership check cannot be read before calling 
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
             ingestNormalized: () => Effect.succeed([]),
           }),
           ServerSettings.layerTest(),
@@ -1160,6 +1163,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
             ingestNormalized: () => Effect.succeed([]),
           }),
           ServerSettings.layerTest(),
@@ -1282,6 +1286,7 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
             }),
             IdAllocator.layer,
             Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
               ingestNormalized: () => Effect.succeed([]),
             }),
             scenario === "start-guard"
@@ -1462,6 +1467,7 @@ it.effect("ingests new member threads of an owned child after the root turn term
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
             ingestNormalized: (input) =>
               Effect.gen(function* () {
                 const eventType = input.event.type;
@@ -1717,6 +1723,7 @@ it.effect("ends a nested native subagent and its thread when the root run is int
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
             ingestNormalized: () => Effect.succeed([]),
           }),
           ServerSettings.layerTest(),
@@ -2129,6 +2136,7 @@ it.effect(
             }),
             IdAllocator.layer,
             Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
               ingestNormalized: (input) =>
                 Ref.update(ingested, (current) => [...current, input.event]).pipe(Effect.as([])),
             }),
@@ -2593,6 +2601,81 @@ it.effect("does not overwrite Stop when ownership changes after the finalization
       ["checkpoint.capture"],
     );
     assert.deepEqual(committedEffects, []);
+  }),
+);
+
+it.effect(
+  "queues hook continuation after checkpoint and only when the terminal write commits",
+  () =>
+    Effect.gen(function* () {
+      for (const rejectTerminalWrite of [false, true]) {
+        const { submittedEffects, committedEffects } = yield* captureRootRunTermination({
+          key: `hook-continuation-finalization-${rejectTerminalWrite}`,
+          shouldFinalizeRun: () => Effect.succeed(true),
+          rejectTerminalWrite,
+          events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+          finishRootTurn: () =>
+            Effect.succeed({
+              allowed: true,
+              messages: [],
+              continueWork: true,
+              stageWorkspaceRoot: "C:/workspace",
+            }),
+        });
+        assert.deepEqual(
+          submittedEffects.map((effect) => effect.request.type),
+          ["checkpoint.capture", "hook.continue"],
+        );
+        assert.deepEqual(
+          committedEffects.map((effect) => effect.request.type),
+          rejectTerminalWrite ? [] : ["checkpoint.capture", "hook.continue"],
+        );
+      }
+    }),
+);
+
+it.effect("shows and retries the exact turn-end hook denial", () =>
+  Effect.gen(function* () {
+    const { written, observed, submittedEffects, committedEffects } =
+      yield* captureRootRunTermination({
+        key: "hook-denial-visible",
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+        finishRootTurn: () => Effect.succeed({ allowed: false, messages: ["Use both headings."] }),
+      });
+    const error = written.find((item) => item.type === "error");
+    assert.isDefined(error);
+    if (error?.type !== "error") throw new Error("Expected a visible hook denial.");
+    assert.equal(error.failure.message, "Use both headings.");
+    assert.equal(error.failure.code, "hook_blocked");
+    assert.equal(error.title, "Blocked by hook");
+    assert.include(observed, "run:failed");
+    assert.deepEqual(
+      submittedEffects.map((effect) => effect.request.type),
+      ["hook.continue"],
+    );
+    assert.deepEqual(
+      committedEffects.map((effect) => effect.request.type),
+      ["hook.continue"],
+    );
+  }),
+);
+
+it.effect("dispatches the hook correction continuation with denial messages", () =>
+  Effect.gen(function* () {
+    const { committedEffects } = yield* captureRootRunTermination({
+      key: "hook-denial-correction-continuation",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      finishRootTurn: () =>
+        Effect.succeed({ allowed: false, messages: ["Use both headings.", "Add a summary."] }),
+    });
+    const continuation = committedEffects.find((effect) => effect.request.type === "hook.continue");
+    assert.isDefined(continuation);
+    if (continuation?.request.type !== "hook.continue") {
+      throw new Error("Expected a committed hook correction continuation.");
+    }
+    assert.deepEqual(continuation.request.messages, ["Use both headings.", "Add a summary."]);
   }),
 );
 
@@ -3159,6 +3242,7 @@ function captureRootRunTermination(input: {
   readonly shouldStartProviderTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["shouldStartProviderTurn"];
   readonly appContext?: ReturnType<McpAppModelContext.McpAppModelContext["Service"]["forThread"]>;
   readonly ingestNormalized?: ProviderEventIngestor.ProviderEventIngestorV2["Service"]["ingestNormalized"];
+  readonly finishRootTurn?: ProviderEventIngestor.ProviderEventIngestorV2["Service"]["finishRootTurn"];
   readonly beforeTerminalWrite?: (
     request: Parameters<EventSink.EventSinkV2["Service"]["writeIfRunCurrent"]>[0],
   ) => Effect.Effect<boolean, EventSink.EventSinkV2Error>;
@@ -3239,7 +3323,9 @@ function captureRootRunTermination(input: {
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
             ingestNormalized: input.ingestNormalized ?? (() => Effect.succeed([])),
+            ...(input.finishRootTurn === undefined ? {} : { finishRootTurn: input.finishRootTurn }),
           }),
           ServerSettings.layerTest(),
           Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
@@ -3744,6 +3830,7 @@ function runBackgroundItemScenario(
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            finishRootTurn: () => Effect.succeed({ allowed: true, messages: [] }),
             ingestNormalized: (input) =>
               Effect.gen(function* () {
                 const event = input.event;

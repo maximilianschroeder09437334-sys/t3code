@@ -2953,6 +2953,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     buildConfig.nsis = {
       differentialPackage: true,
       include: "apps/desktop/resources/installer.nsh",
+      warningsAsErrors: false,
     };
     const winConfig: Record<string, unknown> = {
       target: [target],

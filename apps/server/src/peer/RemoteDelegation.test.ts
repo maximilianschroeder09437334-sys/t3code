@@ -1,3 +1,4 @@
+import * as HookAutomation from "../hooks/HookAutomation.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -487,7 +488,14 @@ const boxToolkitLayer = (thread: BoxThread) => {
       Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
     ),
     Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
-    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+    Layer.provide(
+      Layer.merge(
+        Layer.mock(HookAutomation.HookAutomation)({
+          emit: () => Effect.succeed({ allowed: true, messages: [] }),
+        }),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      ),
+    ),
     Layer.provide(
       Layer.mock(ProjectService.ProjectService)({
         getById: () => Effect.succeedNone,
@@ -597,7 +605,14 @@ const makeLaptop = (
       Layer.provideMerge(layerThreads),
       Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
       Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
-      Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+      Layer.provide(
+        Layer.merge(
+          Layer.mock(HookAutomation.HookAutomation)({
+            emit: () => Effect.succeed({ allowed: true, messages: [] }),
+          }),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ),
+      ),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),

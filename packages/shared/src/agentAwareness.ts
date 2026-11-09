@@ -1,3 +1,4 @@
+import { shouldNotifyThread } from "./threadNotifications.ts";
 import {
   isListedThreadLineage,
   type EnvironmentId,
@@ -39,10 +40,15 @@ function buildAgentAwarenessDeepLink(input: {
 }
 
 export interface ProjectThreadAwarenessV2Input {
+  readonly notificationsOnly?: boolean;
   readonly environmentId: EnvironmentId;
   readonly project: Pick<Project, "title">;
   readonly thread: Pick<
     OrchestrationV2ThreadShell,
+    | "agentPing"
+    | "lastVisitedAt"
+    | "notificationsMuted"
+    | "latestRunHumanAuthored"
     | "activityRunStatus"
     | "id"
     | "lineage"
@@ -62,11 +68,27 @@ export function projectThreadAwarenessV2(
 ): AgentAwarenessState | null {
   const { environmentId, project, thread } = input;
   if (!isListedThreadLineage(thread.lineage)) return null;
-  const phase = resolveThreadAwarenessPhaseV2(thread);
+  const ping =
+    thread.agentPing != null &&
+    thread.agentPing.at >
+      (thread.lastVisitedAt == null ? 0 : DateTime.toEpochMillis(thread.lastVisitedAt))
+      ? thread.agentPing
+      : null;
+  const phase = ping !== null ? "waiting_for_input" : resolveThreadAwarenessPhaseV2(thread);
   if (phase === null) {
     return null;
   }
   if (phase === "completed" && thread.latestRunStopRequested === true) return null;
+  if (
+    input.notificationsOnly === true &&
+    (phase === "completed" || phase === "failed") &&
+    !shouldNotifyThread({
+      kind: phase === "completed" ? "completion" : "failure",
+      muted: thread.notificationsMuted,
+      humanAuthored: thread.latestRunHumanAuthored,
+    })
+  )
+    return null;
   // Resolve the phase first so live or waiting work stays visible after settlement.
   if (
     thread.settledOverride === "settled" &&
@@ -76,18 +98,20 @@ export function projectThreadAwarenessV2(
     return null;
   }
   const detail =
-    phase === "completed"
-      ? "Review the completed task."
-      : phase === "failed"
-        ? "The agent run failed."
-        : undefined;
+    ping !== null
+      ? ping.message
+      : phase === "completed"
+        ? "Review the completed task."
+        : phase === "failed"
+          ? "The agent run failed."
+          : undefined;
   return {
     environmentId,
     threadId: thread.id,
     projectTitle: project.title,
     threadTitle: thread.title,
     phase,
-    headline: headlineForPhase(phase),
+    headline: ping?.title ?? headlineForPhase(phase),
     ...(detail === undefined ? {} : { detail }),
     modelTitle: thread.modelSelection.model,
     updatedAt: DateTime.formatIso(thread.updatedAt),

@@ -128,6 +128,7 @@ const appLinking = {
     "t3code://",
     "t3code-dev://",
     "t3code-preview://",
+    "t3code-maxi://",
     DEFAULT_HOSTED_APP_URL,
   ],
   config: { initialRouteName: "Home" },

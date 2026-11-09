@@ -41,6 +41,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
 
 const instanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId, model: "gpt-5.1-codex" };
@@ -954,6 +955,204 @@ it.effect("a run Stop reached cannot delegate or start a watch, even after it en
       });
     }
     assert.deepEqual((yield* threadState(threadId)).watched, [4]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("thread.stop prevents a pending hook continuation of a completed run", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = ThreadId.make("thread:stop-hook-continuation");
+    yield* createWatchingThread(threadId, 8);
+    yield* send(threadId, "work", "start_immediately");
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    yield* projections.apply({
+      id: EventId.make("event:stop-hook:complete"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "completed", completedAt: now },
+    });
+    const at = DateTime.formatIso(now);
+    yield* sql`INSERT INTO orchestration_v2_effect_outbox (effect_id, command_id, thread_id, effect_type, payload_json, status, attempt_count, available_at, created_at, updated_at) VALUES (${`effect:hook.continue:${run.id}`}, 'command:hook', ${threadId}, 'hook.continue', ${encodeEffectRequest({ type: "hook.continue", sourceRunId: run.id })}, 'pending', 0, ${at}, ${at}, ${at})`;
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop-hook"),
+      threadId,
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("hook-after-stop"),
+      threadId,
+      messageId: MessageId.make("hook-after-stop"),
+      text: "Continue",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "agent",
+      creationSource: "server",
+      hookContinuationOfRunId: run.id,
+    });
+    assert.deepEqual(yield* threadState(threadId), { runs: ["completed"], watched: [] });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([false, true])(
+  "thread.stop prevents a pending hook correction after a blocked report (stop=%s)",
+  (stop) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:stop-blocked-hook-correction");
+      yield* createWatchingThread(threadId, 8);
+      yield* send(threadId, "work", "start_immediately");
+      const now = yield* DateTime.now;
+      const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      yield* projections.apply({
+        id: EventId.make("event:stop-blocked-hook:failed"),
+        type: "run.updated",
+        threadId,
+        runId: run.id,
+        occurredAt: now,
+        payload: { ...run, status: "failed", completedAt: now },
+      });
+      yield* projections.apply({
+        id: EventId.make("event:stop-blocked-hook:error"),
+        type: "turn-item.updated",
+        threadId,
+        runId: run.id,
+        nodeId: run.rootNodeId!,
+        providerInstanceId: instanceId,
+        occurredAt: now,
+        payload: makeProviderFailureTurnItem({
+          driver: ProviderDriverKind.make("codex"),
+          threadId,
+          runId: run.id,
+          nodeId: run.rootNodeId!,
+          providerThreadId: ProviderThreadId.make("provider:stop-blocked-hook"),
+          providerTurnId: ProviderTurnId.make("turn:stop-blocked-hook"),
+          itemOrdinal: 100,
+          failure: {
+            code: "hook_blocked",
+            class: "unknown",
+            message: "Use both headings.",
+            retryable: false,
+          },
+          occurredAt: now,
+        }),
+      });
+      const at = DateTime.formatIso(now);
+      yield* sql`INSERT INTO orchestration_v2_effect_outbox (effect_id, command_id, thread_id, effect_type, payload_json, status, attempt_count, available_at, created_at, updated_at) VALUES (${`effect:hook.continue:${run.id}`}, 'command:blocked-hook', ${threadId}, 'hook.continue', ${encodeEffectRequest({ type: "hook.continue", sourceRunId: run.id })}, 'pending', 0, ${at}, ${at}, ${at})`;
+      if (stop)
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("stop-blocked-hook"),
+          threadId,
+        });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("blocked-hook-after-stop"),
+        threadId,
+        messageId: MessageId.make("blocked-hook-after-stop"),
+        text: "Correct the report",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "agent",
+        creationSource: "server",
+        hookContinuationOfRunId: run.id,
+      });
+      const state = yield* threadState(threadId);
+      assert.lengthOf(state.runs, stop ? 1 : 2);
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a queued user message takes precedence over hook continuation", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:queued-before-hook");
+    yield* createWatchingThread(threadId, 9);
+    yield* send(threadId, "first", "start_immediately");
+    yield* send(threadId, "user's next request", "queue_after_active");
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    yield* projections.apply({
+      id: EventId.make("event:queued-before-hook:complete"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "completed", completedAt: now },
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("hook-after-queue"),
+      threadId,
+      messageId: MessageId.make("hook-after-queue"),
+      text: "Continue",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "agent",
+      creationSource: "server",
+      hookContinuationOfRunId: run.id,
+    });
+    const projection = yield* orchestrator.getThreadProjection(threadId);
+    assert.lengthOf(projection.runs, 2);
+    assert.equal(projection.runs[1]?.status, "queued");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a pending user request blocks hook continuation", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:pending-before-hook");
+    yield* createWatchingThread(threadId, 10);
+    yield* send(threadId, "first", "start_immediately");
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    yield* projections.apply({
+      id: EventId.make("event:pending-hook:complete"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "completed", completedAt: now },
+    });
+    yield* projections.apply({
+      id: EventId.make("event:pending-hook:request"),
+      type: "runtime-request.updated",
+      threadId,
+      nodeId: run.rootNodeId!,
+      occurredAt: now,
+      payload: {
+        id: RuntimeRequestId.make("pending-hook-request"),
+        nodeId: run.rootNodeId!,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input",
+        status: "pending",
+        responseCapability: { type: "message" },
+        createdAt: now,
+        resolvedAt: null,
+      },
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("hook-after-request"),
+      threadId,
+      messageId: MessageId.make("hook-after-request"),
+      text: "Continue",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "agent",
+      creationSource: "server",
+      hookContinuationOfRunId: run.id,
+    });
+    assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
   }).pipe(Effect.provide(layerTest)),
 );
 

@@ -5,12 +5,12 @@ import {
   ProjectId,
   ProviderInstanceId,
   ProviderDriverKind,
+  ThreadId,
   type ServerProvider,
   type Project as ProjectRecord,
   type ModelSelection,
   type RuntimeMode,
   type OrchestrationV2ThreadShell,
-  ThreadId,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -25,6 +25,8 @@ import * as Stream from "effect/Stream";
 
 import * as DocumentText from "../../../provider/DocumentText.ts";
 import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
+import * as HookStagingManager from "../../../hooks/HookStagingManager.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
@@ -221,7 +223,7 @@ it.effect(
       expect(belowCeiling.result).toMatchObject({
         projectId: belowCeiling.projectId,
         modelSelection: belowCeiling.modelSelection,
-        link: `<t3-thread://v2/environment/${belowCeiling.launched[0]?.threadId}>`,
+        link: `[Fix](https://app.t3.codes/threads/environment/${encodeURIComponent(belowCeiling.launched[0]!.threadId!)})`,
       });
       expect(belowCeiling.launched[0]?.runtimeMode).toBe("approval-required");
       expect(belowCeiling.launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
@@ -237,9 +239,9 @@ it.effect(
 
       const requested = yield* launchWith("full-access", "approval-required", {
         title: "Fix",
-        runtimeMode: "auto",
+        runtimeMode: "full-access",
       });
-      expect(requested.launched[0]?.runtimeMode).toBe("auto");
+      expect(requested.launched[0]?.runtimeMode).toBe("full-access");
 
       const escalated = yield* launchWith("auto-accept-edits", "auto-accept-edits", {
         title: "Fix",
@@ -368,6 +370,235 @@ it.effect("a launch retried with the same clientRequestId replays the first one"
     // Without a key every launch is new.
     expect(ids[3]).not.toEqual(ids[4]);
   }),
+);
+
+it.effect("MCP staged writes edit only a candidate already in the active run manifest", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "t3-hook-mcp-write-",
+    });
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const harness = clientLaunchHarness({
+      runtimeModeCeiling: "full-access",
+      launched,
+      workspaceRoot,
+    });
+    const threadId = ThreadId.make("thread-hook-mcp-write");
+    const runId = "run-hook-mcp-write";
+    const stageSession = HookStagingManager.makeHookStageSession({
+      workspaceRoot,
+      threadId,
+      runId,
+    });
+    yield* Effect.promise(() => HookStagingManager.prepareHookStage(stageSession));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => HookStagingManager.forgetActiveHookStageSession(threadId, runId)),
+    );
+    const dependencies = Layer.mergeAll(
+      harness.dependencies,
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () =>
+          Effect.succeed({
+            id: threadId,
+            projectId: harness.projectId,
+            deletedAt: null,
+            archivedAt: null,
+            activeRunId: runId,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "auto",
+            interactionMode: "default",
+          } as never),
+        getThreadSnapshotWindow: () =>
+          Effect.succeed({
+            projection: {
+              thread: { id: threadId, projectId: harness.projectId, worktreePath: null },
+              runs: [{ id: runId, status: "running" }],
+            },
+          } as never),
+      }),
+      Layer.mock(HookRegistry.HookRegistry)({
+        runEvent: (input) =>
+          Effect.succeed(
+            (input.payload as { path?: string }).path === "src/blocked.ts"
+              ? { allowed: false, messages: ["Use the approved staging path."] }
+              : { allowed: true, messages: [] },
+          ),
+      }),
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "thread:test",
+        thread: {
+          threadId,
+          providerSessionId: "provider-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const invokeStage = (input: {
+      readonly environmentId: EnvironmentId;
+      readonly path: string;
+      readonly create: boolean;
+    }) =>
+      toolkit
+        .handle("t3_hook_stage_file", input)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    const invokeWrite = (input: {
+      readonly environmentId: EnvironmentId;
+      readonly path: string;
+      readonly contents: string;
+    }) =>
+      toolkit
+        .handle("t3_hook_write_staged_file", input)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    const blocked = yield* invokeStage({
+      environmentId: EnvironmentId.make("environment"),
+      path: "src/blocked.ts",
+      create: true,
+    });
+    expect(blocked.at(-1)?.result).toMatchObject({
+      code: "invalid_request",
+      message: expect.stringContaining("Use the approved staging path."),
+    });
+    expect(blocked.at(-1)?.result).toMatchObject({
+      message: expect.stringContaining("Follow the hook rule and relevant AGENTS.md instructions"),
+    });
+
+    const staged = yield* invokeStage({
+      environmentId: EnvironmentId.make("environment"),
+      path: "src/new.ts",
+      create: true,
+    });
+    expect(staged.at(-1)?.result).toMatchObject({
+      candidatePath: expect.stringContaining("new.ts"),
+    });
+    const stageResult = staged.at(-1)?.result as { readonly candidatePath: string };
+
+    const written = yield* invokeWrite({
+      environmentId: EnvironmentId.make("environment"),
+      path: "src/new.ts",
+      contents: "export const value = 1;\n",
+    });
+    expect(written.at(-1)?.result).toMatchObject({
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(yield* fileSystem.readFileString(stageResult.candidatePath)).toBe(
+      "export const value = 1;\n",
+    );
+
+    const rejected = yield* invokeWrite({
+      environmentId: EnvironmentId.make("environment"),
+      path: "src/outside.ts",
+      contents: "escape",
+    });
+    expect(rejected.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("Auto can draft only an inactive hook for the caller's project", () =>
+  Effect.gen(function* () {
+    const harness = clientLaunchHarness({ runtimeModeCeiling: "full-access", launched: [] });
+    const threadId = ThreadId.make("thread-hook-draft");
+    const created: Array<{
+      readonly projectId: ProjectId;
+      readonly script: string;
+      readonly scope?: "project" | "all-projects" | undefined;
+    }> = [];
+    let active = true;
+    let interactionMode: "default" | "plan" = "default";
+    const dependencies = Layer.mergeAll(
+      harness.dependencies,
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () =>
+          Effect.succeed({
+            id: threadId,
+            projectId: harness.projectId,
+            deletedAt: null,
+            archivedAt: null,
+            activeRunId: active ? "run-hook-draft" : null,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "auto",
+            interactionMode,
+          } as never),
+      }),
+      Layer.mock(HookRegistry.HookRegistry)({
+        createDraft: (input) =>
+          Effect.sync(() => {
+            created.push(input);
+            return {
+              ...input,
+              id: "draft-1",
+              scriptSha256: "a".repeat(64),
+              status: "draft" as const,
+              enabled: false,
+              createdAt: 0,
+            };
+          }),
+      }),
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "thread:test",
+        thread: {
+          threadId,
+          providerSessionId: "provider-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const invoke = (projectId: ProjectId, scope?: "project" | "all-projects") =>
+      toolkit
+        .handle("t3_hook_draft", {
+          environmentId: EnvironmentId.make("environment"),
+          projectId,
+          ...(scope === undefined ? {} : { scope }),
+          name: "Guard",
+          event: "before_file_write",
+          script: 'return { decision: "allow" };',
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    expect((yield* invoke(harness.projectId)).at(-1)?.result).toMatchObject({
+      scope: "all-projects",
+      status: "draft",
+      enabled: false,
+    });
+    expect((yield* invoke(harness.projectId, "project")).at(-1)?.result).toMatchObject({
+      scope: "project",
+      status: "draft",
+      enabled: false,
+    });
+    expect((yield* invoke(ProjectId.make("project:other"))).at(-1)?.result).toMatchObject({
+      code: "capability_denied",
+    });
+    interactionMode = "plan";
+    expect((yield* invoke(harness.projectId)).at(-1)?.result).toMatchObject({
+      code: "capability_denied",
+    });
+    interactionMode = "default";
+    active = false;
+    expect((yield* invoke(harness.projectId)).at(-1)?.result).toMatchObject({
+      code: "parent_not_active",
+    });
+    expect(created).toHaveLength(2);
+    expect(created[0]?.projectId).toBe(harness.projectId);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("a launch key of any length or content gives a short id and never a defect", () =>

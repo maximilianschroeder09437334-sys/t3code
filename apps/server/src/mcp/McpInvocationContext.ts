@@ -12,7 +12,7 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import { formatThreadLink, hostedThreadLink } from "@t3tools/shared/threadLinks";
+import { formatHostedThreadLink, hostedThreadLink } from "@t3tools/shared/threadLinks";
 
 const ALL_MCP_CAPABILITIES = [
   "preview",
@@ -134,16 +134,19 @@ export interface McpInvocationScope {
 }
 
 /**
- * T3 Code renders `t3-thread://` links as thread chips. Other MCP clients cannot open them, so
- * they get the hosted link Copy thread copies, which opens the thread in either app or a browser.
+ * Native agents receive the copyable hosted Markdown thread chip. External clients retain
+ * their configured hosted origin and plain URL contract.
  */
 export const threadLinkFor = (
   scope: Pick<McpInvocationScope, "environmentId" | "client">,
   threadId: ThreadId,
+  title = "Thread",
 ): string => {
   const hostedAppUrl = scope.client?.hostedAppUrl;
   const ref = { environmentId: scope.environmentId, threadId };
-  return hostedAppUrl === undefined ? formatThreadLink(ref) : hostedThreadLink(ref, hostedAppUrl);
+  return hostedAppUrl === undefined
+    ? formatHostedThreadLink(ref, title)
+    : hostedThreadLink(ref, hostedAppUrl);
 };
 
 export class McpInvocationContext extends Context.Service<

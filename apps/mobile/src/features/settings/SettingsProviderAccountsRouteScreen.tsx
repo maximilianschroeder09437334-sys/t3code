@@ -37,7 +37,7 @@ import { useSettingsEnvironmentFilter, type SettingsTarget } from "./settings-en
 
 export function SettingsProviderAccountsRouteScreen() {
   const environmentMenu = useSettingsEnvironmentMenu();
-  const { selectedTargets } = useSettingsEnvironmentFilter();
+  const { selectedTargets } = useSettingsEnvironmentFilter({ includeDisconnected: true });
   const permittedEnvironments = useEnvironmentsWithScope(selectedTargets, AuthProvidersManageScope);
   const providersByEnvironment = useAtomValue(environmentPresentations.providersByEnvironmentAtom);
   const insets = useSafeAreaInsets();
@@ -54,7 +54,31 @@ export function SettingsProviderAccountsRouteScreen() {
         ) : (
           selectedTargets.map((environment) => (
             <SettingsSection key={environment.environmentId} title={environment.label}>
-              {!permittedEnvironments.has(environment.environmentId) ? (
+              {environment.connection.phase !== "connected" ? (
+                <View className="gap-3 p-4">
+                  <Text className="text-sm text-foreground-muted">
+                    Disconnected. Showing last known providers; status may be out of date. Reconnect
+                    to make changes.
+                  </Text>
+                  {(providersByEnvironment.get(environment.environmentId) ?? []).map((provider) => (
+                    <View key={provider.instanceId} className="gap-1">
+                      <Text className="text-base text-foreground">
+                        {provider.displayName ?? provider.driver}
+                      </Text>
+                      <Text className="text-sm text-foreground-muted">
+                        {provider.auth.status === "authenticated"
+                          ? "Last known: signed in"
+                          : "Last known: sign-in not confirmed"}
+                      </Text>
+                    </View>
+                  ))}
+                  {(providersByEnvironment.get(environment.environmentId) ?? []).length === 0 ? (
+                    <Text className="text-sm text-foreground-muted">
+                      No provider information is cached.
+                    </Text>
+                  ) : null}
+                </View>
+              ) : !permittedEnvironments.has(environment.environmentId) ? (
                 <View className="gap-1 p-4">
                   <Text className="text-base text-foreground">Limited permissions</Text>
                   <Text className="text-sm text-foreground-muted">

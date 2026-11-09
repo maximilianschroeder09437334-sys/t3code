@@ -1,3 +1,8 @@
+import * as WebPushNotifications from "./notifications/WebPushNotifications.ts";
+import * as WebPushTransport from "./notifications/WebPushTransport.ts";
+import * as WebPushAuthSessions from "./persistence/AuthSessions.ts";
+import * as HookAutomation from "./hooks/HookAutomation.ts";
+import * as HookScheduler from "./scheduling/Scheduler.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -56,6 +61,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as DelegatedTaskAnalytics from "./telemetry/DelegatedTaskAnalytics.ts";
 import * as ProviderUsageAnalytics from "./telemetry/ProviderUsageAnalytics.ts";
+import * as ProviderEventIngestor from "./orchestration-v2/ProviderEventIngestor.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ResetCreditCoordinator from "./provider/resetCreditCoordinator.ts";
 import * as EventNdjsonLogger from "./provider/EventNdjsonLogger.ts";
@@ -84,6 +90,8 @@ import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
+import * as HookRegistry from "./hooks/HookRegistry.ts";
+import * as HookScriptRunner from "./hooks/HookScriptRunner.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -199,6 +207,7 @@ import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsag
 import * as UsageService from "./usage/UsageService.ts";
 import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
+import * as ProviderTurnStartService from "./orchestration-v2/ProviderTurnStartService.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
@@ -368,7 +377,7 @@ const layerHttpServer = Layer.unwrap(
         port: config.port,
         gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
         // Context takeover stays enabled (ws default) so the compression
-        // window is shared across frames — that also makes small frames cheap
+        // window is shared across frames â€” that also makes small frames cheap
         // to compress, so no size threshold is set (ws only honors
         // `threshold` when context takeover is disabled).
         websocket: { perMessageDeflate: true },
@@ -565,6 +574,8 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provideMerge(ProviderTurnStartService.layerProviderTurnStartHooks),
+  Layer.provideMerge(ProviderEventIngestor.layerProviderTurnEndHooks),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderUsageAnalytics.layer),
   Layer.provide(layerCheckpointStore),
@@ -768,6 +779,7 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(DirectEndpoints.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
+  Layer.provideMerge(HookRegistry.layer.pipe(Layer.provide(HookScriptRunner.layer))),
 );
 
 const layerCommandReadiness = HttpRouter.middleware(
@@ -825,6 +837,15 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerBrowser.layer.pipe(
       Layer.provide(Layer.merge(DesktopBrowserChannel.layer, PreviewAgentActivity.layer)),
     ),
+  ),
+  Layer.provide(
+    Layer.merge(
+      HookAutomation.layer,
+      WebPushNotifications.layer.pipe(
+        Layer.provide(WebPushTransport.layer),
+        Layer.provide(WebPushAuthSessions.layer),
+      ),
+    ).pipe(Layer.provide(HookScheduler.layer)),
   ),
   Layer.provide(PreviewBrowser.layer),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).

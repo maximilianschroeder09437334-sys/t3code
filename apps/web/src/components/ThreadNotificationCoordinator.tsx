@@ -1,3 +1,5 @@
+import * as DateTime from "effect/DateTime";
+import { shouldNotifyThread } from "@t3tools/shared/threadNotifications";
 import {
   type EnvironmentThreadShell,
   type PendingSubagentRequest,
@@ -40,6 +42,7 @@ import { toastManager } from "./ui/toast";
 
 interface NotificationState extends ThreadNotificationObservation {
   readonly raw: OrchestrationV2ThreadShell;
+  readonly explicitPing: boolean;
   readonly subagentRequest: PendingSubagentRequest | null;
   readonly thread: EnvironmentThreadShell;
   readonly status: SidebarThreadStatus;
@@ -118,6 +121,20 @@ export function startThreadNotifications(
   ) => {
     const { thread, status } = state;
     if (
+      !shouldNotifyThread({
+        kind:
+          kind === "completion"
+            ? "completion"
+            : status === "failed" || status === "limited"
+              ? "failure"
+              : "input",
+        muted: state.raw.notificationsMuted,
+        humanAuthored: state.raw.latestRunHumanAuthored,
+        explicitPing: state.explicitPing,
+      })
+    )
+      return;
+    if (
       registry
         .get(environmentThreadShells.hiddenThreadKeysAtom)
         .has(threadKey({ environmentId, threadId: thread.id }))
@@ -128,8 +145,9 @@ export function startThreadNotifications(
       environmentId?: string;
       threadId?: string;
     };
-    const title =
-      kind === "completion"
+    const title = state.explicitPing
+      ? (state.raw.agentPing?.title ?? "Agent update")
+      : kind === "completion"
         ? "Thread completed"
         : status === "approval"
           ? "Approval needed"
@@ -156,7 +174,9 @@ export function startThreadNotifications(
         onRemove: (): void => forgetToast(toastKey, toastId),
         type: kind === "completion" ? "success" : status === "failed" ? "error" : "warning",
         title,
-        description: thread.title,
+        description: state.explicitPing
+          ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
+          : thread.title,
         data: {
           hideCopyButton: true,
           leadingIcon:
@@ -195,7 +215,9 @@ export function startThreadNotifications(
       return;
     try {
       const notification = new Notification(title, {
-        body: thread.title,
+        body: state.explicitPing
+          ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
+          : thread.title,
         tag: threadNotificationTag(environmentId, thread.id),
         silent: true,
         // Windows drops clicks after a toast moves into Notification Center.
@@ -252,18 +274,24 @@ export function startThreadNotifications(
       const thread = presentThreadShell(environmentId, rawThread, subagentRequest);
       let status = resolveSidebarThreadStatus(thread);
       if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
-      const attention =
-        status === "input" ||
-        status === "request" ||
-        status === "approval" ||
-        status === "failed" ||
-        status === "limited"
+      const explicitPing =
+        rawThread.agentPing != null &&
+        rawThread.agentPing.at >
+          (rawThread.lastVisitedAt == null ? 0 : DateTime.toEpochMillis(rawThread.lastVisitedAt));
+      const attention = explicitPing
+        ? `ping:${rawThread.agentPing!.id}`
+        : status === "input" ||
+            status === "request" ||
+            status === "approval" ||
+            status === "failed" ||
+            status === "limited"
           ? `${thread.latestRun?.runId ?? ""}:${status}`
           : null;
       const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
       const settled = status === "ready" && thread.latestRun?.status === "completed";
       const state = {
         raw: rawThread,
+        explicitPing,
         subagentRequest,
         thread,
         status,

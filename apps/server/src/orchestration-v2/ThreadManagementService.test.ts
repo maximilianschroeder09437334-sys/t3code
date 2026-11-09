@@ -873,3 +873,81 @@ it.effect("Force stop refuses once a newer run has started, before killing anyth
     expect(killed).toBe(false);
   }),
 );
+
+it.effect(
+  "binds internal reminders to their owner and forwards the atomic idle recovery guard",
+  () => {
+    const threadId = ThreadId.make("thread:guarded-recovery");
+    const projectId = ProjectId.make("project:guarded-recovery");
+    const sourceId = RunId.make("run:guarded-recovery");
+    const selection = { instanceId: ProviderInstanceId.make("codex"), model: "test" };
+    const commands: unknown[] = [];
+    const layer = ThreadManagementService.layer.pipe(
+      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadRecords: () =>
+            Effect.succeed({
+              thread: {
+                id: threadId,
+                projectId,
+                archivedAt: null,
+                deletedAt: null,
+                modelSelection: selection,
+              },
+              runs: [{ id: sourceId, ordinal: 1, status: "completed" }],
+              providerTurns: [],
+            } as never),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+            }).pipe(
+              Effect.andThen(Effect.die("Fixture stops after observing the guarded dispatch")),
+            ),
+        }),
+      ),
+      Layer.provide(
+        ServerSettings.layerTest({
+          providerInstances: { [selection.instanceId]: { driver: "codex", enabled: true } },
+        }),
+      ),
+      Layer.provideMerge(layerReceiptsTest),
+    );
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const base = {
+        threadId,
+        projectId,
+        commandId: CommandId.make("command:guarded-recovery"),
+        messageId: MessageId.make("message:guarded-recovery"),
+        text: "Recover registered work",
+        attachments: [],
+        modelSelection: selection,
+        createdBy: "agent" as const,
+        creationSource: "server" as const,
+      };
+      const held = yield* threads
+        .sendToThread({ ...base, mode: "steer", expectedRunId: sourceId })
+        .pipe(Effect.flip);
+      expect(held).toBeInstanceOf(ThreadManagementService.ThreadManagementNoSteerableRunError);
+      expect(commands).toHaveLength(0);
+      yield* threads
+        .sendToThread({
+          ...base,
+          mode: "auto",
+          hookContinuationOfRunId: sourceId,
+          hookStageWorkspaceRoot: "/workspace",
+        })
+        .pipe(Effect.exit);
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toMatchObject({
+        type: "message.dispatch",
+        hookContinuationOfRunId: sourceId,
+        hookStageWorkspaceRoot: "/workspace",
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "agent",
+        creationSource: "server",
+      });
+    }).pipe(Effect.provide(layer));
+  },
+);

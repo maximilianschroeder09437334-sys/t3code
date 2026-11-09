@@ -1,4 +1,4 @@
-import { assert, it, vi } from "@effect/vitest";
+import { assert, expect, it, vi } from "@effect/vitest";
 import {
   EnvironmentId,
   EventId,
@@ -703,6 +703,112 @@ it.effect("idle compaction filters keep the latest run, live work and the newest
       latestProviderTurnUsageOnly: true,
     });
     assert.deepEqual([empty.runs, empty.providerTurns], [[], []]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("keeps mute settings and exact human-run origin in shell and relay projections", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* addRolledBackRecoveryCandidate("notification-origin");
+    const projection = yield* store.getThreadProjection(threadId);
+    const run = projection.runs.at(-1)!;
+    const now = yield* DateTime.now;
+    for (const createdBy of ["user", "agent"] as const) {
+      yield* store.apply({
+        id: EventId.make(`notification-origin:${createdBy}`),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: run.userMessageId,
+          threadId,
+          runId: run.id,
+          nodeId: null,
+          createdBy,
+          creationSource: createdBy === "user" ? "web" : "mcp",
+          role: "user",
+          text: "Do the work",
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      const shell = yield* store.getThreadShell(threadId);
+      expect(shell?.latestRunHumanAuthored).toBe(createdBy === "user");
+      expect(shell?.notificationsMuted).toBe(true);
+      const relay = (yield* store.getAgentAwarenessSnapshot(threadId)).threads[0]!;
+      expect(relay.latestRunHumanAuthored).toBe(createdBy === "user");
+      expect(relay.notificationsMuted).toBe(true);
+    }
+    yield* store.apply({
+      id: EventId.make("notification-origin:unmute"),
+      type: "thread.metadata-updated",
+      threadId,
+      occurredAt: now,
+      payload: { ...projection.thread, notificationsMuted: false, updatedAt: now },
+    });
+    expect((yield* store.getThreadShell(threadId))?.notificationsMuted).toBe(false);
+    yield* store.apply({
+      id: EventId.make("notification-origin:human-root"),
+      type: "message.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: run.userMessageId,
+        threadId,
+        runId: run.id,
+        nodeId: null,
+        createdBy: "user",
+        creationSource: "web",
+        role: "user",
+        text: "Finish the requested work",
+        attachments: [],
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    const repairMessageId = MessageId.make("notification-origin:repair-message");
+    const repairRun = {
+      ...run,
+      id: RunId.make("notification-origin:repair"),
+      ordinal: run.ordinal + 1,
+      status: "completed" as const,
+      userMessageId: repairMessageId,
+      hookContinuationOfRunId: run.id,
+    };
+    yield* store.apply({
+      id: EventId.make("notification-origin:repair-message-event"),
+      type: "message.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: repairMessageId,
+        threadId,
+        runId: repairRun.id,
+        nodeId: null,
+        createdBy: "agent",
+        creationSource: "server",
+        role: "user",
+        text: "Finish the hook repair",
+        attachments: [],
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    yield* store.apply({
+      id: EventId.make("notification-origin:repair-run"),
+      type: "run.created",
+      threadId,
+      occurredAt: now,
+      payload: repairRun,
+    });
+    expect((yield* store.getThreadShell(threadId))?.latestRunHumanAuthored).toBe(true);
+    expect(
+      (yield* store.getAgentAwarenessSnapshot(threadId)).threads[0]?.latestRunHumanAuthored,
+    ).toBe(true);
   }).pipe(Effect.provide(layerTest)),
 );
 
@@ -7606,6 +7712,48 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const fullPage = yield* tracedTimelinePage(10);
       assert.deepEqual(fullPage.page.items, targetAfterRollback.visibleTurnItems);
       assert.lengthOf(fullPage.statements, singleItemPage.statements.length);
+      const latestMessages = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 2,
+        latest: true,
+      });
+      const expectedLatest = targetAfterRollback.visibleTurnItems
+        .filter(
+          (row) =>
+            row.item.type === "user_message" ||
+            row.item.type === "assistant_message" ||
+            row.item.type === "proposed_plan",
+        )
+        .slice(-2);
+      assert.deepEqual(latestMessages.items, expectedLatest);
+      assert.isFalse(latestMessages.hasMore);
+      const followingLatest = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 2,
+        afterPosition: latestMessages.items.at(-1)!.position,
+      });
+      assert.isEmpty(followingLatest.items);
+      const latestActivity = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "activity",
+        limit: 2,
+        latest: true,
+      });
+      assert.deepEqual(latestActivity.items, targetAfterRollback.visibleTurnItems.slice(-2));
+      const explicitCursor = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 1,
+        latest: true,
+        afterPosition: 1,
+      });
+      assert.deepEqual(explicitCursor.items, targetAfterRollback.visibleTurnItems.slice(2, 3));
+      assert.isTrue(explicitCursor.hasMore);
+      const shortHistory = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "messages",
+        limit: 100,
+        latest: true,
+      });
+      assert.lengthOf(shortHistory.items, 4);
+      assert.isFalse(shortHistory.hasMore);
 
       assert.deepEqual(
         targetAfterRollback.visibleTurnItems.map((row) => [

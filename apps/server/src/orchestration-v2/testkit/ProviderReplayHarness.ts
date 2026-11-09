@@ -425,6 +425,9 @@ export function layerWithRegistry<Error>(
         Layer.mock(ProviderAuthService.ProviderAuthService)({
           tryHandlePromptCommand: () => Effect.succeed(false),
         }),
+        Layer.mock(ProviderTurnStartService.ProviderTurnStartHooks)({
+          runEvent: () => Effect.succeed({ allowed: true, messages: [] }),
+        }),
         layerRunExecutionServiceProvided,
         layerRuntime,
         layerServerConfig,

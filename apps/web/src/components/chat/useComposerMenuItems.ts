@@ -218,6 +218,13 @@ export function useComposerMenuItems({
     if (composerTrigger.kind === "slash-command") {
       const builtInSlashCommandItems = [
         {
+          id: "slash:hooks",
+          type: "slash-command",
+          command: "hooks",
+          label: "/hooks",
+          description: "Open project hooks and safeguards",
+        },
+        {
           id: "slash:model",
           type: "slash-command",
           command: "model",

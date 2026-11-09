@@ -319,6 +319,13 @@ export function CommandPalette(props: {
         run: () => openSettings(navigation, "SettingsAppearance"),
       },
       {
+        key: "hooks",
+        kind: "action",
+        title: "Hooks and safeguards",
+        searchTerms: ["agents", "scripts", "writes", "safety", "handoff"],
+        run: () => openSettings(navigation, "SettingsHooks"),
+      },
+      {
         key: "environments",
         kind: "action",
         title: "Manage environments",

@@ -30,6 +30,7 @@ import { readEnvironmentScope } from "../state/session";
 import {
   readEnvironmentServerConfigLoaded,
   readEnvironmentSupportsAutoSettleOptOut,
+  readEnvironmentSupportsThreadNotifications,
   readThreadShell,
   useProjects,
 } from "../state/entities";
@@ -127,6 +128,7 @@ export function useThreadActionMenu(input: {
       const supports = {
         settlement: configLoaded,
         autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
+        notificationControls: readEnvironmentSupportsThreadNotifications(threadRef.environmentId),
         snooze: configLoaded,
         pinning: configLoaded,
         titleRegeneration: configLoaded,
@@ -139,6 +141,7 @@ export function useThreadActionMenu(input: {
         branch: thread.branch ?? null,
         projectFilter: null,
         isPinned: thread.pinnedAt != null,
+        notificationsMuted: thread.notificationsMuted ?? true,
         isSettled: supports.settlement && thread.settledOverride === "settled",
         autoSettleEnabled: thread.autoSettleDisabledAt == null,
         isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
@@ -242,6 +245,15 @@ export function useThreadActionMenu(input: {
         case "auto-settle:disabled":
           await reportFailure("Failed to update auto-settle", () =>
             setThreadAutoSettle(threadRef, action === "auto-settle:enabled"),
+          );
+          return;
+        case "mute":
+        case "unmute":
+          await reportFailure("Could not update thread notifications", () =>
+            updateThreadMetadata({
+              environmentId: threadRef.environmentId,
+              input: { threadId: thread.id, notificationsMuted: action === "mute" },
+            }),
           );
           return;
         case "rename":

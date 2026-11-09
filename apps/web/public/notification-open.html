@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#0a0a0b" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Open T3 Code Maxi</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0a0a0b;
+        color: #f4f4f5;
+      }
+      body {
+        min-height: 100svh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(26rem, calc(100% - 3rem));
+        padding: 3rem 0;
+        text-align: center;
+      }
+      img {
+        width: 64px;
+        height: 64px;
+        border-radius: 16px;
+        margin-bottom: 1rem;
+      }
+      h1 {
+        font-size: 1.65rem;
+        letter-spacing: -0.04em;
+        line-height: 1.2;
+        margin: 0 0 0.8rem;
+      }
+      p {
+        color: #a9a9b2;
+        font-size: 1rem;
+        line-height: 1.6;
+        margin: 0 0 1.75rem;
+      }
+      a {
+        min-height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        border-radius: 12px;
+        padding: 0.2rem 1rem;
+        font-weight: 600;
+      }
+      #open-app {
+        color: #091b12;
+        background: #69d99c;
+      }
+      #open-browser {
+        color: #bfbfc9;
+        margin-top: 0.7rem;
+        font-size: 0.9rem;
+      }
+      a:focus-visible {
+        outline: 3px solid #f4f4f5;
+        outline-offset: 4px;
+      }
+      [hidden] {
+        display: none;
+      }
+      footer {
+        color: #777781;
+        margin-top: 2rem;
+        font-size: 0.8rem;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/icon-192x192.png" alt="T3 Code" />
+      <h1>Opening T3 Code Maxi</h1>
+      <p id="status">
+        Your chat is ready in the app. If iOS asks, choose Open. If nothing happens, tap below.
+      </p>
+      <a id="open-app">Open T3 Code Maxi</a>
+      <a id="open-browser">Open in browser</a>
+      <footer>Use the updated T3 Code Maxi app installed through AltStore.</footer>
+    </main>
+    <script type="module" src="/notification-open.js"></script>
+  </body>
+</html>

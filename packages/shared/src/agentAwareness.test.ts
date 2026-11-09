@@ -42,10 +42,49 @@ describe("projectThreadAwarenessV2", () => {
     title: "Integrate orchestration",
     modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
     status: "running" as const,
+    latestRunHumanAuthored: true,
     pendingRuntimeRequest: null,
     settledOverride: null,
     updatedAt,
     ...overrides,
+  });
+
+  it("suppresses internal completions by default but keeps human replies and explicit attention", () => {
+    const input = {
+      notificationsOnly: true,
+      environmentId: "env-1" as EnvironmentId,
+      project,
+      thread: v2Thread({ status: "completed" }),
+    };
+    expect(
+      projectThreadAwarenessV2({
+        ...input,
+        thread: { ...input.thread, latestRunHumanAuthored: false },
+      }),
+    ).toBeNull();
+    expect(projectThreadAwarenessV2(input)?.phase).toBe("completed");
+    expect(
+      projectThreadAwarenessV2({
+        ...input,
+        thread: { ...input.thread, latestRunHumanAuthored: false, notificationsMuted: false },
+      })?.phase,
+    ).toBe("completed");
+    expect(
+      projectThreadAwarenessV2({
+        ...input,
+        thread: {
+          ...input.thread,
+          latestRunHumanAuthored: false,
+          agentPing: {
+            id: "need-review",
+            title: "Review needed",
+            message: "Choose between the two prepared options.",
+            at: Date.parse(NOW),
+          },
+          lastVisitedAt: null,
+        },
+      })?.headline,
+    ).toBe("Review needed");
   });
 
   it("does not announce completion after a manual stop", () => {

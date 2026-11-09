@@ -1,9 +1,11 @@
+import * as HookAutomation from "../../../hooks/HookAutomation.ts";
 import {
   CommandId,
   MessageId,
   ThreadId,
   OrchestratorMcpFailure,
   ProjectId,
+  HOOK_EVENT_COVERAGE,
 } from "@t3tools/contracts";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
@@ -12,7 +14,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
+import * as HookRegistry from "../../../hooks/HookRegistry.ts";
+import * as HookStagingManager from "../../../hooks/HookStagingManager.ts";
+import { makeIsManagedWorktreePath } from "../../../worktreesDirectory.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
@@ -277,7 +283,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
         return {
           threadId: thread.id,
-          link: McpInvocationContext.threadLinkFor(scope, thread.id),
+          link: McpInvocationContext.threadLinkFor(scope, thread.id, thread.title),
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
@@ -306,6 +312,399 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           message: "The project was not found.",
         });
       return result.value;
+    }),
+  ),
+  t3_hook_capabilities: McpToolAccess.reads(() =>
+    Effect.succeed({
+      version: 2,
+      events: HOOK_EVENT_COVERAGE,
+      codexBridge: codexHookBridgeConfig(),
+      reviewRequired: true,
+    }),
+  ),
+  t3_hook_test: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const registry = yield* HookRegistry.HookRegistry;
+      return yield* registry.simulate(input).pipe(
+        Effect.mapError(
+          () =>
+            new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "The hook test failed, timed out or returned an invalid decision. No hook was changed or enabled.",
+            }),
+        ),
+      );
+    }),
+  ),
+  t3_user_ping: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const { caller, threads } = yield* readCaller();
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "An active agent thread is required.",
+        });
+      const projection = yield* threads
+        .getThreadRecords(caller.id, ["runs"])
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.findLast((run) => run.status === "running");
+      if (run === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "A running agent thread is required.",
+        });
+      const automation = yield* HookAutomation.HookAutomation;
+      yield* automation
+        .ping({ projectId: caller.projectId, threadId: caller.id, runId: run.id }, input)
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "invalid_request", message: error.message }),
+          ),
+        );
+      return { recorded: true };
+    }),
+  ),
+  t3_hook_work: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const { caller, threads } = yield* readCaller();
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "An active agent thread is required.",
+        });
+      const projection = yield* threads
+        .getThreadRecords(caller.id, ["runs"])
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.findLast((run) => run.status === "running");
+      if (run === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "A running agent thread is required.",
+        });
+      const automation = yield* HookAutomation.HookAutomation;
+      yield* automation
+        .work({ projectId: caller.projectId, threadId: caller.id, runId: run.id }, input)
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "invalid_request", message: error.message }),
+          ),
+        );
+      return { recorded: true };
+    }),
+  ),
+  t3_hook_resource: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const { caller, threads } = yield* readCaller();
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "An active agent thread is required.",
+        });
+      const projection = yield* threads
+        .getThreadRecords(caller.id, ["runs"])
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.findLast((run) => run.status === "running");
+      if (run === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "A running agent thread is required.",
+        });
+      const automation = yield* HookAutomation.HookAutomation;
+      const lease = yield* automation
+        .resource({ projectId: caller.projectId, threadId: caller.id, runId: run.id }, input)
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "invalid_request", message: error.message }),
+          ),
+        );
+      return {
+        lease,
+        message:
+          lease?.status === "released"
+            ? lease.backendEnded
+              ? "Managed lease released; agent reported backend acknowledgement."
+              : "Managed lease released; native backend release is not proven."
+            : "Native interception requires a human-trusted provider bridge. Renew or end when your estimate expires.",
+      };
+    }),
+  ),
+  t3_hook_event: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const { caller, threads } = yield* readCaller();
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "An active provider thread is required for hook events.",
+        });
+      const projection = yield* threads
+        .getThreadRecords(caller.id, ["runs"])
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.findLast((run) => run.status === "running");
+      if (run === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "No active run owns this event.",
+        });
+      const automation = yield* HookAutomation.HookAutomation;
+      // Ending the actual backend must remain possible after the timer expires.
+      if (
+        input.event === "before_tool" &&
+        computerUseOperation(input.toolName, input.toolInput) === "end"
+      )
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            additionalContext:
+              "End the native session, then record the acknowledged result with t3_hook_resource.",
+          },
+        };
+      const decision = yield* automation
+        .emit(
+          { projectId: caller.projectId, threadId: caller.id, runId: run.id },
+          input.event,
+          input,
+        )
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
+      const messages = [...decision.messages];
+      let allowed = decision.allowed;
+      if (
+        allowed &&
+        input.event === "before_tool" &&
+        computerUseOperation(input.toolName, input.toolInput) === "use"
+      ) {
+        const lease = yield* automation.checkComputerUse(caller.id).pipe(
+          Effect.match({
+            onFailure: (error) => ({ allowed: false, message: error.message }),
+            onSuccess: () => ({ allowed: true, message: "" }),
+          }),
+        );
+        allowed = lease.allowed;
+        if (!lease.allowed) messages.push(lease.message);
+      }
+      if (input.event === "before_tool")
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            ...(allowed
+              ? { additionalContext: messages.join("\n") }
+              : {
+                  permissionDecision: "deny",
+                  permissionDecisionReason:
+                    messages.join("\n") || "Blocked by an approved T3 hook.",
+                }),
+          },
+        };
+      return {
+        ...(allowed ? {} : { decision: "block", reason: messages.join("\n") }),
+        systemMessage: messages.join("\n"),
+      };
+    }),
+  ),
+  t3_hook_draft: McpToolAccess.writesHookDraft(
+    (input) => input.projectId,
+    (input) =>
+      Effect.gen(function* () {
+        const context = yield* readCaller();
+        const projectId = yield* resolveProjectId(context, input.projectId);
+        const registry = yield* HookRegistry.HookRegistry;
+        return yield* registry
+          .createDraft({ ...input, projectId, scope: input.scope ?? "all-projects" })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+            ),
+          );
+      }),
+  ),
+  t3_hook_stage_file: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const caller = scope.thread;
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Staged files can only be prepared by an active provider thread.",
+        });
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { projection } = yield* threads
+        .getThreadSnapshotWindow(caller.threadId, { rowLimit: 1 })
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.at(-1);
+      if (run === undefined || run.status !== "running")
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "A running thread is required for staged editing.",
+        });
+      let workspaceRoot = projection.thread.worktreePath;
+      if (workspaceRoot === null) {
+        const projects = yield* Project.ProjectService;
+        const project = yield* projects
+          .getById(projection.thread.projectId)
+          .pipe(Effect.mapError(unavailable));
+        if (Option.isNone(project))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread's project workspace could not be resolved.",
+          });
+        workspaceRoot = project.value.workspaceRoot;
+      } else {
+        const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+        if (!(yield* isManagedWorktreePath(workspaceRoot)))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread is not bound to a verified T3-managed worktree.",
+          });
+      }
+      const hooks = yield* HookRegistry.HookRegistry;
+      const decision = yield* hooks
+        .runEvent({
+          projectId: projection.thread.projectId,
+          event: "before_file_write",
+          payload: {
+            threadId: caller.threadId,
+            runId: run.id,
+            path: input.path,
+            create: input.create,
+          },
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
+      if (!decision.allowed)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: HookRegistry.blockedHookGuidance(
+            decision.messages,
+            "An active hook blocked this staged file.",
+          ),
+        });
+      if (
+        run.hookStageWorkspaceRoot !== undefined &&
+        !HookStagingManager.sameHookWorkspace(workspaceRoot, run.hookStageWorkspaceRoot)
+      )
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The workspace changed; staged files were retained in the original workspace.",
+        });
+      const session = HookStagingManager.makeHookStageSession({
+        workspaceRoot,
+        threadId: caller.threadId,
+        runId: run.id,
+        ...(run.hookStageOriginRunId === undefined
+          ? {}
+          : { stageOriginRunId: run.hookStageOriginRunId }),
+      });
+      return yield* Effect.tryPromise({
+        try: () => HookStagingManager.stageHookFile(session, input),
+        catch: (cause) =>
+          new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: isHookStagingError(cause)
+              ? cause.message
+              : "The staged file could not be prepared.",
+          }),
+      });
+    }),
+  ),
+  t3_hook_write_staged_file: McpToolAccess.writesThreadScoped((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const caller = scope.thread;
+      if (caller === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Staged files can only be written by an active provider thread.",
+        });
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const { projection } = yield* threads
+        .getThreadSnapshotWindow(caller.threadId, { rowLimit: 1 })
+        .pipe(Effect.mapError(unavailable));
+      const run = projection.runs.at(-1);
+      if (run === undefined || run.status !== "running")
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "A running thread is required for staged editing.",
+        });
+      let workspaceRoot = projection.thread.worktreePath;
+      if (workspaceRoot === null) {
+        const projects = yield* Project.ProjectService;
+        const project = yield* projects
+          .getById(projection.thread.projectId)
+          .pipe(Effect.mapError(unavailable));
+        if (Option.isNone(project))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread's project workspace could not be resolved.",
+          });
+        workspaceRoot = project.value.workspaceRoot;
+      } else {
+        const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+        if (!(yield* isManagedWorktreePath(workspaceRoot)))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The active thread is not bound to a verified T3-managed worktree.",
+          });
+      }
+      const hooks = yield* HookRegistry.HookRegistry;
+      const decision = yield* hooks
+        .runEvent({
+          projectId: projection.thread.projectId,
+          event: "before_file_write",
+          payload: { threadId: caller.threadId, runId: run.id, path: input.path, create: false },
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
+      if (!decision.allowed)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: HookRegistry.blockedHookGuidance(
+            decision.messages,
+            "An active hook blocked this staged file.",
+          ),
+        });
+      if (
+        run.hookStageWorkspaceRoot !== undefined &&
+        !HookStagingManager.sameHookWorkspace(workspaceRoot, run.hookStageWorkspaceRoot)
+      )
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The workspace changed; staged files were retained in the original workspace.",
+        });
+      const session = HookStagingManager.makeHookStageSession({
+        workspaceRoot,
+        threadId: caller.threadId,
+        runId: run.id,
+        ...(run.hookStageOriginRunId === undefined
+          ? {}
+          : { stageOriginRunId: run.hookStageOriginRunId }),
+      });
+      return yield* Effect.tryPromise({
+        try: () => HookStagingManager.writeHookStagedFile(session, input),
+        catch: (cause) =>
+          new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: isHookStagingError(cause)
+              ? cause.message
+              : "The staged file could not be written.",
+          }),
+      });
     }),
   ),
   t3_project_create: McpToolAccess.writesEnvironment(
@@ -393,3 +792,6 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     { linkedCallers: "allowed" },
   ),
 });
+import { computerUseOperation, codexHookBridgeConfig } from "@t3tools/shared/hookToolBridge";
+
+const isHookStagingError = Schema.is(HookStagingManager.HookStagingError);

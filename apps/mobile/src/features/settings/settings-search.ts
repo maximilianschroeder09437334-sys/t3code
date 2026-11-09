@@ -97,6 +97,7 @@ const SETTINGS_SEARCH_TERMS = {
     "clone into host folders",
     "ghq",
   ],
+  SettingsHooks: ["scripts", "safeguards", "file writes", "handoff", "git push", "approval"],
   SettingsWorktrees: [
     "worktree",
     "branch naming",

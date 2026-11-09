@@ -136,6 +136,11 @@ export type ThreadManagementTerminalRunStatus = Extract<
 >;
 
 export interface ThreadManagementSendInput {
+  /** Internal timer delivery must stay bound to the run that owned the work. */
+  readonly expectedRunId?: RunId;
+  /** Internal idle recovery uses the orchestrator's atomic Stop/queue/source guard. */
+  readonly hookContinuationOfRunId?: RunId;
+  readonly hookStageWorkspaceRoot?: string;
   readonly projectId: ProjectId;
   readonly commandId: CommandId;
   readonly threadId: ThreadId;
@@ -823,6 +828,12 @@ const make = Effect.gen(function* () {
       });
     }
     const steerableRun = latestSteerableRun(target);
+    if (input.expectedRunId !== undefined && steerableRun?.id !== input.expectedRunId) {
+      return yield* new ThreadManagementNoSteerableRunError({
+        threadId: input.threadId,
+        mode: "steer",
+      });
+    }
     // A fresh send never joins a running turn, so it needs none to steer or restart.
     const mode =
       input.freshContext && (input.mode === "steer" || input.mode === "restart")
@@ -832,7 +843,9 @@ const make = Effect.gen(function* () {
       OrchestrationV2Command,
       { readonly type: "message.dispatch" }
     >["dispatchMode"];
-    if (mode === "steer" || mode === "restart") {
+    if (input.hookContinuationOfRunId !== undefined) {
+      dispatchMode = { type: "start_immediately" };
+    } else if (mode === "steer" || mode === "restart") {
       if (steerableRun === undefined) {
         return yield* new ThreadManagementNoSteerableRunError({
           threadId: input.threadId,
@@ -856,6 +869,12 @@ const make = Effect.gen(function* () {
       commandId: input.commandId,
       threadId: input.threadId,
       messageId: input.messageId,
+      ...(input.hookContinuationOfRunId === undefined
+        ? {}
+        : { hookContinuationOfRunId: input.hookContinuationOfRunId }),
+      ...(input.hookStageWorkspaceRoot === undefined
+        ? {}
+        : { hookStageWorkspaceRoot: input.hookStageWorkspaceRoot }),
       ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
       ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
       text: input.text,

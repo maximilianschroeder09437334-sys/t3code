@@ -124,6 +124,7 @@ function makeRun(input: {
 
 it("readThread preserves caller access errors and prefers activity-run status over a newer cancelled queued run", async () => {
   let callerUnavailable = false;
+  const timelineOptions: Array<{ readonly latest?: boolean; readonly afterPosition?: number }> = [];
   const projection = {
     thread: baseThread({
       threadId: parentThreadId,
@@ -147,7 +148,10 @@ it("readThread preserves caller access errors and prefers activity-run status ov
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
+          getTimelinePage: (_threadId, options) => {
+            timelineOptions.push(options);
+            return Effect.succeed({ items: [], totalItems: 0, hasMore: false });
+          },
           getThreadRecords: (threadId) =>
             callerUnavailable
               ? Effect.fail(
@@ -196,6 +200,8 @@ it("readThread preserves caller access errors and prefers activity-run status ov
     expect(result.thread.status).toBe("running");
     expect(result.thread.latestRunId).toBe(cancelledRunId);
     expect(result.thread.activeRunId).toBe(activeRunId);
+    yield* service.readThread(makeScope(), { threadId: parentThreadId, latest: true, limit: 3 });
+    expect(timelineOptions.at(-1)).toMatchObject({ latest: true, afterPosition: -1, limit: 3 });
 
     callerUnavailable = true;
     const denied = yield* service

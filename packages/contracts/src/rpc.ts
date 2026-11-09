@@ -1,3 +1,6 @@
+import { WebPushSubscription, WebPushInfo, WebPushError } from "./webPush.ts";
+import { ProjectId } from "./baseSchemas.ts";
+import { HookRuntimeOverview } from "./hookAutomation.ts";
 import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
@@ -408,6 +411,24 @@ import {
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
+import {
+  HookApproveInput,
+  HookUpdateDraftInput,
+  HookDefinition,
+  HookListInput,
+  HookDraftInput,
+  HookRegistryError,
+  HookSetEnabledInput,
+  HookDeleteInput,
+} from "./hooks.ts";
+import {
+  ThreadNotesCreateInput,
+  ThreadNotesDeleteInput,
+  ThreadNotesListInput,
+  ThreadNotesListResult,
+  ThreadNotesMutationResult,
+} from "./threadNotes.ts";
+import { OrchestratorMcpFailure } from "./orchestratorMcp.ts";
 
 export const WS_METHODS = {
   projectsListEntries: "projects.listEntries",
@@ -428,6 +449,9 @@ export const WS_METHODS = {
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   assetsCreateUrl: "assets.createUrl",
+  threadNotesRead: "threadNotes.read",
+  threadNotesSave: "threadNotes.save",
+  threadNotesDelete: "threadNotes.delete",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -519,6 +543,18 @@ export const WS_METHODS = {
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
+  webPushInfo: "webPush.info",
+  webPushPrepare: "webPush.prepare",
+  webPushSubscribe: "webPush.subscribe",
+  webPushUnsubscribe: "webPush.unsubscribe",
+  webPushTest: "webPush.test",
+  hooksList: "hooks.list",
+  hooksRuntime: "hooks.runtime",
+  hooksCreateDraft: "hooks.createDraft",
+  hooksUpdateDraft: "hooks.updateDraft",
+  hooksApprove: "hooks.approve",
+  hooksSetEnabled: "hooks.setEnabled",
+  hooksDelete: "hooks.delete",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -839,6 +875,69 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksCreateDraftRpc = Rpc.make(WS_METHODS.hooksCreateDraft, {
+  payload: HookDraftInput,
+  success: HookDefinition,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksRuntimeRpc = Rpc.make(WS_METHODS.hooksRuntime, {
+  payload: Schema.Struct({ projectId: ProjectId }),
+  success: HookRuntimeOverview,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsWebPushInfoRpc = Rpc.make(WS_METHODS.webPushInfo, {
+  success: WebPushInfo,
+  error: Schema.Union([WebPushError, EnvironmentAuthorizationError]),
+});
+const WsWebPushPrepareRpc = Rpc.make(WS_METHODS.webPushPrepare, {
+  success: Schema.Struct({ publicKey: Schema.String }),
+  error: Schema.Union([WebPushError, EnvironmentAuthorizationError]),
+});
+const WsWebPushSubscribeRpc = Rpc.make(WS_METHODS.webPushSubscribe, {
+  payload: WebPushSubscription,
+  success: Schema.Struct({ id: Schema.String }),
+  error: Schema.Union([WebPushError, EnvironmentAuthorizationError]),
+});
+const WsWebPushUnsubscribeRpc = Rpc.make(WS_METHODS.webPushUnsubscribe, {
+  payload: Schema.Struct({ id: TrimmedNonEmptyString }),
+  error: Schema.Union([WebPushError, EnvironmentAuthorizationError]),
+});
+const WsWebPushTestRpc = Rpc.make(WS_METHODS.webPushTest, {
+  payload: Schema.Struct({ id: TrimmedNonEmptyString }),
+  error: Schema.Union([WebPushError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksListRpc = Rpc.make(WS_METHODS.hooksList, {
+  payload: HookListInput,
+  success: Schema.Array(HookDefinition),
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksApproveRpc = Rpc.make(WS_METHODS.hooksApprove, {
+  payload: HookApproveInput,
+  success: HookDefinition,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksUpdateDraftRpc = Rpc.make(WS_METHODS.hooksUpdateDraft, {
+  payload: HookUpdateDraftInput,
+  success: HookDefinition,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksDeleteRpc = Rpc.make(WS_METHODS.hooksDelete, {
+  payload: HookDeleteInput,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksSetEnabledRpc = Rpc.make(WS_METHODS.hooksSetEnabled, {
+  payload: HookSetEnabledInput,
+  success: HookDefinition,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1416,6 +1515,22 @@ const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
   error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError]),
+});
+
+const WsThreadNotesReadRpc = Rpc.make(WS_METHODS.threadNotesRead, {
+  payload: ThreadNotesListInput,
+  success: ThreadNotesListResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+const WsThreadNotesSaveRpc = Rpc.make(WS_METHODS.threadNotesSave, {
+  payload: ThreadNotesCreateInput,
+  success: ThreadNotesMutationResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+const WsThreadNotesDeleteRpc = Rpc.make(WS_METHODS.threadNotesDelete, {
+  payload: ThreadNotesDeleteInput,
+  success: ThreadNotesMutationResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
 });
 
 const WsAssetsPersistChatAttachmentsRpc = Rpc.make(WS_METHODS.assetsPersistChatAttachments, {
@@ -2080,6 +2195,18 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
   WsServerReclaimDatabaseSpaceRpc,
+  WsHooksListRpc,
+  WsWebPushInfoRpc,
+  WsWebPushPrepareRpc,
+  WsWebPushSubscribeRpc,
+  WsWebPushUnsubscribeRpc,
+  WsWebPushTestRpc,
+  WsHooksRuntimeRpc,
+  WsHooksCreateDraftRpc,
+  WsHooksUpdateDraftRpc,
+  WsHooksApproveRpc,
+  WsHooksSetEnabledRpc,
+  WsHooksDeleteRpc,
   WsServerUpdateSettingsRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
@@ -2183,6 +2310,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
+  WsThreadNotesReadRpc,
+  WsThreadNotesSaveRpc,
+  WsThreadNotesDeleteRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,

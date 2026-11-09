@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- The concurrency regression uses real timers under the test clock.
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -22,6 +23,7 @@ import {
   ProviderTurnId,
   RunAttemptId,
   RunId,
+  type ThreadId,
   RuntimeRequestId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -36,6 +38,9 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
 import * as Stream from "effect/Stream";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import { toolOutputImages } from "@t3tools/shared/toolOutput";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -47,6 +52,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
+import * as HookStagingManager from "../hooks/HookStagingManager.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -2278,6 +2284,848 @@ layer("ProviderEventIngestorV2", (it) => {
   );
 });
 
+it.effect(
+  "keeps a continuation stage uninstalled under Full Stop when the root message is outside turn context",
+  () => {
+    const turnEndHooks = Layer.mock(ProviderEventIngestor.ProviderTurnEndHooks)({
+      runEvent: () =>
+        Effect.succeed({
+          allowed: true,
+          messages: [],
+          action: "install-staged-files" as const,
+        }),
+    });
+    const workspaceRootPromise = NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-full-stop-continuation-"),
+    );
+    let stagedThreadId: ThreadId | undefined;
+    let stagedRunId: RunId | undefined;
+    return Effect.gen(function* () {
+      const root = yield* Effect.promise(() => workspaceRootPromise);
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      if (threadEvent.type !== "thread.created") throw new Error("Expected a thread-created event");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.join(root, "src"), { recursive: true });
+        await NodeFSP.writeFile(NodePath.join(root, "src", "app.ts"), "before\n");
+      });
+      const threadId = threadEvent.threadId;
+      const rootRunId = RunId.make("run:full-stop-root");
+      const continuationRunId = RunId.make("run:full-stop-continuation");
+      stagedThreadId = threadId;
+      stagedRunId = continuationRunId;
+      const rootMessageId = MessageId.make("message:full-stop-original");
+      const providerTurnId = ProviderTurnId.make("provider-turn:full-stop-continuation");
+      const providerThreadId = ProviderThreadId.make("provider-thread:full-stop-continuation");
+      const rootRunEventId = yield* idAllocator.allocate.event({ threadId });
+      const continuationRunEventId = yield* idAllocator.allocate.event({ threadId });
+      const runEvent = (
+        id: RunId,
+        eventId: typeof rootRunEventId,
+        ordinal: number,
+        userMessageId: MessageId,
+        hookContinuationOfRunId?: RunId,
+      ): OrchestrationV2DomainEvent => ({
+        id: eventId,
+        type: "run.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id,
+          threadId,
+          ordinal,
+          providerInstanceId: modelSelection.instanceId,
+          modelSelection,
+          providerThreadId,
+          userMessageId,
+          rootNodeId: null,
+          activeAttemptId: null,
+          status: ordinal === 2 ? "running" : "completed",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+          ...(hookContinuationOfRunId === undefined ? {} : { hookContinuationOfRunId }),
+        },
+      });
+      const originalMessageEvent: OrchestrationV2DomainEvent = {
+        id: yield* idAllocator.allocate.event({ threadId }),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: rootMessageId,
+          threadId,
+          runId: rootRunId,
+          nodeId: null,
+          role: "user",
+          text: "Full Stop: prepare and validate in staging, then stop before installation.",
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+          createdBy: "user",
+          creationSource: "web",
+        },
+      };
+      const rootRunEvent = runEvent(rootRunId, rootRunEventId, 1, rootMessageId);
+      const continuationRunEvent = runEvent(
+        continuationRunId,
+        continuationRunEventId,
+        2,
+        MessageId.make("message:full-stop-continuation"),
+        rootRunId,
+      );
+      yield* eventSink.write({
+        events: [threadEvent, rootRunEvent, continuationRunEvent, originalMessageEvent],
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const stage = HookStagingManager.makeHookStageSession({
+        workspaceRoot: root,
+        threadId,
+        runId: continuationRunId,
+      });
+      yield* Effect.promise(async () => {
+        await HookStagingManager.prepareHookStage(stage);
+        const staged = await HookStagingManager.stageHookFile(stage, {
+          path: "src/app.ts",
+          create: false,
+        });
+        await NodeFSP.writeFile(staged.candidatePath, "after\n");
+      });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        runId: continuationRunId,
+        event: {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: {
+            id: TurnItemId.make("turn-item:full-stop-continuation"),
+            type: "assistant_message",
+            threadId,
+            runId: continuationRunId,
+            nodeId: NodeId.make("node:full-stop-continuation"),
+            providerThreadId,
+            providerTurnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            messageId: MessageId.make("message:full-stop-continuation-output"),
+            text: "Prepared the candidate.\n\n**Next steps in order**\n1. Codex: Validate.",
+            attachments: [],
+            streaming: false,
+          },
+        },
+      });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        runId: continuationRunId,
+        event: {
+          type: "provider_turn.updated",
+          driver: CODEX_DRIVER,
+          providerTurn: {
+            id: providerTurnId,
+            providerThreadId,
+            nodeId: NodeId.make("node:full-stop-continuation"),
+            runAttemptId: null,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+      });
+      const decision = yield* ingestor.finishRootTurn!({
+        threadId,
+        runId: continuationRunId,
+        providerTurnId,
+        driver: CODEX_DRIVER,
+        status: "completed",
+      });
+      assert.isTrue(decision.allowed);
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(root, "src", "app.ts"), "utf8")),
+        "before\n",
+      );
+      assert.include(decision.messages.join("\n"), "Full Stop");
+    }).pipe(
+      Effect.ensuring(
+        Effect.promise(async () => {
+          if (stagedThreadId !== undefined && stagedRunId !== undefined)
+            HookStagingManager.forgetActiveHookStageSession(stagedThreadId, stagedRunId);
+          await NodeFSP.rm(await workspaceRootPromise, { recursive: true, force: true });
+        }),
+      ),
+      Effect.provide(makeLayerTest(layerTestEventSink).pipe(Layer.provideMerge(turnEndHooks))),
+    );
+  },
+);
+
+it.effect(
+  "installs an approved staged continuation when its original request is not Full Stop",
+  () => {
+    const turnEndHooks = Layer.mock(ProviderEventIngestor.ProviderTurnEndHooks)({
+      runEvent: () =>
+        Effect.succeed({
+          allowed: true,
+          messages: [],
+          action: "install-staged-files" as const,
+        }),
+    });
+    const workspaceRootPromise = NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-full-stop-continuation-"),
+    );
+    let stagedThreadId: ThreadId | undefined;
+    let stagedRunId: RunId | undefined;
+    return Effect.gen(function* () {
+      const root = yield* Effect.promise(() => workspaceRootPromise);
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      if (threadEvent.type !== "thread.created") throw new Error("Expected a thread-created event");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.join(root, "src"), { recursive: true });
+        await NodeFSP.writeFile(NodePath.join(root, "src", "app.ts"), "before\n");
+      });
+      const threadId = threadEvent.threadId;
+      const rootRunId = RunId.make("run:full-stop-root");
+      const continuationRunId = RunId.make("run:full-stop-continuation");
+      stagedThreadId = threadId;
+      stagedRunId = continuationRunId;
+      const rootMessageId = MessageId.make("message:full-stop-original");
+      const providerTurnId = ProviderTurnId.make("provider-turn:full-stop-continuation");
+      const providerThreadId = ProviderThreadId.make("provider-thread:full-stop-continuation");
+      const rootRunEventId = yield* idAllocator.allocate.event({ threadId });
+      const continuationRunEventId = yield* idAllocator.allocate.event({ threadId });
+      const runEvent = (
+        id: RunId,
+        eventId: typeof rootRunEventId,
+        ordinal: number,
+        userMessageId: MessageId,
+        hookContinuationOfRunId?: RunId,
+      ): OrchestrationV2DomainEvent => ({
+        id: eventId,
+        type: "run.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id,
+          threadId,
+          ordinal,
+          providerInstanceId: modelSelection.instanceId,
+          modelSelection,
+          providerThreadId,
+          userMessageId,
+          rootNodeId: null,
+          activeAttemptId: null,
+          status: ordinal === 2 ? "running" : "completed",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+          ...(hookContinuationOfRunId === undefined ? {} : { hookContinuationOfRunId }),
+        },
+      });
+      const originalMessageEvent: OrchestrationV2DomainEvent = {
+        id: yield* idAllocator.allocate.event({ threadId }),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: rootMessageId,
+          threadId,
+          runId: rootRunId,
+          nodeId: null,
+          role: "user",
+          text: "Full Send: prepare, validate and install the staged change.",
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+          createdBy: "user",
+          creationSource: "web",
+        },
+      };
+      const rootRunEvent = runEvent(rootRunId, rootRunEventId, 1, rootMessageId);
+      const continuationRunEvent = runEvent(
+        continuationRunId,
+        continuationRunEventId,
+        2,
+        MessageId.make("message:full-stop-continuation"),
+        rootRunId,
+      );
+      yield* eventSink.write({
+        events: [threadEvent, rootRunEvent, continuationRunEvent, originalMessageEvent],
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const stage = HookStagingManager.makeHookStageSession({
+        workspaceRoot: root,
+        threadId,
+        runId: continuationRunId,
+      });
+      yield* Effect.promise(async () => {
+        await HookStagingManager.prepareHookStage(stage);
+        const staged = await HookStagingManager.stageHookFile(stage, {
+          path: "src/app.ts",
+          create: false,
+        });
+        await NodeFSP.writeFile(staged.candidatePath, "after\n");
+      });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        runId: continuationRunId,
+        event: {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: {
+            id: TurnItemId.make("turn-item:full-stop-continuation"),
+            type: "assistant_message",
+            threadId,
+            runId: continuationRunId,
+            nodeId: NodeId.make("node:full-stop-continuation"),
+            providerThreadId,
+            providerTurnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            messageId: MessageId.make("message:full-stop-continuation-output"),
+            text: "Prepared the candidate.\n\n**Next steps in order**\n1. Codex: Validate.",
+            attachments: [],
+            streaming: false,
+          },
+        },
+      });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        runId: continuationRunId,
+        event: {
+          type: "provider_turn.updated",
+          driver: CODEX_DRIVER,
+          providerTurn: {
+            id: providerTurnId,
+            providerThreadId,
+            nodeId: NodeId.make("node:full-stop-continuation"),
+            runAttemptId: null,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+      });
+      const decision = yield* ingestor.finishRootTurn!({
+        threadId,
+        runId: continuationRunId,
+        providerTurnId,
+        driver: CODEX_DRIVER,
+        status: "completed",
+      });
+      assert.isTrue(decision.allowed);
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(root, "src", "app.ts"), "utf8")),
+        "after\n",
+      );
+    }).pipe(
+      Effect.ensuring(
+        Effect.promise(async () => {
+          if (stagedThreadId !== undefined && stagedRunId !== undefined)
+            HookStagingManager.forgetActiveHookStageSession(stagedThreadId, stagedRunId);
+          await NodeFSP.rm(await workspaceRootPromise, { recursive: true, force: true });
+        }),
+      ),
+      Effect.provide(makeLayerTest(layerTestEventSink).pipe(Layer.provideMerge(turnEndHooks))),
+    );
+  },
+);
+
+it.effect(
+  "installs only on request and accepts ordinary completion without a stage session",
+  () => {
+    const calls: Array<{ event: string; payload: unknown }> = [];
+    let turnEndCalls = 0;
+    let inFlight = 0;
+    let peakInFlight = 0;
+    let gate:
+      | {
+          entered: Deferred.Deferred<void>;
+          release: Deferred.Deferred<void>;
+          expected: number;
+          count: number;
+        }
+      | undefined;
+    const turnEndHooks = Layer.mock(ProviderEventIngestor.ProviderTurnEndHooks)({
+      runEvent: (input) =>
+        Effect.gen(function* () {
+          inFlight += 1;
+          peakInFlight = Math.max(peakInFlight, inFlight);
+          if (gate !== undefined) {
+            gate.count += 1;
+            if (gate.count === gate.expected) yield* Deferred.succeed(gate.entered, undefined);
+            yield* Deferred.await(gate.release);
+          }
+          inFlight -= 1;
+        }).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              calls.push({ event: input.event, payload: input.payload });
+              turnEndCalls += 1;
+              if (
+                typeof input.payload === "object" &&
+                input.payload !== null &&
+                Reflect.get(input.payload, "finalText")?.includes("What should the hook do?")
+              )
+                return {
+                  allowed: true,
+                  messages: [],
+                  action: "install-staged-files" as const,
+                  continueWork: true,
+                };
+              return turnEndCalls === 1
+                ? {
+                    allowed: true,
+                    messages: [],
+                    action: "install-staged-files" as const,
+                    continueWork: true,
+                  }
+                : turnEndCalls === 4
+                  ? { allowed: true, messages: [], action: "install-staged-files" as const }
+                  : turnEndCalls === 3 || turnEndCalls === 5 || turnEndCalls === 8
+                    ? { allowed: false, messages: ["Blocked by safeguard"] }
+                    : { allowed: true, messages: [] };
+            }),
+          ),
+        ),
+    });
+    const workspaceRootPromise = NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-turn-end-hook-"),
+    );
+    const workspaceRoot = Effect.promise(() => workspaceRootPromise);
+    return Effect.gen(function* () {
+      const root = yield* workspaceRoot;
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.join(root, "src"), { recursive: true });
+        await NodeFSP.writeFile(NodePath.join(root, "src", "app.ts"), "before\n");
+      });
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      if (threadEvent.type !== "thread.created") throw new Error("Expected a thread-created event");
+      const worktreeEvent: Extract<OrchestrationV2DomainEvent, { type: "thread.created" }> = {
+        ...threadEvent,
+        payload: { ...threadEvent.payload, worktreePath: root },
+      };
+      yield* eventSink.write({ events: [worktreeEvent] });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+      });
+      const hookRunId = RunId.make("run:turn-end-hook");
+      const providerTurnId = ProviderTurnId.make("provider-turn:turn-end-hook");
+      const providerThreadId = ProviderThreadId.make("provider-thread:turn-end-hook");
+      const stage = HookStagingManager.makeHookStageSession({
+        workspaceRoot: root,
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+      });
+      yield* Effect.promise(async () => {
+        await HookStagingManager.prepareHookStage(stage);
+        const staged = await HookStagingManager.stageHookFile(stage, {
+          path: "src/app.ts",
+          create: false,
+        });
+        await NodeFSP.writeFile(staged.candidatePath, "after\n");
+      });
+      const finalText =
+        "## What happened\n\nWork is underway.\n\n**Next steps in order**\n1. Codex: Continue.";
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        event: {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: {
+            id: TurnItemId.make("turn-item:turn-end-progress"),
+            type: "assistant_message",
+            threadId: threadEvent.threadId,
+            runId: hookRunId,
+            nodeId: NodeId.make("node:turn-end-progress"),
+            providerThreadId,
+            providerTurnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            messageId: MessageId.make("message:turn-end-progress"),
+            text: "I am checking the change.",
+            attachments: [],
+            streaming: false,
+          },
+        },
+      });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        event: {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: {
+            id: TurnItemId.make("turn-item:turn-end-hook"),
+            type: "assistant_message",
+            threadId: threadEvent.threadId,
+            runId: hookRunId,
+            nodeId: NodeId.make("node:turn-end-hook"),
+            providerThreadId,
+            providerTurnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            messageId: MessageId.make("message:turn-end-hook"),
+            text: finalText,
+            attachments: [],
+            streaming: false,
+          },
+        },
+      });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        event: {
+          type: "provider_turn.updated",
+          driver: CODEX_DRIVER,
+          providerTurn: {
+            id: providerTurnId,
+            providerThreadId,
+            nodeId: NodeId.make("node:turn-end-hook"),
+            runAttemptId: null,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+      });
+      assert.isEmpty(calls);
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(root, "src", "app.ts"), "utf8")),
+        "before\n",
+      );
+      const decision = yield* ingestor.finishRootTurn!({
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        providerTurnId,
+        driver: CODEX_DRIVER,
+        status: "completed",
+      });
+      assert.isTrue(decision.allowed);
+      assert.isTrue(decision.continueWork);
+      assert.equal(decision.stageWorkspaceRoot, root);
+      assert.lengthOf(calls, 1);
+      assert.equal(calls[0]?.event, "turn_end");
+      assert.deepEqual(calls[0]?.payload, {
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        providerTurnId,
+        finalText,
+        firstNextStepOwner: "codex",
+        unfinishedWork: true,
+      });
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(root, "src", "app.ts"), "utf8")),
+        "before\n",
+      );
+      yield* Effect.promise(() => HookStagingManager.installHookStage(stage));
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(root, "src", "app.ts"), "utf8")),
+        "after\n",
+      );
+      HookStagingManager.forgetActiveHookStageSession(threadEvent.threadId, hookRunId);
+      const ordinaryCompletion = yield* ingestor.finishRootTurn!({
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        providerTurnId: ProviderTurnId.make("provider-turn:ordinary-completion"),
+        driver: CODEX_DRIVER,
+        status: "completed",
+      });
+      assert.isTrue(ordinaryCompletion.allowed);
+      assert.lengthOf(calls, 2);
+      const blockedInput = {
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        providerTurnId: ProviderTurnId.make("provider-turn:blocked-replay"),
+        driver: CODEX_DRIVER,
+        status: "completed" as const,
+      };
+      const blocked = yield* ingestor.finishRootTurn!(blockedInput);
+      const replayed = yield* ingestor.finishRootTurn!(blockedInput);
+      assert.deepEqual(blocked, { allowed: false, messages: ["Blocked by safeguard"] });
+      assert.deepEqual(replayed, blocked);
+      assert.lengthOf(calls, 3);
+      const conflictRunId = RunId.make("run:turn-end-conflict");
+      const conflictStage = HookStagingManager.makeHookStageSession({
+        workspaceRoot: root,
+        threadId: threadEvent.threadId,
+        runId: conflictRunId,
+      });
+      yield* Effect.promise(async () => {
+        await HookStagingManager.prepareHookStage(conflictStage);
+        const staged = await HookStagingManager.stageHookFile(conflictStage, {
+          path: "src/app.ts",
+          create: false,
+        });
+        await NodeFSP.writeFile(staged.candidatePath, "candidate\n");
+        await NodeFSP.writeFile(NodePath.join(root, "src", "app.ts"), "newer external edit\n");
+      });
+      const conflictOriginalMessageId = MessageId.make("message:turn-end-conflict-original");
+      yield* eventSink.write({
+        events: [
+          {
+            id: yield* idAllocator.allocate.event({ threadId: threadEvent.threadId }),
+            type: "run.created",
+            threadId: threadEvent.threadId,
+            occurredAt: now,
+            payload: {
+              id: conflictRunId,
+              threadId: threadEvent.threadId,
+              ordinal: 20,
+              providerInstanceId: modelSelection.instanceId,
+              modelSelection,
+              providerThreadId,
+              userMessageId: conflictOriginalMessageId,
+              rootNodeId: null,
+              activeAttemptId: null,
+              status: "completed",
+              requestedAt: now,
+              startedAt: now,
+              completedAt: now,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+          {
+            id: yield* idAllocator.allocate.event({ threadId: threadEvent.threadId }),
+            type: "message.updated",
+            threadId: threadEvent.threadId,
+            occurredAt: now,
+            payload: {
+              id: conflictOriginalMessageId,
+              threadId: threadEvent.threadId,
+              runId: conflictRunId,
+              nodeId: null,
+              role: "user",
+              text: "Please implement this change.",
+              attachments: [],
+              streaming: false,
+              createdAt: now,
+              updatedAt: now,
+              createdBy: "user",
+              creationSource: "web",
+            },
+          },
+        ],
+      });
+      const conflictInput = {
+        threadId: threadEvent.threadId,
+        runId: conflictRunId,
+        providerTurnId: ProviderTurnId.make("provider-turn:install-conflict"),
+        driver: CODEX_DRIVER,
+        status: "completed" as const,
+      };
+      const conflict = yield* ingestor.finishRootTurn!(conflictInput);
+      assert.isFalse(conflict.allowed);
+      assert.include(conflict.messages[0], "original changed after staging");
+      assert.deepEqual(yield* ingestor.finishRootTurn!(conflictInput), conflict);
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(root, "src", "app.ts"), "utf8")),
+        "newer external edit\n",
+      );
+      const concurrentInput = {
+        threadId: threadEvent.threadId,
+        runId: hookRunId,
+        providerTurnId: ProviderTurnId.make("provider-turn:simultaneous-completion"),
+        driver: CODEX_DRIVER,
+        status: "completed" as const,
+      };
+      peakInFlight = 0;
+      gate = {
+        entered: yield* Deferred.make<void>(),
+        release: yield* Deferred.make<void>(),
+        expected: 1,
+        count: 0,
+      };
+      const simultaneousFiber = yield* Effect.all(
+        [ingestor.finishRootTurn!(concurrentInput), ingestor.finishRootTurn!(concurrentInput)],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(gate.entered);
+      yield* Deferred.succeed(gate.release, undefined);
+      const simultaneous = yield* Fiber.join(simultaneousFiber);
+      gate = undefined;
+      assert.deepEqual(simultaneous, [
+        { allowed: false, messages: ["Blocked by safeguard"] },
+        { allowed: false, messages: ["Blocked by safeguard"] },
+      ]);
+      assert.lengthOf(calls, 5);
+      assert.equal(peakInFlight, 1);
+      peakInFlight = 0;
+      gate = {
+        entered: yield* Deferred.make<void>(),
+        release: yield* Deferred.make<void>(),
+        expected: 2,
+        count: 0,
+      };
+      const parallelFiber = yield* Effect.all(
+        [
+          ingestor.finishRootTurn!({
+            ...concurrentInput,
+            providerTurnId: ProviderTurnId.make("provider-turn:parallel-a"),
+          }),
+          ingestor.finishRootTurn!({
+            ...concurrentInput,
+            providerTurnId: ProviderTurnId.make("provider-turn:parallel-b"),
+          }),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(gate.entered);
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(parallelFiber);
+      gate = undefined;
+      assert.equal(peakInFlight, 2);
+      const firstCollision = yield* ingestor.finishRootTurn!({
+        ...concurrentInput,
+        runId: RunId.make("collision:a"),
+        providerTurnId: ProviderTurnId.make("b"),
+      });
+      const secondCollision = yield* ingestor.finishRootTurn!({
+        ...concurrentInput,
+        runId: RunId.make("collision"),
+        providerTurnId: ProviderTurnId.make("a:b"),
+      });
+      assert.isFalse(firstCollision.allowed);
+      assert.isTrue(secondCollision.allowed);
+      const questionRunId = RunId.make("run:turn-end-user-question");
+      const questionTurnId = ProviderTurnId.make("provider-turn:user-question");
+      const questionStage = HookStagingManager.makeHookStageSession({
+        workspaceRoot: root,
+        threadId: threadEvent.threadId,
+        runId: questionRunId,
+      });
+      yield* Effect.promise(async () => {
+        await HookStagingManager.prepareHookStage(questionStage);
+        await HookStagingManager.stageHookFile(questionStage, {
+          path: "src/app.ts",
+          create: false,
+        });
+        await HookStagingManager.writeHookStagedFile(questionStage, {
+          path: "src/app.ts",
+          contents: "must not install\n",
+        });
+      });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+        runId: questionRunId,
+        event: {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: {
+            id: TurnItemId.make("turn-item:user-question"),
+            type: "assistant_message",
+            threadId: threadEvent.threadId,
+            runId: questionRunId,
+            nodeId: NodeId.make("node:user-question"),
+            providerThreadId,
+            providerTurnId: questionTurnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            messageId: MessageId.make("message:user-question"),
+            text: "What should the hook do?\n\n**Next steps in order**\n1. Codex: Draft it after you answer.",
+            attachments: [],
+            streaming: false,
+          },
+        },
+      });
+      const needsUser = yield* ingestor.finishRootTurn!({
+        threadId: threadEvent.threadId,
+        runId: questionRunId,
+        providerTurnId: questionTurnId,
+        driver: CODEX_DRIVER,
+        status: "completed",
+      });
+      assert.deepEqual(needsUser, { allowed: true, messages: [] });
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(NodePath.join(root, "src", "app.ts"), "utf8")),
+        "newer external edit\n",
+      );
+    }).pipe(
+      Effect.ensuring(
+        Effect.promise(async () =>
+          NodeFSP.rm(await workspaceRootPromise, { recursive: true, force: true }),
+        ),
+      ),
+      Effect.provide(makeLayerTest(layerTestEventSink).pipe(Layer.provideMerge(turnEndHooks))),
+    );
+  },
+);
+
 const ingestCompletedProviderTurn = (
   guard: Pick<
     Parameters<ProviderEventIngestor.ProviderEventIngestorV2Shape["ingestNormalized"]>[0],
@@ -2364,4 +3212,84 @@ it.effect.each([
     );
     assert.isEmpty(persisted);
   }).pipe(Effect.provide(layerFailingWrites(errors))),
+);
+
+it.effect(
+  "thread routing supplies trusted status and suppresses WAIT continuation even from older hooks",
+  () => {
+    const threadId = "routing-current" as ThreadId;
+    const targetId = "routing-target" as ThreadId;
+    const runId = RunId.make("routing-run");
+    const providerTurnId = ProviderTurnId.make("routing-turn");
+    const finalText =
+      "**What happened**\n- Codex: done.\n\n**Next steps in order**\n1. Codex: WAIT on <t3-thread://v2/local/routing-target> to finish.";
+    let payload: unknown;
+    const dependencies = Layer.mergeAll(
+      Layer.mock(EventSink.EventSinkV2)({}),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      IdAllocator.layer,
+      Layer.mock(ThreadCommandExecutor.ThreadCommandExecutor)({}),
+      Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({}),
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getTurnStartContext: () =>
+          Effect.succeed({
+            thread: { projectId: "routing-project" },
+            runs: [],
+            messages: [],
+            turnItems: [{ type: "assistant_message", providerTurnId, ordinal: 0, text: finalText }],
+          } as never),
+        getThreadShell: (id) => {
+          assert.equal(id, targetId);
+          return Effect.succeed({
+            status: "running",
+            activeRunId: "target-real-run",
+            pendingRuntimeRequest: null,
+          } as never);
+        },
+      }),
+      Layer.succeed(ProviderEventIngestor.ProviderTurnEndHooks, {
+        environmentId: "local",
+        runEvent: (input) => {
+          payload = input.payload;
+          return Effect.succeed({
+            allowed: true,
+            messages: ["older hook requests continuation"],
+            continueWork: true,
+          });
+        },
+      }),
+    );
+    return Effect.gen(function* () {
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const decision = yield* ingestor.finishRootTurn!({
+        threadId,
+        runId,
+        providerTurnId,
+        driver: CODEX_DRIVER,
+        status: "completed",
+      });
+      assert.isTrue(decision.allowed);
+      assert.isUndefined(decision.continueWork);
+      assert.deepEqual(payload, {
+        threadId,
+        runId,
+        providerTurnId,
+        finalText,
+        firstNextStepOwner: "codex",
+        unfinishedWork: false,
+        handoffThreadStateVersion: 1,
+        handoffThreads: [
+          {
+            reference: "t3-thread://v2/local/routing-target",
+            threadId: targetId,
+            available: true,
+            status: "running",
+            activeRunId: "target-real-run",
+            stopRequested: false,
+            needsUser: false,
+          },
+        ],
+      });
+    }).pipe(Effect.provide(ProviderEventIngestor.layer.pipe(Layer.provide(dependencies))));
+  },
 );

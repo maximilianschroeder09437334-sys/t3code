@@ -1,3 +1,4 @@
+import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "vite-plus/test";
@@ -15,6 +16,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
+  type RuntimeMode,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -67,9 +69,9 @@ const normalize = (target: string) => {
   }
   return `/${parts.join("/")}`;
 };
-const layerWorktreeLocation = (worktreesDir = managedWorktreesDir) =>
+const layerWorktreeLocation = (worktreesDir = managedWorktreesDir, nativePaths = false) =>
   Layer.mergeAll(
-    Path.layer,
+    nativePaths ? NodePath.layer : Path.layer,
     Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as ServerConfig.ServerConfig["Service"]),
     ServerSettings.layerTest(),
   );
@@ -192,6 +194,9 @@ function startWithMissingWorktree(
           tryHandlePromptCommand: () => Effect.succeed(false),
         }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
+        Layer.mock(ProviderTurnStart.ProviderTurnStartHooks)({
+          runEvent: () => Effect.succeed({ allowed: true, messages: [] }),
+        }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
       ),
     ),
@@ -269,9 +274,11 @@ it.each([
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly providerDriver?: ProviderDriverKind;
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
   readonly workspaceRoot?: string;
+  readonly runtimeMode?: RuntimeMode;
   readonly gitWorkflow?: GitWorkflow.GitWorkflowService["Service"];
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
@@ -284,6 +291,11 @@ function makeLocalCommandHarness(input: {
   readonly interruptOpen?: boolean;
   readonly interruptRunBeforeOpenFailure?: boolean;
   readonly writeFailure?: unknown;
+  readonly hookDecision?: {
+    readonly allowed: boolean;
+    readonly messages: ReadonlyArray<string>;
+    readonly enforcement?: "managed-worktree";
+  };
   readonly failReadsAfterRunning?: boolean;
   readonly previousTurn?: {
     readonly runStatus: "failed" | "completed";
@@ -337,7 +349,7 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make("codex"),
+    driver: input.providerDriver ?? ProviderDriverKind.make("codex"),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -371,6 +383,8 @@ function makeLocalCommandHarness(input: {
       id: threadId,
       activeProviderThreadId: providerThreadId,
       projectId: ProjectId.make("project-native-account-command"),
+      runtimeMode: input.runtimeMode ?? "auto-accept-edits",
+      interactionMode: "default",
       branch: input.worktreePath === undefined ? null : "feature/restore",
       worktreePath: input.worktreePath ?? null,
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
@@ -892,9 +906,13 @@ function makeLocalCommandHarness(input: {
   const resolveRuntimePolicy = vi.fn(
     ({ thread }: Parameters<RuntimePolicy.RuntimePolicyV2Shape["resolve"]>[0]) =>
       Effect.succeed({
-        cwd: thread.worktreePath ?? "/tmp/native-account-command",
+        cwd: thread.worktreePath ?? input.workspaceRoot ?? "/tmp/native-account-command",
         runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
       } as never),
+  );
+  const runHook = vi.fn(() =>
+    Effect.succeed(input.hookDecision ?? { allowed: true, messages: [] }),
   );
   const createWorktree = vi.fn<GitWorkflow.GitWorkflowService["Service"]["createWorktree"]>(() =>
     Effect.succeed({} as never),
@@ -941,7 +959,7 @@ function makeLocalCommandHarness(input: {
             }),
         }),
         IdAllocator.layer,
-        layerWorktreeLocation(input.worktreesDir),
+        layerWorktreeLocation(input.worktreesDir, input.fileSystem !== undefined),
         input.fileSystem === undefined
           ? FileSystem.layerNoop({ exists: () => Effect.succeed(true) })
           : Layer.succeed(FileSystem.FileSystem, input.fileSystem),
@@ -1000,6 +1018,7 @@ function makeLocalCommandHarness(input: {
           turnCompleted: () => Effect.void,
           runSettled: (report) => Effect.sync(() => void settledRuns.push(report.status)),
         }),
+        Layer.mock(ProviderTurnStart.ProviderTurnStartHooks)({ runEvent: runHook }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
           resolve: resolveRuntimePolicy,
         }),
@@ -1023,6 +1042,7 @@ function makeLocalCommandHarness(input: {
     forkThread,
     interruptTurn,
     tryHandlePromptCommand,
+    runHook,
     events,
     oldInstanceId,
     newInstanceId,
@@ -1040,6 +1060,157 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect("blocks a provider turn when an active start hook denies it", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      hookDecision: { allowed: false, messages: ["Require the staged workspace first."] },
+    });
+    yield* harness.start;
+    expect(harness.runHook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: expect.any(String),
+        event: "before_provider_turn_start",
+        payload: expect.objectContaining({ cwd: "/tmp/native-account-command" }),
+      }),
+    );
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(harness.projection().turnItems).toMatchObject([
+      {
+        type: "error",
+        title: "Provider start blocked by a project hook",
+        failure: {
+          message: expect.stringContaining("Require the staged workspace first."),
+        },
+      },
+    ]);
+    expect(harness.projection().turnItems).toMatchObject([
+      {
+        failure: {
+          message: expect.stringContaining(
+            "Follow the hook rule and relevant AGENTS.md instructions",
+          ),
+        },
+      },
+    ]);
+  }),
+);
+
+effectIt.effect("blocks a managed-worktree hook when the thread has no managed worktree", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      hookDecision: { allowed: true, messages: [], enforcement: "managed-worktree" },
+    });
+
+    yield* harness.start;
+
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(harness.projection().turnItems).toMatchObject([
+      {
+        type: "error",
+        title: "Provider start blocked by a project hook",
+        failure: {
+          message:
+            "This hook requires a T3-managed worktree. Start this thread in a managed worktree before continuing.",
+        },
+      },
+    ]);
+  }),
+);
+
+effectIt.effect("preserves Approval Required policy under managed-worktree enforcement", () =>
+  Effect.gen(function* () {
+    const worktreePath = `${managedWorktreesDir}/project/guarded`;
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath,
+      runtimeMode: "approval-required",
+      failReadsAfterRunning: true,
+      hookDecision: { allowed: true, messages: [], enforcement: "managed-worktree" },
+    });
+
+    yield* harness.start;
+
+    const runtimePolicy = harness.startRootRun.mock.calls[0]?.[0].runtimePolicy;
+    expect(runtimePolicy?.runtimeMode).toBe("approval-required");
+    expect(runtimePolicy?.cwd).toBe(worktreePath);
+    expect(runtimePolicy?.approvalPolicy).toBeUndefined();
+    expect(runtimePolicy?.sandboxPolicy).toBeUndefined();
+  }),
+);
+
+effectIt.effect("preserves the selected Codex policy when no managed-worktree hook is active", () =>
+  Effect.gen(function* () {
+    const workspaceRoot = `${managedWorktreesDir}/project/default-hook-stage`;
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      workspaceRoot,
+      runtimeMode: "auto",
+      failReadsAfterRunning: true,
+    });
+
+    yield* harness.start;
+
+    const runtimePolicy = harness.startRootRun.mock.calls[0]?.[0].runtimePolicy;
+    expect(runtimePolicy?.runtimeMode).toBe("auto");
+    expect(runtimePolicy?.cwd).toBe(workspaceRoot);
+    expect(runtimePolicy?.approvalPolicy).toBeUndefined();
+    expect(runtimePolicy?.sandboxPolicy).toBeUndefined();
+  }),
+);
+
+effectIt.effect("surfaces managed-worktree conflicts with write-capable permission modes", () =>
+  Effect.gen(function* () {
+    const worktreePath = `${managedWorktreesDir}/project/guarded-full-access`;
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      worktreePath,
+      runtimeMode: "full-access",
+      hookDecision: { allowed: true, messages: [], enforcement: "managed-worktree" },
+    });
+
+    yield* harness.start;
+
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.projection().turnItems).toMatchObject([
+      {
+        type: "error",
+        title: "The selected permission mode conflicts with a project hook",
+        failure: {
+          message: expect.stringContaining("uses 'full-access'"),
+        },
+      },
+    ]);
+  }),
+);
+
+effectIt.effect(
+  "blocks managed-worktree enforcement for providers without a verified sandbox",
+  () =>
+    Effect.gen(function* () {
+      const worktreePath = `${managedWorktreesDir}/project/guarded`;
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        providerDriver: ProviderDriverKind.make("cursor"),
+        worktreePath,
+        hookDecision: { allowed: true, messages: [], enforcement: "managed-worktree" },
+      });
+
+      yield* harness.start;
+
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.projection().turnItems).toMatchObject([
+        {
+          type: "error",
+          title: "Provider cannot enforce the managed worktree boundary",
+        },
+      ]);
+    }),
+);
 
 effectIt.effect(
   "recovers the local or pushed thread tip, else the current branch, remote default, or detached HEAD",

@@ -1,3 +1,4 @@
+import * as HookAutomation from "../hooks/HookAutomation.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -130,7 +131,14 @@ const layerTools = Layer.mergeAll(
       list: () => Effect.succeed([]),
     }),
   ),
-  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+  Layer.provide(
+    Layer.merge(
+      Layer.mock(HookAutomation.HookAutomation)({
+        emit: () => Effect.succeed({ allowed: true, messages: [] }),
+      }),
+      Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+    ),
+  ),
   Layer.provide(
     Layer.mock(ProjectService.ProjectService)({
       getById: () => Effect.succeedNone,

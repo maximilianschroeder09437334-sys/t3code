@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
+  ProjectId,
   ProviderInstanceId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -31,6 +32,7 @@ const backgroundThreadId = ThreadId.make("thread:background");
 const oldProviderThreadId = ThreadId.make("thread:old-provider-background");
 const archivedThreadId = ThreadId.make("thread:archived-background");
 const unknownOwnerThreadId = ThreadId.make("thread:unknown-background-owner");
+const autoThreadId = ThreadId.make("thread:auto-scoped-files");
 
 const backgroundShell = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) => ({
   ...liveThreadShell(threadId, { activeRunId: null }),
@@ -63,6 +65,7 @@ const shells = new Map([
       pendingBackgroundTasks: [{ taskId: "task:unknown", kind: "subagent" as const }],
     },
   ],
+  [autoThreadId, liveThreadShell(autoThreadId, { runtimeMode: "auto" })],
 ]);
 
 const threadCaller = (threadId: ThreadId): McpInvocationContext.McpInvocationScope => ({
@@ -129,6 +132,8 @@ const ProbeToolkit = Toolkit.make(
     }),
   }),
   Tool.make("writes_environment", probe),
+  Tool.make("writes_thread_scoped", probe),
+  Tool.make("writes_hook_draft", { ...probe, parameters: Schema.Struct({ projectId: ProjectId }) }),
 );
 const ran = Effect.succeed({ ran: "ran" });
 const probeHandlers: McpToolAccess.Handlers<typeof ProbeToolkit.tools> = {
@@ -147,6 +152,11 @@ const probeHandlers: McpToolAccess.Handlers<typeof ProbeToolkit.tools> = {
     "stamped",
   ),
   writes_environment: McpToolAccess.writesEnvironment(() => ran),
+  writes_thread_scoped: McpToolAccess.writesThreadScoped(() => ran),
+  writes_hook_draft: McpToolAccess.writesHookDraft(
+    (input) => input.projectId,
+    () => ran,
+  ),
 };
 const layerProbeHandlers = McpToolAccess.toLayer(ProbeToolkit, probeHandlers);
 
@@ -186,6 +196,8 @@ export const refusedAtCompileTime = () => {
       writes_threads: unchecked,
       starts_threads: unchecked,
       writes_environment: unchecked,
+      writes_thread_scoped: unchecked,
+      writes_hook_draft: unchecked,
     }),
   );
 };
@@ -220,6 +232,7 @@ const call = (
 const supervised = threadCaller(supervisedThreadId);
 const plan = threadCaller(planThreadId);
 const fullAccess = threadCaller(fullAccessThreadId);
+const auto = threadCaller(autoThreadId);
 const ended = threadCaller(endedThreadId);
 const background = threadCaller(backgroundThreadId);
 const oldProviderBackground = threadCaller(oldProviderThreadId);
@@ -252,6 +265,7 @@ it.effect.each([
   ["writes_threads", readOnlyClient, { threadId: supervisedThreadId }, "capability_denied"],
   ["starts_threads", readOnlyClient, {}, "capability_denied"],
   ["writes_environment", readOnlyClient, {}, "capability_denied"],
+  ["writes_thread_scoped", readOnlyClient, {}, "thread_credential_required"],
 
   ["reads_as_caller", ended, {}, "ran"],
   ["reads_as_caller", fullAccessClient, {}, "thread_credential_required"],
@@ -310,6 +324,14 @@ it.effect.each([
   ["starts_threads", supervisedClient, { runtimeMode: "auto" }, "runtime_mode_escalation_denied"],
   ["starts_threads", fullAccessClient, { runtimeMode: "full-access" }, "full-access/default"],
 
+  ["writes_hook_draft", auto, { projectId: "project:mcp-test" }, "ran"],
+  ["writes_hook_draft", auto, { projectId: "project:other" }, "capability_denied"],
+  ["writes_hook_draft", plan, { projectId: "project:mcp-test" }, "capability_denied"],
+  ["writes_hook_draft", ended, { projectId: "project:mcp-test" }, "parent_not_active"],
+  ["writes_hook_draft", readOnlyClient, { projectId: "project:mcp-test" }, "capability_denied"],
+  ["writes_hook_draft", supervisedClient, { projectId: "project:mcp-test" }, "capability_denied"],
+  ["writes_hook_draft", fullAccessClient, { projectId: "project:mcp-test" }, "ran"],
+
   ["writes_environment", fullAccess, {}, "ran"],
   ["writes_environment", supervised, {}, "capability_denied"],
   ["writes_environment", plan, {}, "capability_denied"],
@@ -318,6 +340,21 @@ it.effect.each([
 ] as const)("%s from %o with %o: %s", ([tool, scope, args, expected]) =>
   call(tool, scope, args).pipe(
     Effect.map((outcome) => expect(outcome).toBe(expected)),
+    Effect.provide(
+      probeServer(
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
+        }),
+      ),
+    ),
+  ),
+);
+
+it.effect("keeps thread-scoped staging available in Auto without granting environment writes", () =>
+  Effect.gen(function* () {
+    expect(yield* call("writes_thread_scoped", auto)).toBe("ran");
+    expect(yield* call("writes_environment", auto)).toBe("capability_denied");
+  }).pipe(
     Effect.provide(
       probeServer(
         Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -364,6 +401,7 @@ const linkedProbe = {
   ...probe,
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
+    projectId: Schema.optional(ProjectId),
     threadId: Schema.optional(ThreadId),
     runtimeMode: Schema.optional(RuntimeMode),
     interactionMode: Schema.optional(ProviderInteractionMode),
@@ -376,6 +414,7 @@ const LinkedProbeToolkit = Toolkit.make(
   Tool.make("writes_threads", linkedProbe),
   Tool.make("starts_threads", linkedProbe),
   Tool.make("writes_environment", linkedProbe),
+  Tool.make("writes_hook_draft", linkedProbe),
 );
 /** Runs here, and tells whether `environmentId` reached the handler. */
 const ranHere = <P extends object>(params: P) =>
@@ -390,6 +429,10 @@ const linkedProbeServer = McpHttpServer.toolkitRegistration(
     writes_threads: McpToolAccess.writesThreads((input) => [input.threadId], ranHere),
     starts_threads: McpToolAccess.startsThreads((input) => input, ranHere, "stamped"),
     writes_environment: McpToolAccess.writesEnvironment(ranHere),
+    writes_hook_draft: McpToolAccess.writesHookDraft(
+      (input) => input.projectId ?? ProjectId.make("project:mcp-test"),
+      ranHere,
+    ),
   }),
 ).pipe(
   Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
@@ -411,6 +454,26 @@ it.effect.each([
   ["reads", supervised, { environmentId: box }, "reads in environment-box"],
   ["reads", supervised, { environmentId: here }, "here"],
   ["reads", supervised, {}, "here"],
+
+  [
+    "writes_hook_draft",
+    auto,
+    { environmentId: box, projectId: "project:mcp-test" },
+    "capability_denied",
+  ],
+  [
+    "writes_hook_draft",
+    fullAccess,
+    { environmentId: box, projectId: "project:mcp-test" },
+    "writes_hook_draft in environment-box",
+  ],
+  ["writes_hook_draft", auto, { environmentId: here, projectId: "project:mcp-test" }, "here"],
+  [
+    "writes_hook_draft",
+    auto,
+    { environmentId: here, projectId: "project:other" },
+    "capability_denied",
+  ],
 
   // The caller is checked here before anything goes.
   ["writes", readOnlyClient, { environmentId: box }, "capability_denied"],

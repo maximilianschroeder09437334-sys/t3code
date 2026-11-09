@@ -662,6 +662,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly snoozePresets: ReadonlyArray<SnoozePresetSetting> | undefined;
   readonly pinningSupported: boolean;
   readonly autoSettleOptOutSupported: boolean;
+  readonly notificationControlsSupported?: boolean;
   readonly titleRegenerationSupported: boolean;
   readonly reorderSupported?: boolean;
   readonly onMoveThread?: (
@@ -750,6 +751,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const timeLabel = props.timeLabel;
 
   const visitThread = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
+  const updateMetadata = useAtomCommand(threadEnvironment.updateMetadata, { reportFailure: true });
+  const handleMute = useCallback(
+    (notificationsMuted: boolean) => {
+      void updateMetadata({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, notificationsMuted },
+      });
+    },
+    [thread.environmentId, thread.id, updateMetadata],
+  );
   const handleAcknowledgeWoke = useCallback(() => {
     if (props.wokeAt === null) return;
     void visitThread({
@@ -932,6 +943,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         pin: [],
         secondary: [
           ...titleMenuItems,
+          ...(props.notificationControlsSupported
+            ? [
+                {
+                  id: thread.notificationsMuted !== false ? "unmute" : "mute",
+                  title: thread.notificationsMuted !== false ? "Unmute thread" : "Mute thread",
+                  image: thread.notificationsMuted !== false ? "bell" : "bell.slash",
+                },
+              ]
+            : []),
           ...autoSettleMenuItems,
           LEGACY_MENU_ACTIONS[0]!,
           SNOOZED_MENU_ACTIONS[1]!,
@@ -957,6 +977,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         pin: pinMenuItems,
         secondary: [
           ...titleMenuItems,
+          ...(props.notificationControlsSupported
+            ? [
+                {
+                  id: thread.notificationsMuted !== false ? "unmute" : "mute",
+                  title: thread.notificationsMuted !== false ? "Unmute thread" : "Mute thread",
+                  image: thread.notificationsMuted !== false ? "bell" : "bell.slash",
+                },
+              ]
+            : []),
           ...autoSettleMenuItems,
           LEGACY_MENU_ACTIONS[0]!,
           SLIM_MENU_ACTIONS[1]!,
@@ -976,6 +1005,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       pin: pinMenuItems,
       secondary: [
         ...titleMenuItems,
+        ...(props.notificationControlsSupported
+          ? [
+              {
+                id: thread.notificationsMuted !== false ? "unmute" : "mute",
+                title: thread.notificationsMuted !== false ? "Unmute thread" : "Mute thread",
+                image: thread.notificationsMuted !== false ? "bell" : "bell.slash",
+              },
+            ]
+          : []),
         ...autoSettleMenuItems,
         LEGACY_MENU_ACTIONS[0]!,
         CARD_MENU_ACTIONS[1]!,
@@ -983,6 +1021,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     });
   }, [
     autoSettleMenuItems,
+    props.notificationControlsSupported,
+    thread.notificationsMuted,
     canUnsettle,
     pinMenuItems,
     props.settlementSupported,
@@ -1000,6 +1040,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "unsettle") handleUnsettle();
       if (nativeEvent.event === "unsnooze") handleUnsnooze();
       if (nativeEvent.event === "pin") handlePin();
+      if (nativeEvent.event === "mute") handleMute(true);
+      if (nativeEvent.event === "unmute") handleMute(false);
       if (nativeEvent.event === "unpin") handleUnpin();
       if (nativeEvent.event === "auto-settle:enabled") handleSetAutoSettle(true);
       if (nativeEvent.event === "auto-settle:disabled") handleSetAutoSettle(false);
@@ -1055,6 +1097,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleSettle,
       handleSnooze,
       handleSetAutoSettle,
+      handleMute,
       handleUnpin,
       handleUnsettle,
       handleUnsnooze,

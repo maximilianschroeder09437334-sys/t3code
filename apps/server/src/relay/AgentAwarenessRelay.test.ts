@@ -77,6 +77,7 @@ function shell(overrides: Partial<OrchestrationV2ThreadShell> = {}): Orchestrati
     pendingRuntimeRequest: null,
     pendingBackgroundTasks: [],
     latestRunId: null,
+    latestRunHumanAuthored: true,
     latestRunRequestedAt: null,
     latestRunStartedAt: null,
     latestRunCompletedAt: null,
@@ -761,6 +762,7 @@ describe("AgentAwarenessRelay", () => {
         payload: {
           createdBy: "user",
           creationSource: "web",
+          notificationsMuted: false,
           id: THREAD_ID,
           projectId: PROJECT_ID,
           title: "Thread",

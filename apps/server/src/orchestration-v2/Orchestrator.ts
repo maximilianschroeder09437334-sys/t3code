@@ -3944,6 +3944,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             ...(command.title === undefined ? {} : { title: command.title }),
+            ...(command.notificationsMuted === undefined
+              ? {}
+              : { notificationsMuted: command.notificationsMuted }),
+            ...(command.agentPing === undefined ? {} : { agentPing: command.agentPing }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
@@ -5717,6 +5721,62 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    const hookSource =
+      command.hookContinuationOfRunId === undefined
+        ? undefined
+        : projection.runs.find((run) => run.id === command.hookContinuationOfRunId);
+    if (command.hookContinuationOfRunId !== undefined) {
+      const now = yield* DateTime.now;
+      if (
+        command.createdBy !== "agent" ||
+        command.creationSource !== "server" ||
+        command.dispatchMode.type !== "start_immediately" ||
+        hookSource === undefined ||
+        (hookSource.hookStageWorkspaceRoot !== undefined &&
+          hookSource.hookStageWorkspaceRoot !== command.hookStageWorkspaceRoot) ||
+        (hookSource.status !== "completed" &&
+          !(
+            hookSource.status === "failed" &&
+            latestRootProviderFailure(hookSource, projection.turnItems)?.code === "hook_blocked"
+          )) ||
+        latestExecutedRun(projection.runs)?.id !== hookSource.id ||
+        projection.runs.some((run) => run.status === "queued") ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null ||
+        projection.thread.settledOverride === "settled" ||
+        (projection.thread.lineage.relationshipToParent === "subagent" &&
+          hookSource.status !== "failed") ||
+        projection.thread.providerInstanceId !== hookSource.providerInstanceId ||
+        projection.runtimeRequests.some(
+          (request) =>
+            request.status === "pending" ||
+            ((request.status === "cancelled" || request.status === "expired") &&
+              projection.nodes.some(
+                (node) => node.id === request.nodeId && node.runId === hookSource.id,
+              )),
+        ) ||
+        projection.turnItems.some(
+          (item) =>
+            item.runId === hookSource.id &&
+            item.type === "secret_request" &&
+            item.secretStatus !== "saved",
+        ) ||
+        (projection.thread.snoozedUntil != null &&
+          DateTime.isGreaterThan(projection.thread.snoozedUntil, now)) ||
+        (yield* stopReachedRun(command, command.threadId, hookSource.id))
+      ) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: projection.thread,
+        });
+        return;
+      }
+    }
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -5838,7 +5898,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     const continuedTaskId = projection.runs.find(
-      (run) => run.id === command.restartContinuationOfRunId,
+      (run) => run.id === (command.restartContinuationOfRunId ?? command.hookContinuationOfRunId),
     )?.delegatedTaskId;
 
     if (projection.thread.settledOverride !== null) {
@@ -6014,7 +6074,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (command.creationSource !== "server" && command.creationSource !== "provider") ||
         (dispatchMode.type !== "queue_after_active" &&
           !(
-            command.restartContinuationOfRunId !== undefined &&
+            (command.restartContinuationOfRunId !== undefined ||
+              command.hookContinuationOfRunId !== undefined) &&
             dispatchMode.type === "start_immediately"
           )))
     ) {
@@ -6383,6 +6444,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.usageLimitContinuationOfRunId === undefined
           ? {}
           : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
+        ...(hookSource === undefined
+          ? {}
+          : {
+              hookContinuationOfRunId: hookSource.id,
+              ...(command.hookStageWorkspaceRoot === undefined
+                ? {}
+                : {
+                    hookStageOriginRunId: hookSource.hookStageOriginRunId ?? hookSource.id,
+                    hookStageWorkspaceRoot: command.hookStageWorkspaceRoot,
+                  }),
+            }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...(freshContext ? { freshContext: true } : {}),
       };
@@ -6766,6 +6838,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.usageLimitContinuationOfRunId === undefined
           ? {}
           : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
+        ...(hookSource === undefined
+          ? {}
+          : {
+              hookContinuationOfRunId: hookSource.id,
+              ...(command.hookStageWorkspaceRoot === undefined
+                ? {}
+                : {
+                    hookStageOriginRunId: hookSource.hookStageOriginRunId ?? hookSource.id,
+                    hookStageWorkspaceRoot: command.hookStageWorkspaceRoot,
+                  }),
+            }),
         ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
           ? { workspacePreparation: dispatchMode.workspaceStrategy }
           : {}),
@@ -7555,6 +7638,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.usageLimitContinuationOfRunId === undefined
         ? {}
         : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
+      ...(hookSource === undefined
+        ? {}
+        : {
+            hookContinuationOfRunId: hookSource.id,
+            ...(command.hookStageWorkspaceRoot === undefined
+              ? {}
+              : {
+                  hookStageOriginRunId: hookSource.hookStageOriginRunId ?? hookSource.id,
+                  hookStageWorkspaceRoot: command.hookStageWorkspaceRoot,
+                }),
+          }),
       ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
       ...wakeWorkStartedAt(projection.runs, command),
     };
@@ -11254,6 +11348,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       queuedMessages.filter(isBufferedProviderNotification).map((message) => message.id),
     );
     for (const run of runs) {
+      if (
+        (run.status === "completed" || run.status === "waiting") &&
+        (yield* awaitsHookContinuation(run).pipe(mapDispatchError(input.command)))
+      ) {
+        yield* markStoppedRun({ ...input, thread, run });
+      }
       // A resumed queue can have a lower ordinal than a pending continuation source.
       // Stop must reach those sources even when interrupting the resumed run succeeds.
       if (
@@ -12325,7 +12425,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* Ref.update(effects, (existing) => [...existing, ...enqueued]);
         yield* cancelIdleOrphans({ command, events, projection });
         yield* stopDelegatedTasks;
-        return interrupted.value;
+        return {
+          effectTypes: [...(interrupted.value?.effectTypes ?? []), "hook.continue" as const],
+          reason: "The thread was stopped.",
+        };
       }
       yield* Effect.logWarning("thread.stop could not interrupt the running turn", {
         threadId: command.threadId,
@@ -12346,7 +12449,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* holdStoppedThread({ command, events, projection, cohortRunIds: [], now });
     yield* cancelIdleOrphans({ command, events, projection });
     yield* stopDelegatedTasks;
-    return undefined;
+    return { effectTypes: ["hook.continue" as const], reason: "The thread was stopped." };
   });
 
   const dispatchCheckpointRollback = Effect.fn("Orchestrator.dispatchCheckpointRollback")(
@@ -12588,7 +12691,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
-  const childAwaitsRestartContinuation = (
+  const awaitsHookContinuation = (run: OrchestrationV2Run) =>
+    effectOutbox
+      .get(`effect:hook.continue:${run.id}`)
+      .pipe(
+        Effect.map(
+          Option.exists((effect) => effect.status === "pending" || effect.status === "running"),
+        ),
+      );
+
+  const childAwaitsContinuation = (
     runs: ReadonlyArray<OrchestrationV2Run>,
     resultRun: OrchestrationV2Run,
     settledContinuationOf?: RunId,
@@ -12599,8 +12711,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           run.id !== settledContinuationOf &&
           (run.id === resultRun.id || runRanAfter(run, resultRun)),
       ),
-      awaitsRestartContinuation,
-    ).pipe(Effect.map((pending) => pending.includes(true)));
+      (run) => Effect.all([awaitsRestartContinuation(run), awaitsHookContinuation(run)]),
+    ).pipe(Effect.map((pending) => pending.some((flags) => flags.includes(true))));
 
   const planDelegatedCompletionDelivery = Effect.fn(
     "orchestrationV2.planDelegatedCompletionDelivery",
@@ -12874,7 +12986,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return;
       }
       if (
-        yield* childAwaitsRestartContinuation(
+        yield* childAwaitsContinuation(
           taskRuns.length === 0 ? childControls.runs : taskRuns,
           childRun,
           options?.settledContinuationOf,
@@ -13103,11 +13215,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const status = delegatedTaskTerminalStatus(runOutcome(resultRun));
     if (status !== "cancelled" && status !== "interrupted") return;
     if (
-      yield* childAwaitsRestartContinuation(
-        childControls.runs,
-        resultRun,
-        options?.settledContinuationOf,
-      )
+      yield* childAwaitsContinuation(childControls.runs, resultRun, options?.settledContinuationOf)
     )
       return;
     // Callers hold the parent lock; dismiss takes the child lock, as follow-up intake does.
@@ -14388,12 +14496,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const runs = child.runs.filter((run) => run.delegatedTaskId === taskId);
         const run = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
         if (run === undefined || delegatedTaskTerminalStatus(run.status) === null) return true;
-        return yield* childAwaitsRestartContinuation(runs, run);
+        return yield* childAwaitsContinuation(runs, run);
       }
       const progress = delegatedTaskProgress(child);
       if (progress.state !== "result_available") return true;
       if (progress.resultRun === undefined) return false;
-      return yield* childAwaitsRestartContinuation(child.runs, progress.resultRun);
+      return yield* childAwaitsContinuation(child.runs, progress.resultRun);
     },
     (effect, childThreadId, _taskId?) =>
       effect.pipe(

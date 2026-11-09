@@ -1,6 +1,7 @@
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
+import { runHookedHandoff } from "../../../hooks/HookHandoffGateway.ts";
 
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
@@ -174,7 +175,28 @@ const handlers = {
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        return yield* service.sendToThread(scope, input);
+        const { caller, threads } = yield* readCaller();
+        if (caller === undefined) return yield* service.sendToThread(scope, input);
+        const records = yield* threads.getThreadRecords(caller.id, ["runs"]).pipe(
+          Effect.mapError(
+            () =>
+              new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: "The handoff owner could not be checked.",
+              }),
+          ),
+        );
+        const run = records.runs.findLast((run) => run.status === "running");
+        if (run === undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The handoff owner is no longer running.",
+          });
+        return yield* runHookedHandoff(
+          { projectId: caller.projectId, threadId: caller.id, runId: run.id },
+          input,
+          Effect.suspend(() => service.sendToThread(scope, input)),
+        );
       }),
   ),
   t3_thread_wait: McpToolAccess.reads((input) =>

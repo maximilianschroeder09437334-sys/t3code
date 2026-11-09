@@ -32,6 +32,7 @@ export type SettingsPath =
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/worktrees"
+  | "/settings/hooks"
   | "/settings/connections"
   | "/settings/access"
   | "/settings/secrets"
@@ -102,6 +103,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/scheduled-tasks": "Scheduled tasks",
   "/settings/source-control": "Source control",
   "/settings/worktrees": "Worktrees",
+  "/settings/hooks": "Hooks and safeguards",
   "/settings/connections": "Environments",
   "/settings/access": "Sharing & access",
   "/settings/secrets": "Secrets",
@@ -137,6 +139,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
       "/settings/browser",
       "/settings/devices",
       "/settings/scheduled-tasks",
+      "/settings/hooks",
     ],
   },
   {
@@ -219,6 +222,13 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
   .join(" ");
 
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "hooks-manager",
+    title: "Hooks and safeguards",
+    to: "/settings/hooks",
+    scope: "project",
+    searchTerms: ["scripts approval file write turn end github push staged backup hash sha256"],
+  },
   {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
@@ -1320,6 +1330,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/devices": null,
   "/settings/source-control": "environment-defaults",
   "/settings/worktrees": "project-defaults",
+  "/settings/hooks": "project",
   "/settings/connections": "connections",
   "/settings/access": "connections",
   "/settings/secrets": null,

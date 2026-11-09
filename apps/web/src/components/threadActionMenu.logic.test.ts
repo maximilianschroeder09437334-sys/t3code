@@ -75,3 +75,21 @@ describe("buildThreadActionMenuItems", () => {
     expect(items.find((item) => item.id === "turn-into-project")?.disabled).toBe(true);
   });
 });
+
+it("offers unmute by default and mute after a thread opts into routine updates", () => {
+  const supports = { ...baseState.supports, notificationControls: true };
+  expect(
+    buildThreadActionMenuItems({ ...baseState, supports }).find((item) => item.id === "unmute")
+      ?.label,
+  ).toBe("Unmute thread");
+  expect(
+    buildThreadActionMenuItems({ ...baseState, supports, notificationsMuted: false }).find(
+      (item) => item.id === "mute",
+    )?.label,
+  ).toBe("Mute thread");
+  expect(
+    buildThreadActionMenuItems({ ...baseState, supports, canOperate: false }).find(
+      (item) => item.id === "unmute",
+    )?.disabled,
+  ).toBe(true);
+});

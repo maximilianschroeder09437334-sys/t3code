@@ -397,6 +397,7 @@ export type ProjectionRecords<K extends ProjectionRecordField> = Pick<
 
 export interface ProjectionTimelinePageOptions {
   readonly afterPosition?: number;
+  readonly latest?: boolean;
   readonly itemId?: TurnItemId;
   readonly attachmentId?: string;
   readonly view?: "messages" | "activity";
@@ -1026,6 +1027,7 @@ type ShellThreadRow = {
   readonly latest_run_id: string | null;
   readonly latest_run_status: string | null;
   readonly latest_run_requested_at: string | null;
+  readonly latest_run_human_authored: number;
   readonly latest_run_started_at: string | null;
   readonly latest_run_completed_at: string | null;
   readonly latest_run_stop_requested: number;
@@ -1062,6 +1064,7 @@ type SettlementThreadRow = Pick<
   | "latest_run_id"
   | "latest_run_status"
   | "latest_run_requested_at"
+  | "latest_run_human_authored"
   | "latest_run_started_at"
   | "latest_run_completed_at"
   | "latest_user_message_at"
@@ -1603,6 +1606,16 @@ export function threadShellFromProjection(
       pendingRuntimeRequest = waitingCard;
     }
   }
+  let notificationRun = latestRun;
+  for (
+    let depth = 0;
+    depth < 8 && notificationRun?.hookContinuationOfRunId !== undefined;
+    depth++
+  ) {
+    const parent = runs.find((run) => run.id === notificationRun?.hookContinuationOfRunId);
+    if (parent === undefined || parent.id === notificationRun.id) break;
+    notificationRun = parent;
+  }
   const latestUserMessage = userMessages[0] ?? null;
   const pendingBackgroundTasks = derivePendingBackgroundWork({
     latestRun,
@@ -1648,6 +1661,11 @@ export function threadShellFromProjection(
       : { delegatedFrom: projection.thread.delegatedFrom }),
     latestRunId: latestRun?.id ?? null,
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
+    latestRunHumanAuthored:
+      notificationRun != null &&
+      projection.messages.some(
+        (message) => message.id === notificationRun.userMessageId && message.createdBy === "user",
+      ),
     latestRunStartedAt: latestRun?.startedAt ?? null,
     latestRunCompletedAt: latestRun?.completedAt ?? null,
     latestRunStopRequested:
@@ -1697,6 +1715,8 @@ export function threadShellFromProjection(
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
+    notificationsMuted: projection.thread.notificationsMuted ?? true,
+    agentPing: projection.thread.agentPing ?? null,
     pinOrderKey: projection.thread.pinOrderKey ?? null,
     ...(projection.thread.tags?.length ? { tags: projection.thread.tags } : {}),
     lastVisitedAt: projection.thread.lastVisitedAt,
@@ -1769,6 +1789,7 @@ type ShellThreadState = {
   readonly latestRunId: RunId | null;
   readonly latestRunStatus: OrchestrationV2ShellThreadStatus;
   readonly latestRunRequestedAt: DateTime.Utc | null;
+  readonly latestRunHumanAuthored: boolean;
   readonly latestRunStartedAt: DateTime.Utc | null;
   readonly latestRunCompletedAt: DateTime.Utc | null;
   readonly latestRunStopRequested: boolean;
@@ -1929,6 +1950,7 @@ function shellFromState(input: {
       : { delegatedFrom: input.state.thread.delegatedFrom }),
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
+    latestRunHumanAuthored: input.state.latestRunHumanAuthored,
     latestRunStartedAt: input.state.latestRunStartedAt,
     latestRunCompletedAt: input.state.latestRunCompletedAt,
     latestRunStopRequested: input.state.latestRunStopRequested,
@@ -1963,6 +1985,8 @@ function shellFromState(input: {
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
+    notificationsMuted: input.state.thread.notificationsMuted ?? true,
+    agentPing: input.state.thread.agentPing ?? null,
     pinOrderKey: input.state.thread.pinOrderKey ?? null,
     ...(input.state.thread.tags?.length ? { tags: input.state.thread.tags } : {}),
     lastVisitedAt: input.state.thread.lastVisitedAt,
@@ -6011,7 +6035,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               .filter(
                 (row) => attachmentOwners?.has(`${row.sourceThreadId}:${row.sourceItemId}`) ?? true,
               );
-            const page = matching.slice(0, options.limit);
+            const latest =
+              options.latest === true &&
+              (options.afterPosition ?? -1) === -1 &&
+              options.itemId === undefined;
+            const page = latest
+              ? matching.slice(Math.max(0, matching.length - options.limit))
+              : matching.slice(0, options.limit);
             const sources = yield* encodeTimelineSources(
               page
                 .filter((row) => row.synthetic === undefined)
@@ -6063,7 +6093,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             return {
               items,
               totalItems: index.visible.length,
-              hasMore: matching.length > page.length,
+              hasMore: latest ? false : matching.length > page.length,
             };
           }),
         )
@@ -6217,6 +6247,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               presented.run_id AS latest_run_id,
               presented.status AS latest_run_status,
               presented.requested_at AS latest_run_requested_at,
+              EXISTS(
+                WITH RECURSIVE notification_origin(payload_json, depth) AS (
+                  SELECT presented.payload_json, 0
+                  UNION ALL
+                  SELECT parent.payload_json, origin.depth + 1
+                  FROM notification_origin origin JOIN orchestration_v2_projection_runs parent
+                    ON parent.thread_id = t.thread_id
+                      AND parent.run_id = json_extract(origin.payload_json, '$.hookContinuationOfRunId')
+                  WHERE origin.depth < 8
+                )
+                SELECT 1 FROM notification_origin origin JOIN orchestration_v2_projection_messages origin_message
+                  ON origin_message.thread_id = t.thread_id
+                    AND origin_message.message_id = json_extract(origin.payload_json, '$.userMessageId')
+                WHERE json_extract(origin_message.payload_json, '$.createdBy') = 'user'
+              ) AS latest_run_human_authored,
               json_extract(presented.payload_json, '$.startedAt') AS latest_run_started_at,
               presented.completed_at AS latest_run_completed_at,
               EXISTS (
@@ -6582,6 +6627,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               r.run_id AS latest_run_id,
               r.status AS latest_run_status,
               r.requested_at AS latest_run_requested_at,
+              EXISTS(
+                WITH RECURSIVE notification_origin(payload_json, depth) AS (
+                  SELECT r.payload_json, 0
+                  UNION ALL
+                  SELECT parent.payload_json, origin.depth + 1
+                  FROM notification_origin origin JOIN orchestration_v2_projection_runs parent
+                    ON parent.thread_id = t.thread_id
+                      AND parent.run_id = json_extract(origin.payload_json, '$.hookContinuationOfRunId')
+                  WHERE origin.depth < 8
+                )
+                SELECT 1 FROM notification_origin origin JOIN orchestration_v2_projection_messages origin_message
+                  ON origin_message.thread_id = t.thread_id
+                    AND origin_message.message_id = json_extract(origin.payload_json, '$.userMessageId')
+                WHERE json_extract(origin_message.payload_json, '$.createdBy') = 'user'
+              ) AS latest_run_human_authored,
               json_extract(r.payload_json, '$.startedAt') AS latest_run_started_at,
               r.completed_at AS latest_run_completed_at,
               (
@@ -6914,6 +6974,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           latestRunId,
           latestRunStatus,
           latestRunRequestedAt,
+          latestRunHumanAuthored:
+            row.blocking_run_id !== null ? false : row.latest_run_human_authored === 1,
           latestRunStartedAt,
           latestRunCompletedAt,
           latestRunStopRequested,
@@ -7186,6 +7248,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               activityRunStatus: state.activityRunStatus,
               latestRunCompletedAt: state.latestRunCompletedAt,
               latestRunStopRequested: state.latestRunStopRequested,
+              latestRunHumanAuthored: state.latestRunHumanAuthored,
+              notificationsMuted: state.thread.notificationsMuted ?? true,
+              agentPing: state.thread.agentPing ?? null,
+              lastVisitedAt: state.thread.lastVisitedAt,
               pendingRuntimeRequest: state.pendingRuntimeRequest,
               pendingBackgroundTasks: state.pendingBackgroundTasks,
             })),

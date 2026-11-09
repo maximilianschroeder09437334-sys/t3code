@@ -2636,6 +2636,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     }
                   : null,
               isPinned,
+              notificationsMuted: thread.notificationsMuted ?? true,
               isSettled,
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
@@ -2649,6 +2650,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
+                notificationControls:
+                  serverConfigs.get(thread.environmentId)?.environment.capabilities
+                    .threadNotificationControls === true,
                 snooze: configLoaded,
                 pinning: configLoaded,
                 titleRegeneration: configLoaded,
@@ -2762,6 +2766,22 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 }),
               );
             }
+            return;
+          }
+          case "mute":
+          case "unmute": {
+            const result = await updateThreadMetadata({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, notificationsMuted: clicked.value === "mute" },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result))
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Could not update thread notifications",
+                  description: String(squashAtomCommandFailure(result)),
+                }),
+              );
             return;
           }
           case "rename":
