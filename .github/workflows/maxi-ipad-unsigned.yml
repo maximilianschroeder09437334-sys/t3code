@@ -19,13 +19,20 @@ jobs:
       CI: "1"
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
+      - name: Checkout approved public source
+        shell: bash
+        env:
+          BUILD_REPOSITORY: ${{ github.repository }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git init
+          git remote add origin "https://github.com/$BUILD_REPOSITORY.git"
+          git fetch --depth=1 origin "$BUILD_SHA"
+          git sparse-checkout init --no-cone
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
       - uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
