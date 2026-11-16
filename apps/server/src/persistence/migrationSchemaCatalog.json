@@ -1523,6 +1523,24 @@
       "name": "web_push_thread_state",
       "tbl_name": "web_push_thread_state",
       "sql": "CREATE TABLE web_push_thread_state (thread_id TEXT PRIMARY KEY, identity TEXT, phase TEXT, updated_at INTEGER NOT NULL)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_queued_input_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_queued_input_idx ON orchestration_v2_projection_turn_items(run_id) WHERE type = 'user_message' AND json_extract(payload_json, '$.inputIntent') = 'queued_turn'"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_message_search_insert",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TRIGGER orchestration_v2_message_search_insert\n          AFTER INSERT ON orchestration_v2_projection_messages\n          BEGIN\n            INSERT INTO orchestration_v2_message_search (rowid, text)\n            VALUES (new.rowid, json_extract(new.payload_json, '$.text'));\n          END"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_message_search_update",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TRIGGER orchestration_v2_message_search_update\n          AFTER UPDATE OF payload_json ON orchestration_v2_projection_messages\n          BEGIN\n            DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid;\n            INSERT INTO orchestration_v2_message_search (rowid, text)\n            VALUES (new.rowid, json_extract(new.payload_json, '$.text'));\n          END"
     }
   ],
   "histories": {
@@ -2467,6 +2485,136 @@
       155, 156, 157, 158, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173,
       213, 175, 225, 241, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217,
       226, 227, 228
+    ],
+    "repair26-provider": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 52, 38, 54
+    ],
+    "repair27-projection": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 53, 10, 11,
+      49, 51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 54
+    ],
+    "repair50-context": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42, 44, 18, 59,
+      60, 19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 81, 37, 80, 56, 78, 38, 54
+    ],
+    "repair86-title": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 137,
+      138, 139, 140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 229, 148, 149,
+      150, 198, 151, 152, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201,
+      202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175,
+      225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219,
+      220, 226, 227, 228
+    ],
+    "repair91-queued": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 232,
+      137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 146, 147,
+      254, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 238, 237, 185, 153, 154, 155, 156,
+      157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170,
+      171, 172, 173, 213, 175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195,
+      184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "repair73-search": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209, 190,
+      63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 163,
+      164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 208, 76, 81, 80,
+      56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 255, 256
+    ],
+    "repair26-projection": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 12
+    ],
+    "repair26-both": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 54
     ]
+  },
+  "repairSources": {
+    "repair26-provider": {
+      "through": 26,
+      "pendingModules": [
+        {
+          "module": "027_ProviderSessionRuntimeInstanceId",
+          "sha256": "60af7fdb331cd363b9ac7f72886659aa4c353353a80b3b83d0e87b66fbf2200a"
+        }
+      ]
+    },
+    "repair27-projection": {
+      "through": 27,
+      "pendingModules": [
+        {
+          "module": "028_ProjectionThreadSessionInstanceId",
+          "sha256": "e2e2e58e00a5271044ec7b94ef3bcdab330cb6b37830c8eb72942e735dfb0226"
+        }
+      ]
+    },
+    "repair26-projection": {
+      "through": 26,
+      "pendingModules": [
+        {
+          "module": "028_ProjectionThreadSessionInstanceId",
+          "sha256": "e2e2e58e00a5271044ec7b94ef3bcdab330cb6b37830c8eb72942e735dfb0226"
+        }
+      ]
+    },
+    "repair26-both": {
+      "through": 26,
+      "pendingModules": [
+        {
+          "module": "027_ProviderSessionRuntimeInstanceId",
+          "sha256": "60af7fdb331cd363b9ac7f72886659aa4c353353a80b3b83d0e87b66fbf2200a"
+        },
+        {
+          "module": "028_ProjectionThreadSessionInstanceId",
+          "sha256": "e2e2e58e00a5271044ec7b94ef3bcdab330cb6b37830c8eb72942e735dfb0226"
+        }
+      ]
+    },
+    "repair50-context": {
+      "through": 50,
+      "pendingModules": [
+        {
+          "module": "051_ProjectionThreadMessageContext",
+          "sha256": "9fc9d0def90a4666987ad93ccaf71d8d409ccdaf006bc20dedac7bb68f152038"
+        }
+      ]
+    },
+    "repair86-title": {
+      "through": 86,
+      "pendingModules": [
+        {
+          "module": "087_ProjectionProjectsCustomTitle",
+          "sha256": "2226f386dac9523b3175e4ba1bb4af8b1cc86b8e1b219c71dac400c972a556ef"
+        }
+      ]
+    },
+    "repair91-queued": {
+      "through": 91,
+      "pendingModules": [
+        {
+          "module": "092_QueuedTurnInputIndexJsonValid",
+          "sha256": "b9a2b01e7bfc264c77ce194e419aaf071cdee1b5a2bd3bedc31e818bd06ad464"
+        }
+      ]
+    },
+    "repair73-search": {
+      "through": 73,
+      "pendingModules": [
+        {
+          "module": "074_ExcludeAttachmentPlaceholdersFromSearch",
+          "sha256": "6de008b7d72fa39f05a76374babc9bcfb72ee05a032955c567624b697ba58d68"
+        }
+      ]
+    }
   }
 }

@@ -7,11 +7,12 @@ import catalog from "./migrationSchemaCatalog.json" with { type: "json" };
 // Deduplicated sqlite_master definitions retain constraints, index predicates and trigger bodies.
 const histories: Readonly<Record<string, readonly number[]>> = catalog.histories;
 const normalize = (sql: string | null) =>
-  (sql?.match(/'(?:''|[^'])*'|"(?:""|[^"])*"|`[^`]*`|\[[^\]]*\]|[^\s'"`\[]+/g) ?? []).join(" ");
+  (sql?.match(/'(?:''|[^'])*'|"(?:""|[^"])*"|`[^`]*`|\[[^\]]*\]|[^\s'"`[]+/g) ?? []).join(" ");
 
 export const validateMigrationSchema = Effect.fn("validateMigrationSchema")(function* (
   history: string,
   customIds: readonly number[],
+  allowPendingRepairs = true,
 ) {
   const sql = yield* SqlClient.SqlClient;
   const actual = yield* sql<{
@@ -28,30 +29,39 @@ export const validateMigrationSchema = Effect.fn("validateMigrationSchema")(func
       kind: "BadState",
       message: "Unknown schema history. Nothing was changed.",
     });
-  const expected = [...ids, ...customIds.flatMap((id) => histories[`custom${id}`] ?? [])].map(
-    (id) => catalog.objects[id]!,
-  );
-  const tables = new Set(expected.filter((row) => row.type === "table").map((row) => row.name));
-  const mismatch = expected.find(
-    (row) =>
-      !actual.some(
-        (a) =>
-          a.type === row.type && a.name === row.name && normalize(a.sql) === normalize(row.sql),
-      ),
+  // Exact whole-schema variants supported by pending official modules 27/28, 51, 74, 87, 92.
+  const variants =
+    allowPendingRepairs && key === history
+      ? Object.keys(histories).filter((key) => key.startsWith(`repair${history}-`))
+      : [];
+  const candidates = [ids, ...variants.map((key) => histories[key]!)].map((ids) =>
+    [...ids, ...customIds.flatMap((id) => histories[`custom${id}`] ?? [])].map(
+      (id) => catalog.objects[id]!,
+    ),
   );
   const officialNames = new Set(
     Object.entries(histories)
       .filter(([key]) => !key.startsWith("custom"))
       .flatMap(([, ids]) => ids.map((id) => catalog.objects[id]!.name)),
   );
-  const extra = actual.find(
-    (row) =>
-      (tables.has(row.tbl_name) || (history !== "custom" && officialNames.has(row.name))) &&
-      !expected.some((e) => e.type === row.type && e.name === row.name),
-  );
-  if (mismatch || extra)
-    return yield* new Migrator.MigrationError({
-      kind: "BadState",
-      message: `Unexpected recorded schema object ${(mismatch ?? extra)!.name}. Nothing was changed.`,
-    });
+  for (const expected of candidates) {
+    const tables = new Set(expected.filter((row) => row.type === "table").map((row) => row.name));
+    const mismatch = expected.some(
+      (row) =>
+        !actual.some(
+          (a) =>
+            a.type === row.type && a.name === row.name && normalize(a.sql) === normalize(row.sql),
+        ),
+    );
+    const extra = actual.some(
+      (row) =>
+        (tables.has(row.tbl_name) || (history !== "custom" && officialNames.has(row.name))) &&
+        !expected.some((e) => e.type === row.type && e.name === row.name),
+    );
+    if (!mismatch && !extra) return;
+  }
+  return yield* new Migrator.MigrationError({
+    kind: "BadState",
+    message: "Unexpected recorded schema objects. Nothing was changed.",
+  });
 });

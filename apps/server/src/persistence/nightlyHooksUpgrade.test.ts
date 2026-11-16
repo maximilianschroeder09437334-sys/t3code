@@ -9,6 +9,7 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 import { SqlError, SqlSyntaxError } from "effect/sql/SqlError";
 
+import { validateMigrationSchema } from "./migrationSchemaValidation.ts";
 import { ensureCustomMigrationTables, legacyCustomPrefix } from "./customMigrationLedger.ts";
 import {
   hasPendingMigrations,
@@ -218,7 +219,7 @@ const dump = Effect.gen(function* () {
   const rows: Record<string, unknown> = {};
   const tables = yield* sql<{
     readonly name: string;
-  }>`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'orchestration_v2_message_search%' AND sql NOT LIKE 'CREATE VIRTUAL%' ORDER BY name`;
+  }>`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`;
   for (const { name } of tables) {
     rows[name] = yield* sql.unsafe(`SELECT * FROM "${name}" `);
   }
@@ -600,6 +601,7 @@ describe("custom ledger runner", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
       yield* sql`DELETE FROM t3_custom_migrations WHERE migration_id = 80`;
+      yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, adapter_key, status, last_seen_at) VALUES ('kept', 'codex', 'codex', 'idle', '2026-11-16')`;
       const before = yield* dump;
       assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
       assert.deepStrictEqual(yield* dump, before);
@@ -670,6 +672,7 @@ describe("repair round 1 preflight and sealing", () => {
           loader: Migrator.fromRecord({ "53_OrchestrationV2": V2Preview }),
         });
       yield* sql`CREATE TABLE thread_notes(id TEXT)`;
+      yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, adapter_key, status, last_seen_at) VALUES ('kept', 'codex', 'codex', 'idle', '2026-11-16')`;
       const before = yield* dump;
       assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
       assert.deepStrictEqual(yield* dump, before);
@@ -715,6 +718,7 @@ describe("repair round 1 preflight and sealing", () => {
       yield* runMigrations({ toMigrationInclusive: 96 });
       yield* ThreadNotes;
       yield* sql`CREATE TRIGGER destructive_note AFTER INSERT ON thread_notes BEGIN DELETE FROM thread_notes; END`;
+      yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, adapter_key, status, last_seen_at) VALUES ('kept', 'codex', 'codex', 'idle', '2026-11-16')`;
       const before = yield* dump;
       assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
       assert.deepStrictEqual(yield* dump, before);
@@ -803,6 +807,7 @@ describe("repair round 2 reserved bookkeeping", () => {
           `CREATE TRIGGER "${name}" AFTER INSERT ON scheduled_tasks BEGIN SELECT 1; END`,
         );
       if (type === "table") yield* sql.unsafe(`CREATE TABLE "${name}" (id TEXT)`);
+      yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, adapter_key, status, last_seen_at) VALUES ('kept', 'codex', 'codex', 'idle', '2026-11-16')`;
       const before = yield* dump;
       assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
       assert.deepStrictEqual(yield* dump, before);
@@ -904,9 +909,163 @@ describe("repair round 2 supported no-FTS history", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* buildNoFts;
       yield* sql.unsafe(statement);
+      yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, adapter_key, status, last_seen_at) VALUES ('kept', 'codex', 'codex', 'idle', '2026-11-16')`;
       const before = yield* dump;
       assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
       assert.deepStrictEqual(yield* dump, before);
     }).pipe(Effect.provide(memory)),
   );
 });
+
+describe("recorded official schema damage", () => {
+  it.effect.each([
+    [80, false, "ALTER TABLE scheduled_tasks DROP COLUMN thread_mode"],
+    [80, false, "DROP INDEX idx_provider_session_runtime_instance"],
+    [96, false, "DROP TRIGGER orchestration_v2_message_search_insert"],
+    [96, true, "DROP INDEX idx_provider_session_runtime_instance"],
+    [68, false, "DROP INDEX idx_provider_session_runtime_instance"],
+    [
+      96,
+      false,
+      "DROP TRIGGER orchestration_v2_message_search_insert; CREATE TRIGGER orchestration_v2_message_search_insert AFTER INSERT ON orchestration_v2_projection_messages BEGIN SELECT 1; END",
+    ],
+    [
+      91,
+      false,
+      "DROP INDEX orchestration_v2_projection_turn_items_queued_input_idx; CREATE INDEX orchestration_v2_projection_turn_items_queued_input_idx ON orchestration_v2_projection_turn_items(run_id) WHERE type = 'user_message'",
+    ],
+    [
+      80,
+      false,
+      "CREATE TRIGGER destructive_extra AFTER INSERT ON provider_session_runtime BEGIN DELETE FROM provider_session_runtime; END",
+    ],
+    [
+      96,
+      false,
+      "DROP TABLE orchestration_v2_message_search; CREATE VIRTUAL TABLE orchestration_v2_message_search USING fts5(wrong)",
+    ],
+    [26, false, "ALTER TABLE provider_session_runtime ADD COLUMN provider_instance_id INTEGER"],
+    [
+      50,
+      false,
+      "ALTER TABLE projection_thread_messages ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'",
+    ],
+    [86, false, "ALTER TABLE projection_projects ADD COLUMN has_custom_title TEXT"],
+  ] as const)(
+    "rejects damaged history %s (custom=%s): %s before writes",
+    ([through, custom, damage]) =>
+      Effect.gen(function* () {
+        yield* runMigrations({ toMigrationInclusive: through });
+        if (custom) yield* runMigrations();
+        const sql = yield* SqlClient.SqlClient;
+
+        yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, adapter_key, status, last_seen_at) VALUES ('kept', 'codex', 'codex', 'idle', '2026-11-16')`;
+        for (const statement of damage.split(/; (?=CREATE)/).filter(Boolean)) {
+          yield* sql.unsafe(statement);
+        }
+        const before = yield* dump;
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+        assert.deepStrictEqual(yield* dump, before);
+      }).pipe(Effect.provide(memory)),
+  );
+});
+
+it.effect.each([
+  {
+    name: "26-provider",
+    through: 26,
+    changes: ["ALTER TABLE provider_session_runtime ADD COLUMN provider_instance_id TEXT"],
+  },
+  {
+    name: "27-projection",
+    through: 27,
+    changes: ["ALTER TABLE projection_thread_sessions ADD COLUMN provider_instance_id TEXT"],
+  },
+  {
+    name: "26-projection",
+    through: 26,
+    changes: ["ALTER TABLE projection_thread_sessions ADD COLUMN provider_instance_id TEXT"],
+  },
+  {
+    name: "26-both",
+    through: 26,
+    changes: [
+      "ALTER TABLE provider_session_runtime ADD COLUMN provider_instance_id TEXT",
+      "ALTER TABLE projection_thread_sessions ADD COLUMN provider_instance_id TEXT",
+    ],
+  },
+  {
+    name: "50-context",
+    through: 50,
+    changes: ["ALTER TABLE projection_thread_messages ADD COLUMN context_json TEXT"],
+  },
+  {
+    name: "86-title",
+    through: 86,
+    changes: [
+      "ALTER TABLE projection_projects ADD COLUMN has_custom_title INTEGER NOT NULL DEFAULT 0",
+    ],
+  },
+  {
+    name: "91-queued",
+    through: 91,
+    changes: [
+      "DROP INDEX orchestration_v2_projection_turn_items_queued_input_idx",
+      "CREATE INDEX orchestration_v2_projection_turn_items_queued_input_idx ON orchestration_v2_projection_turn_items(run_id) WHERE type = 'user_message' AND json_extract(payload_json, '$.inputIntent') = 'queued_turn'",
+    ],
+  },
+  {
+    name: "73-search",
+    through: 73,
+    changes: [
+      "DROP TRIGGER orchestration_v2_message_search_insert",
+      "DROP TRIGGER orchestration_v2_message_search_update",
+      "\n          CREATE TRIGGER orchestration_v2_message_search_insert\n          AFTER INSERT ON orchestration_v2_projection_messages\n          BEGIN\n            INSERT INTO orchestration_v2_message_search (rowid, text)\n            VALUES (new.rowid, json_extract(new.payload_json, '$.text'));\n          END\n        ",
+      "\n          CREATE TRIGGER orchestration_v2_message_search_update\n          AFTER UPDATE OF payload_json ON orchestration_v2_projection_messages\n          BEGIN\n            DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid;\n            INSERT INTO orchestration_v2_message_search (rowid, text)\n            VALUES (new.rowid, json_extract(new.payload_json, '$.text'));\n          END\n        ",
+    ],
+  },
+])("completes supported pending repair $name and preserves rows", ({ through, changes }) =>
+  Effect.gen(function* () {
+    yield* runMigrations({ toMigrationInclusive: through });
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, adapter_key, status, last_seen_at) VALUES ('kept', 'codex', 'codex', 'idle', '2026-11-16')`;
+    const before = yield* sql`SELECT * FROM provider_session_runtime`;
+    for (const change of changes) yield* sql.unsafe(change);
+    yield* runMigrations();
+    yield* validateMigrationSchema("96", [], false);
+    const after = yield* sql`SELECT * FROM provider_session_runtime`;
+    assert.deepInclude(after[0], before[0]);
+    yield* expectCurrent;
+  }).pipe(Effect.provide(memory)),
+);
+
+it.effect.each([
+  {
+    through: 26,
+    preparation: "ALTER TABLE provider_session_runtime ADD COLUMN provider_instance_id TEXT",
+    damage: "DROP INDEX idx_provider_session_runtime_status",
+  },
+  {
+    through: 50,
+    preparation: "ALTER TABLE projection_thread_messages ADD COLUMN context_json TEXT",
+    damage: "DROP INDEX idx_provider_session_runtime_instance",
+  },
+  {
+    through: 86,
+    preparation:
+      "ALTER TABLE projection_projects ADD COLUMN has_custom_title INTEGER NOT NULL DEFAULT 0",
+    damage: "DROP INDEX idx_provider_session_runtime_instance",
+  },
+])(
+  "rejects unrelated damage beside supported repair at $through before writes",
+  ({ through, preparation, damage }) =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: through });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql.unsafe(preparation);
+      yield* sql.unsafe(damage);
+      const before = yield* dump;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      assert.deepStrictEqual(yield* dump, before);
+    }).pipe(Effect.provide(memory)),
+);

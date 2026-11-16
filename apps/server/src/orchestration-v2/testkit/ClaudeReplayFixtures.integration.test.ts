@@ -1,3 +1,4 @@
+import { vi } from "vite-plus/test";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -30,6 +31,16 @@ import {
   type ReplayFixtureCase,
 } from "./ProviderReplayFixtures.ts";
 import { readProviderReplayTranscript } from "@t3tools/provider-testing/replayTranscript";
+
+// Replay files model Claude's uid-based Unix layout even on a Windows test host.
+vi.mock("../Adapters/ClaudeTaskOutputTail.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../Adapters/ClaudeTaskOutputTail.ts")>();
+  return {
+    ...actual,
+    claudeTaskOutputRoot: (...args: Parameters<typeof actual.claudeTaskOutputRoot>) =>
+      args[1].resolve(args[2] ?? ".", args[0]?.CLAUDE_CODE_TMPDIR ?? ".", "claude-replay"),
+  };
+});
 
 const readTranscript = Effect.fn("readClaudeReplayFixture")(function* (file: URL) {
   return yield* readProviderReplayTranscript(file);
