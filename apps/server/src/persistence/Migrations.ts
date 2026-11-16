@@ -6,6 +6,13 @@ import {
   DATABASE_MIGRATIONS_FINISHED_MESSAGE,
   DATABASE_MIGRATIONS_STARTED_MESSAGE,
 } from "@t3tools/shared/databaseMigrationLog";
+import {
+  convertLegacyCustomLedger,
+  hasPendingCustomMigrations,
+  legacyCustomPrefix,
+  planLegacyCustomConversion,
+  runCustomMigrations,
+} from "./customMigrationLedger.ts";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -217,11 +224,15 @@ const makeMigrationLoader = (throughId?: number) =>
   );
 
 const FIRST_V2_MIGRATION_ID = 55;
+// Custom 80-83 share these ids with official migrations; see customMigrationLedger.ts.
+const FIRST_CUSTOM_MIGRATION_ID = 80;
 
 export function skippedV2Migrations(
   recorded: ReadonlyArray<{ readonly id: number; readonly name: string }>,
   throughId?: number,
 ): string[] {
+  // Startup converts a complete pre-merge custom ledger instead of skipping its ids.
+  if (typeof legacyCustomPrefix(recorded, migrationManifest) === "number") return [];
   const latestRecordedId = Math.max(0, ...recorded.map((row) => row.id));
   const recordedNames = new Map(recorded.map((row) => [row.id, row.name]));
   return migrationManifest.flatMap(([id, name]) => {
@@ -263,7 +274,8 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
 
 const latestMigrationId = Math.max(...migrationEntries.map(([id]) => id));
 
-// Mirrors the Migrator, which runs only ids above the highest recorded, plus the V2-preview reconciliation.
+// Mirrors the Migrator, which runs only ids above the highest recorded, plus the V2-preview
+// reconciliation and the custom ledger, which no official id covers.
 export const hasPendingMigrations = Effect.fn("hasPendingMigrations")(function* () {
   const sql = yield* SqlClient.SqlClient;
   const tables = yield* sql`
@@ -277,7 +289,8 @@ export const hasPendingMigrations = Effect.fn("hasPendingMigrations")(function* 
     FROM effect_sql_migrations
   `;
   const row = rows[0];
-  return (row?.latestId ?? 0) < latestMigrationId || (row?.previewRows ?? 0) > 0;
+  if ((row?.latestId ?? 0) < latestMigrationId || (row?.previewRows ?? 0) > 0) return true;
+  return yield* hasPendingCustomMigrations();
 });
 
 const run = Migrator.make({});
@@ -286,17 +299,11 @@ export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
 }
 
-export const runMigrations = Effect.fn("runMigrations")(function* ({
-  toMigrationInclusive,
-}: RunMigrationsOptions = {}) {
-  // The desktop waits past its readiness budget until the finished line follows this one.
-  if (yield* hasPendingMigrations()) yield* Effect.log(DATABASE_MIGRATIONS_STARTED_MESSAGE);
-  const includesV2 =
-    toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
-  const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
-  if (includesV2) {
-    yield* assertV2MigrationsCanRun(toMigrationInclusive);
-  }
+// One transaction per migration: an index build on a large database can take minutes, and a
+// restart then resumes after the last finished migration instead of rolling all of them back.
+const runPendingOfficialMigrations = Effect.fn("runPendingOfficialMigrations")(function* (
+  toMigrationInclusive: number | undefined,
+) {
   const sql = yield* SqlClient.SqlClient;
   const ledger = yield* sql`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
@@ -312,9 +319,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ([id]) =>
       id > latestRecordedId && (toMigrationInclusive === undefined || id <= toMigrationInclusive),
   );
-  // One transaction per migration: an index build on a large database can take minutes, and a
-  // restart then resumes after the last finished migration instead of rolling all of them back.
-  const executedMigrations: Array<readonly [id: number, name: string]> = [...previewMigrations];
+  const executed: Array<readonly [id: number, name: string]> = [];
   for (const [index, [id, name]] of pending.entries()) {
     if (latestRecordedId > 0) {
       yield* Effect.log(DATABASE_MIGRATION_PROGRESS_MESSAGE).pipe(
@@ -324,10 +329,43 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
         }),
       );
     }
-    executedMigrations.push(...(yield* run({ loader: makeMigrationLoader(id) })));
+    executed.push(...(yield* run({ loader: makeMigrationLoader(id) })));
   }
-  const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
-  yield* migrations.length === 0
+  return executed;
+});
+
+export const runMigrations = Effect.fn("runMigrations")(function* ({
+  toMigrationInclusive,
+}: RunMigrationsOptions = {}) {
+  // The desktop waits past its readiness budget until the finished line follows this one.
+  const started = yield* hasPendingMigrations();
+  if (started) yield* Effect.log(DATABASE_MIGRATIONS_STARTED_MESSAGE);
+  const includesV2 =
+    toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
+  const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
+  const sql = yield* SqlClient.SqlClient;
+  // Validated before any write: a custom history that is not exactly recognized stays untouched.
+  const customPrefix =
+    toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_CUSTOM_MIGRATION_ID
+      ? yield* planLegacyCustomConversion(migrationManifest)
+      : undefined;
+  const upgrade = Effect.gen(function* () {
+    if (customPrefix !== undefined) yield* convertLegacyCustomLedger(customPrefix);
+    if (includesV2) yield* assertV2MigrationsCanRun(toMigrationInclusive);
+    const official = yield* runPendingOfficialMigrations(toMigrationInclusive);
+    const custom = toMigrationInclusive === undefined ? yield* runCustomMigrations() : [];
+    return { official, custom };
+  });
+  // A converted history changes the ledger the official migrator reads, so the conversion and the
+  // migrations that follow commit together or not at all.
+  const { official, custom } =
+    customPrefix === undefined ? yield* upgrade : yield* sql.withTransaction(upgrade);
+  const executedMigrations = [...previewMigrations, ...official];
+  const migrations = [
+    ...executedMigrations.map(([id, name]) => `${id}_${name}`),
+    ...custom.map(([id, name]) => `custom_${id}_${name}`),
+  ];
+  yield* migrations.length === 0 && !started
     ? Effect.logDebug("Database schema is current")
     : Effect.log(DATABASE_MIGRATIONS_FINISHED_MESSAGE).pipe(Effect.annotateLogs({ migrations }));
 

@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { customMigrationFiles } from "./customMigrationLedger.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 
 const v2Migrations = migrationManifest.filter(([id]) => id >= 55);
@@ -195,8 +196,9 @@ describe("runMigrations", () => {
   );
 });
 
-// The npm launcher reads the highest migration id from these file names.
-it.effect("registers every migration file", () =>
+// The npm launcher reads the highest migration id from these file names. Maxi's custom files share
+// ids 80-83 with official ones but are recorded in their own ledger, so they are listed separately.
+it.effect("registers every migration file in the official or the custom ledger", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -205,9 +207,9 @@ it.effect("registers every migration file", () =>
       const match = /^(\d+)_(\w+)\.ts$/.exec(name);
       return match ? [[Number(match[1]), match[2]] as const] : [];
     });
-    assert.deepStrictEqual(
-      files.toSorted(([a], [b]) => a - b),
-      migrationManifest,
-    );
+    const key = ([id, name]: readonly [number, string | undefined]) =>
+      `${String(id).padStart(3, "0")}_${name}`;
+    const registered = [...migrationManifest, ...customMigrationFiles];
+    assert.deepStrictEqual(files.map(key).toSorted(), registered.map(key).toSorted());
   }).pipe(Effect.provide(NodeServices.layer)),
 );
