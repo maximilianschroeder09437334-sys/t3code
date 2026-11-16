@@ -104,9 +104,9 @@ jobs:
           assert info["CFBundleVersion"] == "5"
           assert not os.path.exists(os.path.join(app, "embedded.mobileprovision"))
           expo_plist = os.path.join(app, "Expo.plist")
-          if os.path.exists(expo_plist):
-              with open(expo_plist, "rb") as source:
-                  assert plistlib.load(source).get("EXUpdatesEnabled") is False
+          with open(expo_plist, "rb") as source:
+              updates_enabled = plistlib.load(source)["EXUpdatesEnabled"]
+          assert updates_enabled is False
           assert {1, 2}.issubset(set(info["UIDeviceFamily"]))
           assert {"t3code-maxi", "t3code-preview"}.issubset(schemes)
           with open(receipt, "w", encoding="utf-8") as out:
@@ -118,11 +118,13 @@ jobs:
                   "bundleIdentifier": info["CFBundleIdentifier"],
                   "marketingVersion": info["CFBundleShortVersionString"],
                   "buildNumber": info["CFBundleVersion"],
-                  "signed": False,
-                  "updatesEnabled": False,
+                  "requestedCodeSigningAllowed": False,
+                  "signatureStatus": "not_inspected",
+                  "provisioningProfilePresent": False,
+                  "updatesEnabled": updates_enabled,
               }, out, indent=2)
               out.write("\n")
-          print("Verified Maxi identity, version 2.2.1 (5), unsigned state, phone/tablet support and native thread-link schemes.")
+          print("Verified Maxi identity, version 2.2.1 (5), disabled updates and no provisioning profile, phone/tablet support and native thread-link schemes.")
           PY
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "${apps[0]}" "$RUNNER_TEMP/ipa/Payload/"
