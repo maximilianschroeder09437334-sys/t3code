@@ -4,7 +4,6 @@ import { useId } from "react";
 
 import { APP_STAGE_LABEL } from "../branding";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
-import { isElectron } from "../env";
 import { primaryServerConfigAtom } from "../state/server";
 
 export type SidebarStageBackdropVariant = "nightly" | "dev";
@@ -25,7 +24,6 @@ export function resolveSidebarStageBackdropVariant(
   return null;
 }
 
-// Nightly artwork is shown only in the desktop app; other clients keep the plain header.
 export function resolveClientStageBackdropVariant(
   variant: SidebarStageBackdropVariant | null,
   clientIsElectron: boolean,
@@ -55,10 +53,7 @@ export function useEnvironmentStageLabel(): string {
 export function useSidebarStageBackdropVariant(
   mode: EnvironmentIdentificationMode,
 ): SidebarStageBackdropVariant | null {
-  return resolveClientStageBackdropVariant(
-    resolveSidebarStageBackdropVariant(useEnvironmentStageLabel(), mode),
-    isElectron,
-  );
+  return resolveSidebarStageBackdropVariant(useEnvironmentStageLabel(), mode);
 }
 
 export function SidebarStageBackdrop({ variant }: { variant: SidebarStageBackdropVariant }) {
