@@ -14,6 +14,10 @@ const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 const isMaxiAndroidBuild = repoEnv.T3CODE_MAXI_ANDROID === "1";
 const isMaxiBuild = isIosPersonalTeamBuild || isMaxiAndroidBuild;
+// Maxi marketing version on both platforms; each build must raise its platform build number.
+const MAXI_MARKETING_VERSION = "2.2.1";
+const MAXI_IOS_BUILD_NUMBER = "5";
+const MAXI_ANDROID_VERSION_CODE = 9;
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
@@ -239,7 +243,9 @@ const config: ExpoConfig = {
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: isMaxiBuild ? ["t3code-maxi", variant.scheme] : variant.scheme,
+  // fingerprint.config.js and the production workflow match this exact line; keep the override below it.
   version: repoEnv.T3CODE_MOBILE_VERSION ?? "2.3.0",
+  ...(isMaxiBuild ? { version: MAXI_MARKETING_VERSION } : {}),
   runtimeVersion: {
     // Skip costly fingerprinting on dev launches; preview and production OTAs require matching native projects.
     policy: runtimeVersionPolicy,
@@ -258,7 +264,7 @@ const config: ExpoConfig = {
     supportsTablet: true,
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
-    ...(isIosPersonalTeamBuild ? { buildNumber: "4" } : {}),
+    ...(isIosPersonalTeamBuild ? { buildNumber: MAXI_IOS_BUILD_NUMBER } : {}),
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
     ...(isIosPersonalTeamBuild
       ? {}
@@ -304,7 +310,7 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: isMaxiAndroidBuild ? "com.maximilian.t3code.mobile" : variant.androidPackage,
-    ...(isMaxiAndroidBuild ? { versionCode: 8 } : {}),
+    ...(isMaxiAndroidBuild ? { versionCode: MAXI_ANDROID_VERSION_CODE } : {}),
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),
