@@ -42,7 +42,17 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
     : fabSize;
   const workspace = useWorkspaceTabs();
   const bottomClearance = insets.bottom + FLOATING_TABS.bottom + FLOATING_TABS.edge + size;
-  const context = floatingTabsEnabled && workspace ? { ...workspace, bottomClearance } : workspace;
+  const context = workspace
+    ? {
+        ...workspace,
+        bottomClearance:
+          props.footer && !floatingTabsEnabled
+            ? 16
+            : floatingTabsEnabled
+              ? bottomClearance
+              : workspace.bottomClearance,
+      }
+    : workspace;
   const scrollState = useRef({ anchor: 0, expanded: true });
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -55,6 +65,29 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
     scrollState.current = next;
   };
 
+  const showCompose =
+    !props.disabled &&
+    (!props.sidebar || floatingTabsEnabled) &&
+    state.hasConnections &&
+    layoutWidth !== null;
+  // The compact home footer owns both rows, so usage cannot drift above New thread.
+  const composeButton = showCompose ? (
+    <ScrollComposeButton
+      key={`${appearance.baseFontSize}:${fontScale}:${layoutWidth}`}
+      size={size}
+      expanded={floatingTabsEnabled ? false : expanded}
+      onPress={props.onStartNewTask}
+      className="absolute"
+      style={
+        floatingTabsEnabled
+          ? { right: FLOATING_TABS.edge, bottom: insets.bottom + FLOATING_TABS.bottom }
+          : props.footer
+            ? { right: 16, bottom: 16 }
+            : androidHomeFabPosition(insets.bottom, props.sidebar)
+      }
+    />
+  ) : null;
+
   // Remount only the FAB when its font or pane changes to clear the cached expanded width.
   // Floating navigation shares this row; Material split views put New thread in the rail.
   return (
@@ -62,26 +95,15 @@ export function AndroidHomeFabLayout(props: ComponentProps<typeof SharedAndroidH
       <WorkspaceTabsContext value={context}>
         <FabScrollContext value={onScroll}>{props.children}</FabScrollContext>
       </WorkspaceTabsContext>
-      {!props.disabled &&
-      (!props.sidebar || floatingTabsEnabled) &&
-      state.hasConnections &&
-      layoutWidth !== null ? (
-        <ScrollComposeButton
-          key={`${appearance.baseFontSize}:${fontScale}:${layoutWidth}`}
-          size={size}
-          expanded={floatingTabsEnabled ? false : expanded}
-          onPress={props.onStartNewTask}
-          className="absolute"
-          style={
-            floatingTabsEnabled
-              ? {
-                  right: FLOATING_TABS.edge,
-                  bottom: insets.bottom + FLOATING_TABS.bottom,
-                }
-              : androidHomeFabPosition(insets.bottom, props.sidebar)
-          }
-        />
+      {props.footer ? (
+        <View style={floatingTabsEnabled ? { paddingBottom: bottomClearance } : undefined}>
+          {!floatingTabsEnabled && showCompose ? (
+            <View style={{ height: size + 32 }}>{composeButton}</View>
+          ) : null}
+          {props.footer}
+        </View>
       ) : null}
+      {!props.footer || floatingTabsEnabled ? composeButton : null}
     </View>
   );
 }

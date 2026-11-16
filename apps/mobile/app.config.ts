@@ -299,7 +299,7 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: isMaxiAndroidBuild ? "com.maximilian.t3code.mobile" : variant.androidPackage,
-    ...(isMaxiAndroidBuild ? { versionCode: 7 } : {}),
+    ...(isMaxiAndroidBuild ? { versionCode: 8 } : {}),
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),

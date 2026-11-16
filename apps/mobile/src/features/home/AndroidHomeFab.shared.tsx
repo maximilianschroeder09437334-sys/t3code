@@ -3,10 +3,16 @@ import type { ReactNode } from "react";
 export function AndroidHomeFabLayout(props: {
   readonly onStartNewTask: () => void;
   readonly children: ReactNode;
+  readonly footer?: ReactNode;
   readonly sidebar?: boolean;
   readonly disabled?: boolean;
 }) {
-  return <>{props.children}</>;
+  return (
+    <>
+      {props.children}
+      {props.footer}
+    </>
+  );
 }
 
 /**

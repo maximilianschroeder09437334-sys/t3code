@@ -165,7 +165,10 @@ export function HomeRouteScreen() {
   }
 
   return (
-    <AndroidHomeFabLayout onStartNewTask={startNewTask}>
+    <AndroidHomeFabLayout
+      onStartNewTask={startNewTask}
+      footer={Platform.OS === "android" ? <SidebarUsage /> : undefined}
+    >
       <>
         <WorkspaceListHeader
           accessibilityLabel="T3 Code, Threads"
@@ -234,7 +237,9 @@ export function HomeRouteScreen() {
           selectedProjectKey={selectedProjectKey}
           threads={threads}
         />
-        <SidebarUsage bottomInset={workspace?.bottomClearance ?? insets.bottom} />
+        {Platform.OS !== "android" ? (
+          <SidebarUsage bottomInset={workspace?.bottomClearance ?? insets.bottom} />
+        ) : null}
         <ThreadUndoNotice visible={visible} />
       </>
     </AndroidHomeFabLayout>
