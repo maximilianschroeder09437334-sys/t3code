@@ -1,5 +1,6 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
+  clampedPositiveInt,
   NonNegativeInt,
   ModelSelection,
   TrimmedNonEmptyString,
@@ -42,7 +43,7 @@ import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchServ
 import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
@@ -78,14 +79,16 @@ const HookTestTool = Tool.make("t3_hook_test", {
   parameters: HookTestInput,
   success: HookTestResult,
   dependencies: [...shared.dependencies, HookRegistry.HookRegistry],
-}).annotate(Tool.Destructive, false);
+})
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 const ProjectListTool = Tool.make("t3_project_list", {
   ...shared,
   description: "List projects. Pages can shift.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     cursor: Schema.optional(NonNegativeInt),
-    limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+    limit: Schema.optional(clampedPositiveInt(100)),
   }),
   success: Schema.Struct({
     projects: Schema.Array(Project),
@@ -133,7 +136,11 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
     projectId: ProjectId,
     force: Schema.optionalKey(Schema.Boolean),
   }),
-  dependencies: [...shared.dependencies, ProjectCloneTracker.ProjectCloneTracker],
+  dependencies: [
+    ...shared.dependencies,
+    ProjectCloneTracker.ProjectCloneTracker,
+    ManagedProjectFolders.ManagedProjectFolders,
+  ],
 }).annotate(Tool.Destructive, true);
 const ProjectCloneTool = Tool.make("t3_project_clone", {
   ...shared,

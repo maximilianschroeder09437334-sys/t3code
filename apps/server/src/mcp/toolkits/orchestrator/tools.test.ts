@@ -12,7 +12,7 @@ it("states t3_thread_read page size limits in the parameter descriptions", () =>
     readonly properties: Readonly<Record<string, { readonly description?: string }>>;
   };
   expect(schema.properties.latest?.description).toContain("newest matching items");
-  const limits = { limit: "100", runLimit: "50", maxCharsPerItem: "50000" };
+  const limits = { limit: "100", runLimit: "50", maxCharsPerItem: "20000" };
   for (const [name, maximum] of Object.entries(limits)) {
     expect(schema.properties[name]?.description, name).toContain(maximum);
   }

@@ -1,4 +1,5 @@
 import type { OrchestrationV2DomainEvent, OrchestrationV2TurnItem } from "@t3tools/contracts";
+import { turnItemCanChangeUserWait } from "@t3tools/shared/agentAwareness";
 import { turnItemUpdateCanEndBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 
 function isTurnItemPayload(
@@ -50,6 +51,7 @@ export function shouldPublishThreadAttentionEvent(
     case "thread.active-reordered":
     case "thread.tags-updated":
     case "thread.visited":
+    case "thread.visit-recorded":
     case "thread.marked-unread":
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
@@ -62,7 +64,11 @@ export function shouldPublishThreadAttentionEvent(
     case "provider-session.detached":
     case "provider-turn.updated":
     case "turn-item.updated":
-      return isTurnItemPayload(event.payload) && turnItemUpdateCanEndBackgroundWork(event.payload);
+      return (
+        isTurnItemPayload(event.payload) &&
+        (turnItemUpdateCanEndBackgroundWork(event.payload) ||
+          turnItemCanChangeUserWait(event.payload))
+      );
     case "message.updated":
     case "plan.updated":
     case "checkpoint-scope.created":

@@ -113,7 +113,7 @@ export const continueHookRun = Effect.fn("HookContinuation.continueHookRun")(
           const threads = yield* ThreadManagementService.ThreadManagementService;
           const projection = yield* threads.getThreadRecords(input.threadId, []);
           if (projection.thread?.lineage?.relationshipToParent === "subagent") {
-            yield* threads.recoverDelegatedTask(input.threadId, input.sourceRunId);
+            yield* threads.recoverDelegatedTask(input.threadId, { sourceRunId: input.sourceRunId });
           }
         }),
       ),

@@ -13,6 +13,7 @@ import {
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { LanguageSettingsSection } from "./SettingsLanguageRouteScreen";
 import { NewThreadSettingsSection, WorkingSectionSettings } from "./ThreadSettingsSections";
 
 const GROUPING_OPTIONS: ReadonlyArray<{
@@ -55,6 +56,7 @@ export function SettingsProjectGroupingRouteScreen() {
         contentContainerClassName="gap-3 px-5 pt-4"
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
+        <LanguageSettingsSection />
         <SettingsSection title="Project grouping">
           {GROUPING_OPTIONS.map((option, index) => (
             <SettingsChoiceRow

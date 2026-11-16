@@ -19,6 +19,7 @@ import {
   type PreviewAutomationResizeResult,
   type PreviewAutomationSetColorSchemeResult,
   type PreviewAutomationSnapshot,
+  type PreviewAutomationSnapshotMetadata,
   type PreviewAutomationStatus,
   type PreviewTabId,
 } from "@t3tools/contracts";
@@ -325,12 +326,16 @@ const handlers = {
   ),
   preview_snapshot: McpToolAccess.readsAsCaller(
     Effect.fn("PreviewToolkit.snapshotWithRecovery")(function* (input) {
-      const { includeImage: _includeImage, save, ...operationInput } = input ?? {};
+      const { includeImage, save, ...operationInput } = input ?? {};
       const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
       const generation = browserRecovery.generation(scope.thread.threadId);
-      const result = yield* invokeTargeted<PreviewAutomationSnapshot>("snapshot", {
+      // The saved file is for people, so it keeps the resolution the agent's image is capped below.
+      const result = yield* invokeTargeted<
+        PreviewAutomationSnapshot | PreviewAutomationSnapshotMetadata
+      >("snapshot", {
         ...operationInput,
         ...(save === true ? { fullScreenshot: true } : {}),
+        ...(includeImage === true || save === true ? {} : { pixelsRequired: false }),
       });
       browserRecovery.checkedSnapshot(scope.thread.threadId, generation);
       return result;
