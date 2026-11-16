@@ -294,6 +294,52 @@ const hasTable = Effect.fn("customMigrationLedger.hasTable")(function* (table: s
   );
 });
 
+const archiveGuardDefinition = (action: string) =>
+  `CREATE TRIGGER t3_custom_migration_legacy_ledger_no_${action} BEFORE ${action} ON t3_custom_migration_legacy_ledger BEGIN SELECT RAISE(ABORT, 'The archived migration ledger is immutable.'); END`;
+
+export const validateMigrationBookkeeping = Effect.fn("customMigrationLedger.validateBookkeeping")(
+  function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const reserved = [
+      ...["effect_sql_migrations", ...Object.keys(bookkeepingDefinitions)].map((name) => ({
+        name,
+        type: "table",
+        table: name,
+        definition: undefined,
+      })),
+      ...["insert", "update", "delete"].map((action) => ({
+        name: `t3_custom_migration_legacy_ledger_no_${action}`,
+        type: "trigger",
+        table: "t3_custom_migration_legacy_ledger",
+        definition: archiveGuardDefinition(action),
+      })),
+    ];
+    const objects = yield* sql<{
+      readonly type: string;
+      readonly name: string;
+      readonly tbl_name: string;
+      readonly sql: string | null;
+    }>`SELECT type, name, tbl_name, sql FROM sqlite_master`;
+    for (const expected of reserved) {
+      const conflicts = objects.filter((row) => row.name.toLowerCase() === expected.name);
+      if (
+        conflicts.some(
+          (row) =>
+            row.type !== expected.type ||
+            row.tbl_name !== expected.table ||
+            (expected.definition !== undefined &&
+              row.sql?.replace(/\s+/g, " ").trim().toLowerCase() !==
+                expected.definition.toLowerCase()),
+        )
+      ) {
+        return yield* badState(
+          `Incompatible reserved bookkeeping object ${expected.name}. Nothing was changed.`,
+        );
+      }
+    }
+  },
+);
+
 const readCustomLedger = Effect.fn("customMigrationLedger.read")(function* () {
   const sql = yield* SqlClient.SqlClient;
   const checks = [
@@ -443,7 +489,7 @@ export const validateCustomMigrationState = Effect.fn("customMigrationLedger.val
       const rows = yield* sql<{
         readonly sql: string;
       }>`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=${name}`;
-      const expected = `CREATE TRIGGER ${name} BEFORE ${action} ON t3_custom_migration_legacy_ledger BEGIN SELECT RAISE(ABORT, 'The archived migration ledger is immutable.'); END`;
+      const expected = archiveGuardDefinition(action);
       if (rows[0]?.sql.replace(/\s+/g, " ").trim().toLowerCase() !== expected.toLowerCase())
         return yield* badState("Archive protection is missing or altered. Nothing was changed.");
     }

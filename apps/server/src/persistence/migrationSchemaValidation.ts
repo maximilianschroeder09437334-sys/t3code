@@ -14,7 +14,15 @@ export const validateMigrationSchema = Effect.fn("validateMigrationSchema")(func
   customIds: readonly number[],
 ) {
   const sql = yield* SqlClient.SqlClient;
-  const ids = histories[history === "custom" ? "0" : history];
+  const actual = yield* sql<{
+    readonly type: string;
+    readonly name: string;
+    readonly tbl_name: string;
+    readonly sql: string | null;
+  }>`SELECT type, name, tbl_name, sql FROM sqlite_master WHERE substr(name, 1, 7) != 'sqlite_'`;
+  const noFts = !actual.some((row) => row.name === "orchestration_v2_message_search");
+  const key = noFts && histories[`nofts${history}`] !== undefined ? `nofts${history}` : history;
+  const ids = histories[history === "custom" ? "0" : key];
   if (ids === undefined)
     return yield* new Migrator.MigrationError({
       kind: "BadState",
@@ -23,12 +31,6 @@ export const validateMigrationSchema = Effect.fn("validateMigrationSchema")(func
   const expected = [...ids, ...customIds.flatMap((id) => histories[`custom${id}`] ?? [])].map(
     (id) => catalog.objects[id]!,
   );
-  const actual = yield* sql<{
-    readonly type: string;
-    readonly name: string;
-    readonly tbl_name: string;
-    readonly sql: string | null;
-  }>`SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`;
   const tables = new Set(expected.filter((row) => row.type === "table").map((row) => row.name));
   const mismatch = expected.find(
     (row) =>

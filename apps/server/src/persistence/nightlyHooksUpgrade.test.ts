@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
+import { SqlError, SqlSyntaxError } from "effect/sql/SqlError";
 
 import { ensureCustomMigrationTables, legacyCustomPrefix } from "./customMigrationLedger.ts";
 import {
@@ -22,6 +23,26 @@ import HookAutomation from "./Migrations/082_HookAutomation.ts";
 import WebPushNotifications from "./Migrations/083_WebPushNotifications.ts";
 
 // Fixtures only: in-memory or temp-file databases, no server, hooks, push or scheduler.
+
+// Inject only SQLite's documented unsupported-option response; run migration 69's real catch.
+const buildNoFts = Effect.gen(function* () {
+  yield* runMigrations({ toMigrationInclusive: 68 });
+  const sql = yield* SqlClient.SqlClient;
+  let unsupported = 0;
+  const noFts = new Proxy(sql, {
+    apply(target, thisArg, args) {
+      if (String(args[0]).includes("CREATE VIRTUAL TABLE orchestration_v2_message_search")) {
+        unsupported++;
+        return Effect.fail(new SqlError({ reason: new SqlSyntaxError({ cause: { errcode: 1 } }) }));
+      }
+      return Reflect.apply(target, thisArg, args);
+    },
+  });
+  yield* runMigrations({ toMigrationInclusive: 69 }).pipe(
+    Effect.provideService(SqlClient.SqlClient, noFts),
+  );
+  assert.strictEqual(unsupported, 1);
+});
 
 const legacyModules = [
   ["80_ThreadNotes", ThreadNotes],
@@ -671,6 +692,8 @@ describe("repair round 1 preflight and sealing", () => {
         yield* sql`DROP TABLE thread_notes`;
         yield* sql`CREATE TABLE thread_notes(thread_id TEXT NOT NULL,request_id TEXT NOT NULL,created_at TEXT NOT NULL,content TEXT NOT NULL,attachments_json TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(request_id,thread_id))`;
       }),
+    "sqliteX destructive notes trigger": (sql: SqlClient.SqlClient) =>
+      sql`CREATE TRIGGER sqliteX_destructive_note AFTER INSERT ON thread_notes BEGIN DELETE FROM thread_notes; END`,
     "destructive notes trigger": (sql: SqlClient.SqlClient) =>
       sql`CREATE TRIGGER destructive_note AFTER INSERT ON thread_notes BEGIN DELETE FROM thread_notes; END`,
   };
@@ -745,6 +768,145 @@ describe("repair round 1 preflight and sealing", () => {
         yield* sql`SELECT migration_id,name,created_at FROM t3_custom_migration_legacy_ledger ORDER BY migration_id`,
         original,
       );
+    }).pipe(Effect.provide(memory)),
+  );
+});
+
+describe("repair round 2 reserved bookkeeping", () => {
+  it.effect.each([
+    ["effect_sql_migrations", "view"],
+    ["effect_sql_migrations", "index"],
+    ["effect_sql_migrations", "trigger"],
+    ["t3_custom_migrations", "view"],
+    ["t3_custom_migrations", "index"],
+    ["t3_custom_migrations", "trigger"],
+    ["t3_custom_migration_legacy_ledger", "view"],
+    ["t3_custom_migration_legacy_ledger", "index"],
+    ["t3_custom_migration_legacy_ledger", "trigger"],
+    ["t3_custom_migration_legacy_ledger_no_insert", "table"],
+    ["t3_custom_migration_legacy_ledger_no_update", "view"],
+    ["t3_custom_migration_legacy_ledger_no_delete", "index"],
+    ["t3_custom_migration_legacy_ledger_no_insert", "trigger"],
+  ])("rejects reserved %s occupied by a %s before official writes", ([name, type]) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 80 });
+      if (name === "effect_sql_migrations")
+        yield* sql`ALTER TABLE effect_sql_migrations RENAME TO original_ledger`;
+      if (type === "view")
+        yield* sql.unsafe(
+          `CREATE VIEW "${name}" AS SELECT 80 AS migration_id, 'ThreadNotes' AS name, 'executed' AS origin, '2026' AS created_at`,
+        );
+      if (type === "index") yield* sql.unsafe(`CREATE INDEX "${name}" ON scheduled_tasks(title)`);
+      if (type === "trigger")
+        yield* sql.unsafe(
+          `CREATE TRIGGER "${name}" AFTER INSERT ON scheduled_tasks BEGIN SELECT 1; END`,
+        );
+      if (type === "table") yield* sql.unsafe(`CREATE TABLE "${name}" (id TEXT)`);
+      const before = yield* dump;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      assert.deepStrictEqual(yield* dump, before);
+    }).pipe(Effect.provide(memory)),
+  );
+  it.effect.each(["t3_custom_migrations", "t3_custom_migration_legacy_ledger"])(
+    "rejects reserved %s view before preview writes",
+    (name) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 52 });
+        yield* Migrator.make({})({
+          loader: Migrator.fromRecord({ "53_OrchestrationV2": V2Preview }),
+        });
+        yield* sql.unsafe(
+          `CREATE VIEW "${name}" AS SELECT 80 AS migration_id, 'ThreadNotes' AS name, 'legacy' AS origin, '2026' AS created_at`,
+        );
+        const before = yield* dump;
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+        assert.deepStrictEqual(yield* dump, before);
+      }).pipe(Effect.provide(memory)),
+  );
+});
+
+describe("repair round 2 supported no-FTS history", () => {
+  it.effect("accepts no-FTS prefixes 69 through 96 and upgrades with custom migrations", () =>
+    Effect.gen(function* () {
+      yield* buildNoFts;
+      for (let id = 69; id <= 96; id++) {
+        yield* runMigrations({ toMigrationInclusive: id });
+        assert.deepStrictEqual(yield* officialHistory, migrationManifest.slice(0, id));
+        assert.isFalse(yield* tableExists("orchestration_v2_message_search"));
+      }
+      yield* populate(0);
+      const rows = yield* rowsOfPreserved;
+      yield* runMigrations();
+      yield* expectPreserved(rows);
+      assert.deepStrictEqual(
+        (yield* customLedger).map((row) => row.migration_id),
+        [80, 82, 83],
+      );
+      const before = yield* dump;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* dump, before);
+      assert.isFalse(yield* tableExists("orchestration_v2_message_search"));
+      yield* integrity;
+    }).pipe(Effect.provide(memory)),
+  );
+  it.effect.each([69, 96])("reopens supported no-FTS official%s and stays idempotent", (prefix) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const open = NodeSqliteClient.layer({
+          filename: path.join(yield* fs.makeTempDirectoryScoped(), "nofts.sqlite"),
+        });
+        yield* Effect.gen(function* () {
+          yield* buildNoFts;
+          yield* runMigrations({ toMigrationInclusive: prefix });
+        }).pipe(Effect.provide(open));
+        yield* runMigrations().pipe(Effect.provide(open));
+        const before = yield* dump.pipe(Effect.provide(open));
+        assert.deepStrictEqual(yield* runMigrations().pipe(Effect.provide(open)), []);
+        assert.deepStrictEqual(yield* dump.pipe(Effect.provide(open)), before);
+        yield* integrity.pipe(Effect.provide(open));
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+  it.effect.each([1, 2, 3, 4])(
+    "converts no-FTS legacy custom prefix %s preserving data and archive",
+    (count) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* buildNoFts;
+        yield* buildLegacy(count);
+        yield* populate(count);
+        const original = yield* officialLedger;
+        const rows = yield* rowsOfPreserved;
+        assert.deepStrictEqual(yield* runMigrations(), officialExecutedFrom(count >= 2 ? 81 : 80));
+        yield* expectPreserved(rows);
+        yield* expectThreadModes(count);
+        assert.deepStrictEqual(
+          yield* sql`SELECT migration_id,name,created_at FROM t3_custom_migration_legacy_ledger ORDER BY migration_id`,
+          original,
+        );
+        const before = yield* dump;
+        assert.deepStrictEqual(yield* runMigrations(), []);
+        assert.deepStrictEqual(yield* dump, before);
+        yield* integrity;
+      }).pipe(Effect.provide(memory)),
+  );
+  it.effect.each([
+    "CREATE TABLE orchestration_v2_message_search_data(id INTEGER PRIMARY KEY, block BLOB)",
+    "CREATE TRIGGER orchestration_v2_message_search_insert AFTER INSERT ON orchestration_v2_projection_messages BEGIN SELECT 1; END",
+    "CREATE TABLE orchestration_v2_message_search(text TEXT)",
+    "DROP TABLE orchestration_v2_legacy_imports",
+  ])("rejects partial FTS or unrelated schema damage unchanged: %s", (statement) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* buildNoFts;
+      yield* sql.unsafe(statement);
+      const before = yield* dump;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      assert.deepStrictEqual(yield* dump, before);
     }).pipe(Effect.provide(memory)),
   );
 });

@@ -13,6 +13,7 @@ import {
   planLegacyCustomConversion,
   runCustomMigrations,
   validateCustomMigrationState,
+  validateMigrationBookkeeping,
 } from "./customMigrationLedger.ts";
 import { validateMigrationSchema } from "./migrationSchemaValidation.ts";
 import {
@@ -340,6 +341,7 @@ const runPendingOfficialMigrations = Effect.fn("runPendingOfficialMigrations")(f
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  yield* validateMigrationBookkeeping();
   // The desktop waits past its readiness budget until the finished line follows this one.
   const started = yield* hasPendingMigrations();
   if (started) yield* Effect.log(DATABASE_MIGRATIONS_STARTED_MESSAGE);
