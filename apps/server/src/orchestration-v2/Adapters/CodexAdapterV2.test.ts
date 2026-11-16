@@ -2261,7 +2261,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               http_headers: { Authorization: "Bearer secret-codex-token" },
               enabled_tools: ["t3_thread_wait", "delegate_task"],
               omit_tools_from: ["code_mode", "deferred"],
-              tools: { t3_thread_wait: { approval_mode: "approve" } },
+              tools: {
+                t3_thread_wait: { approval_mode: "approve" },
+                delegate_task: { approval_mode: "approve" },
+              },
             },
           },
         },
@@ -4721,10 +4724,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       if (outcome === "recover") {
         const fs = yield* FileSystem.FileSystem;
         const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-capacity-retry-" });
-        const localTranscript = yield* decodeReplayTranscriptJson(
+        const localizedTranscript = yield* decodeReplayTranscriptJson(
           (yield* encodeReplayTranscriptJson(
             makeCodexReplayTranscript({ scenario, entries }),
           )).replaceAll(yield* encodeStringJson("/workspace"), yield* encodeStringJson(cwd)),
+        );
+        const localTranscript = withStagedRuntimePolicy(
+          localizedTranscript,
+          cwd,
+          "thread:capacity-retry",
+          yield* HostProcess.Platform,
         );
         const driver = yield* CodexReplay.makeReplayDriver(withConfigReads(localTranscript));
         yield* Effect.gen(function* () {
@@ -4768,6 +4777,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             dispatchMode: { type: "start_immediately" },
           });
           yield* worker.drain();
+          assert.isNull((yield* Ref.get(driver.state)).failure);
           yield* Fiber.join(retrying);
           assert.equal(
             (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)?.status,
@@ -4781,6 +4791,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             Effect.forkChild({ startImmediately: true }),
           );
           yield* TestClock.adjust("2 seconds");
+          assert.isNull((yield* Ref.get(driver.state)).failure);
           yield* Fiber.join(completed);
           yield* worker.drain();
           const projection = yield* orchestrator.getThreadProjection(threadId);
@@ -5053,6 +5064,25 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.isAtLeast(recoveredIndex, 0);
       assert.isAbove(resumedCommandIndex, recoveredIndex);
       assert.isAbove(terminalIndex, resumedCommandIndex);
+      const resumedCommand = harness.events[resumedCommandIndex];
+      assert.equal(
+        resumedCommand?.type === "turn_item.updated" &&
+          resumedCommand.turnItem.type === "command_execution"
+          ? resumedCommand.turnItem.reportedCwd
+          : undefined,
+        "/workspace",
+      );
+      const completedCommand = harness.events.flatMap((event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "command_execution" &&
+        event.turnItem.input === "pwd" &&
+        event.turnItem.status === "completed"
+          ? [event.turnItem]
+          : [],
+      );
+      assert.lengthOf(completedCommand, 1);
+      assert.equal(completedCommand[0]?.reportedCwd, "/workspace");
+      assert.equal(completedCommand[0]?.exitCode, 0);
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -6422,11 +6452,17 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     return Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-bg-stop-workspace-" });
-      const localTranscript = yield* decodeReplayTranscriptJson(
+      const localizedTranscript = yield* decodeReplayTranscriptJson(
         (yield* encodeReplayTranscriptJson(transcript)).replaceAll(
           yield* encodeStringJson("/workspace"),
           yield* encodeStringJson(cwd),
         ),
+      );
+      const localTranscript = withStagedRuntimePolicy(
+        localizedTranscript,
+        cwd,
+        "thread:background-stop",
+        yield* HostProcess.Platform,
       );
       const replayDriver = yield* CodexReplay.makeReplayDriver(withConfigReads(localTranscript));
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -6554,12 +6590,19 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           { type: "runtime_exit", status: "success" },
         ],
       });
-      const localTranscript = yield* decodeReplayTranscriptJson(
+      const localizedTranscript = yield* decodeReplayTranscriptJson(
         (yield* encodeReplayTranscriptJson(staleTranscript)).replaceAll(
           yield* encodeStringJson("/workspace"),
           yield* encodeStringJson(cwd),
         ),
       );
+      const localTranscript = withStagedRuntimePolicy(
+        localizedTranscript,
+        cwd,
+        "thread:background-stop-untracked",
+        yield* HostProcess.Platform,
+      );
+      const replayDriver = yield* CodexReplay.makeReplayDriver(withConfigReads(localTranscript));
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       for (const args of [
         ["init", "--quiet"],
@@ -6616,6 +6659,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           dispatchMode: { type: "start_immediately" },
         });
         yield* worker.drain();
+        assert.isNull((yield* Ref.get(replayDriver.state)).failure);
         yield* Fiber.join(settled);
         yield* worker.drain();
         // regression: #37290 the command stayed running, and the thread waiting, until Stop.
@@ -6635,7 +6679,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Effect.provide(
           ProviderReplayHarness.layerWithRegistry(
             { name: "codex-background-stop-untracked", runtimePolicyOverride: { cwd } },
-            CodexAdapterV2Testkit.layer({ transcript: withConfigReads(localTranscript) }),
+            CodexAdapterV2Testkit.layer({
+              transcript: withConfigReads(localTranscript),
+              driver: replayDriver,
+            }),
             { runEffectWorker: false },
           ),
         ),
@@ -8567,6 +8614,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.lengthOf(completedRows, 1);
 
       assert.equal(item.type, "dynamic_tool");
+      assert.equal(
+        item.type === "dynamic_tool" ? item.providerSessionId : undefined,
+        harness.providerThread.providerSessionId,
+      );
       const output = item.type === "dynamic_tool" ? (item.output as Record<string, unknown>) : {};
       const reference = readMcpAppReference(output[MCP_APP_OUTPUT_KEY]);
       assert.deepEqual(

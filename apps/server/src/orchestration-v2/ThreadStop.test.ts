@@ -1196,8 +1196,15 @@ it.effect("a queued user message takes precedence over hook continuation", () =>
       hookContinuationOfRunId: run.id,
     });
     const projection = yield* orchestrator.getThreadProjection(threadId);
+    // Any send now starts the user's queued run first, so the hook continuation finds that run
+    // as the latest and makes none of its own.
     assert.lengthOf(projection.runs, 2);
-    assert.equal(projection.runs[1]?.status, "queued");
+    assert.equal(
+      projection.runs[1]?.userMessageId,
+      MessageId.make(`message:${threadId}:user's next request`),
+    );
+    assert.equal(projection.runs[1]?.status, "starting");
+    assert.isUndefined(projection.runs[1]?.hookContinuationOfRunId);
   }).pipe(Effect.provide(layerTest)),
 );
 

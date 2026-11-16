@@ -387,7 +387,16 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const peerTail =
     effective.length === 69 &&
     (yield* sql`SELECT 1 FROM sqlite_master WHERE name='peer_environment_links'`).length > 0;
-  yield* validateMigrationSchema(peerTail ? "72" : schemaKey, []);
+  // A plain official ledger is not re-proven against the catalog: upstream accepts partial
+  // development-build schemas, and its migrations repair them. Only histories this fork converts or
+  // reads without full-text search get the full check.
+  const searchTable = yield* sql<{
+    readonly sql: string | null;
+  }>`SELECT sql FROM sqlite_master WHERE name='orchestration_v2_message_search'`;
+  const searchless =
+    effective.length >= 69 && !/^\s*CREATE\s+VIRTUAL\s+TABLE\b/i.test(searchTable[0]?.sql ?? "");
+  if (customPrefix !== undefined || preview !== undefined || peerTail || searchless)
+    yield* validateMigrationSchema(peerTail ? "72" : schemaKey, []);
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
   const upgrade = Effect.gen(function* () {
     if (customPrefix !== undefined) yield* convertLegacyCustomLedger(customPrefix);

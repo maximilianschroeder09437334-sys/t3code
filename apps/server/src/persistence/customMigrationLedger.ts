@@ -404,7 +404,7 @@ export const ensureCustomMigrationTables = Effect.fn("customMigrationLedger.ensu
   },
 );
 
-export const sealLegacyArchive = Effect.fn("customMigrationLedger.seal")(function* () {
+const sealLegacyArchive = Effect.fn("customMigrationLedger.seal")(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`CREATE TRIGGER IF NOT EXISTS t3_custom_migration_legacy_ledger_no_insert
     BEFORE INSERT ON t3_custom_migration_legacy_ledger
