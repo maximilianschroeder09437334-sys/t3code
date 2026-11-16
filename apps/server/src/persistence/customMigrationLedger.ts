@@ -2,6 +2,8 @@ import * as Effect from "effect/Effect";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { validateMigrationSchema } from "./migrationSchemaValidation.ts";
+
 import ThreadNotes from "./Migrations/080_ThreadNotes.ts";
 import HookAutomation from "./Migrations/082_HookAutomation.ts";
 import WebPushNotifications from "./Migrations/083_WebPushNotifications.ts";
@@ -183,6 +185,21 @@ const customEffects: Record<number, readonly Probe[]> = {
   ],
 };
 
+const bookkeepingDefinitions = {
+  t3_custom_migrations: `CREATE TABLE t3_custom_migrations (
+      migration_id INTEGER PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      origin TEXT NOT NULL CHECK (origin IN ('executed', 'adopted', 'legacy')),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  t3_custom_migration_legacy_ledger: `CREATE TABLE t3_custom_migration_legacy_ledger (
+      migration_id INTEGER PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+} as const;
+
 const ledgerColumns = [
   col("migration_id", "INTEGER", true, "", 1),
   col("name", "TEXT"),
@@ -288,34 +305,50 @@ const readCustomLedger = Effect.fn("customMigrationLedger.read")(function* () {
       return yield* badState(`The custom migration table ${table} has an unexpected shape.`);
     }
   }
+  for (const [table, definition] of Object.entries(bookkeepingDefinitions)) {
+    const rows = yield* sql<{
+      readonly sql: string;
+    }>`SELECT sql FROM sqlite_master WHERE name=${table} AND type='table'`;
+    if (
+      rows.length &&
+      rows[0]!.sql.replace(/\s+/g, " ").trim() !== definition.replace(/\s+/g, " ").trim()
+    ) {
+      return yield* badState(
+        `Unexpected bookkeeping constraints in ${table}. Nothing was changed.`,
+      );
+    }
+  }
+  if (
+    (yield* hasTable("t3_custom_migrations")) !==
+    (yield* hasTable("t3_custom_migration_legacy_ledger"))
+  ) {
+    return yield* badState("Incomplete custom bookkeeping tables. Nothing was changed.");
+  }
   const recorded = (yield* hasTable("t3_custom_migrations"))
     ? yield* sql<{
         readonly migration_id: number;
         readonly name: string;
-      }>`SELECT migration_id, name FROM t3_custom_migrations`
+        readonly origin: string;
+        readonly created_at: string;
+      }>`SELECT migration_id, name, origin, created_at FROM t3_custom_migrations ORDER BY migration_id`
     : [];
   const archived = (yield* hasTable("t3_custom_migration_legacy_ledger"))
-    ? yield* sql`SELECT migration_id FROM t3_custom_migration_legacy_ledger`
+    ? yield* sql<{
+        readonly migration_id: number;
+        readonly name: string;
+        readonly created_at: string;
+      }>`SELECT migration_id, name, created_at FROM t3_custom_migration_legacy_ledger ORDER BY migration_id`
     : [];
-  return { recorded, archivedRows: archived.length };
+  return { recorded, archived, archivedRows: archived.length };
 });
 
-/** Idempotent; the archive rejects UPDATE and DELETE so the pre-conversion ledger stays evidence. */
+/** Creates empty bookkeeping; conversion populates and seals the archive in its transaction. */
 export const ensureCustomMigrationTables = Effect.fn("customMigrationLedger.ensureTables")(
   function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* sql`CREATE TABLE IF NOT EXISTS t3_custom_migrations (
-      migration_id INTEGER PRIMARY KEY NOT NULL,
-      name TEXT NOT NULL,
-      origin TEXT NOT NULL CHECK (origin IN ('executed', 'adopted', 'legacy')),
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )`;
-    yield* sql`CREATE TABLE IF NOT EXISTS t3_custom_migration_legacy_ledger (
-      migration_id INTEGER PRIMARY KEY NOT NULL,
-      name TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )`;
+    for (const definition of Object.values(bookkeepingDefinitions)) {
+      yield* sql.unsafe(definition.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+    }
     yield* sql`CREATE TRIGGER IF NOT EXISTS t3_custom_migration_legacy_ledger_no_update
       BEFORE UPDATE ON t3_custom_migration_legacy_ledger
       BEGIN SELECT RAISE(ABORT, 'The archived migration ledger is immutable.'); END`;
@@ -324,6 +357,119 @@ export const ensureCustomMigrationTables = Effect.fn("customMigrationLedger.ensu
       BEGIN SELECT RAISE(ABORT, 'The archived migration ledger is immutable.'); END`;
   },
 );
+
+export const sealLegacyArchive = Effect.fn("customMigrationLedger.seal")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`CREATE TRIGGER IF NOT EXISTS t3_custom_migration_legacy_ledger_no_insert
+    BEFORE INSERT ON t3_custom_migration_legacy_ledger
+    BEGIN SELECT RAISE(ABORT, 'The archived migration ledger is immutable.'); END`;
+});
+
+export const validateCustomMigrationState = Effect.fn("customMigrationLedger.validate")(function* (
+  official: ReadonlyArray<readonly [number, string]>,
+  legacyCount?: number,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const { recorded, archived } = yield* readCustomLedger();
+  if (recorded.length > 0) {
+    const current = yield* sql<{
+      readonly migration_id: number;
+      readonly name: string;
+    }>`SELECT migration_id,name FROM effect_sql_migrations ORDER BY migration_id`;
+    if (
+      current.length !== official.length ||
+      official.some(([id, name], i) => current[i]?.migration_id !== id || current[i]?.name !== name)
+    )
+      return yield* badState(
+        "Custom execution ledger requires completed official history. Nothing was changed.",
+      );
+  }
+  const legacy = recorded.filter((row) => row.origin === "legacy");
+  const count = legacy.length;
+  const expectedIds = [80, 82, 83];
+  const executed = recorded.filter((row) => row.origin !== "legacy");
+  if (
+    recorded.some(
+      (row) =>
+        !customMigrationFiles.some(([id, name]) => row.migration_id === id && row.name === name) ||
+        !["legacy", "executed"].includes(row.origin),
+    ) ||
+    legacy.some((row, i) => row.migration_id !== 80 + i) ||
+    executed.some(
+      (row, i) => row.migration_id !== expectedIds.filter((id) => id >= 80 + count)[i],
+    ) ||
+    (recorded.some((row) => row.migration_id === 81) && count < 2)
+  ) {
+    return yield* badState(
+      "Unknown custom migration identity, origin or prefix. Nothing was changed.",
+    );
+  }
+  if (legacyCount !== undefined && (recorded.length || archived.length))
+    return yield* badState("Mixed converted and legacy histories. Nothing was changed.");
+  if (count === 0 && archived.length !== 0)
+    return yield* badState("Unexpected archive. Nothing was changed.");
+  if (count > 0) {
+    const expected = [
+      ...official.filter(([id]) => id < 80),
+      ...customMigrationFiles.slice(0, count),
+    ];
+    const current = yield* sql<{
+      readonly migration_id: number;
+      readonly name: string;
+      readonly created_at: string;
+    }>`SELECT migration_id, name, created_at FROM effect_sql_migrations`;
+    if (
+      archived.length !== expected.length ||
+      expected.some(
+        ([id, name], i) =>
+          archived[i]?.migration_id !== id ||
+          archived[i]?.name !== name ||
+          archived[i]?.created_at !==
+            (id < 80
+              ? current.find((r) => r.migration_id === id)?.created_at
+              : legacy.find((r) => r.migration_id === id)?.created_at),
+      ) ||
+      (count >= 2 &&
+        current.find((r) => r.migration_id === 80)?.created_at !== archived[80]?.created_at)
+    ) {
+      return yield* badState(
+        "Original archived ledger is incomplete or inconsistent. Nothing was changed.",
+      );
+    }
+  }
+  if (recorded.length > 0) {
+    for (const action of ["insert", "update", "delete"]) {
+      const name = `t3_custom_migration_legacy_ledger_no_${action}`;
+      const rows = yield* sql<{
+        readonly sql: string;
+      }>`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=${name}`;
+      const expected = `CREATE TRIGGER ${name} BEFORE ${action} ON t3_custom_migration_legacy_ledger BEGIN SELECT RAISE(ABORT, 'The archived migration ledger is immutable.'); END`;
+      if (rows[0]?.sql.replace(/\s+/g, " ").trim().toLowerCase() !== expected.toLowerCase())
+        return yield* badState("Archive protection is missing or altered. Nothing was changed.");
+    }
+  }
+  const present: number[] = [];
+  for (const [id, name] of runnableCustomMigrations) {
+    const state = yield* effectsState(id);
+    const applied =
+      legacyCount === undefined
+        ? recorded.some((r) => r.migration_id === id)
+        : id < 80 + legacyCount;
+    if (state !== (applied ? "present" : "absent"))
+      return yield* badState(
+        `Custom ${id}_${name} schema lacks recognized execution provenance or is inconsistent. Nothing was changed.`,
+      );
+    if (applied) present.push(id);
+  }
+  // Validate all custom constraints/index predicates/triggers, independently of column probes.
+  yield* validateMigrationSchema("custom", present);
+  if ((yield* effectsState(81)) === "present") {
+    const invalid =
+      yield* sql`SELECT 1 FROM scheduled_tasks WHERE thread_mode IS NULL OR thread_mode NOT IN ('new_thread', 'continue') LIMIT 1`;
+    if (invalid.length)
+      return yield* badState("Invalid scheduled task thread mode. Nothing was changed.");
+  }
+});
 
 /**
  * How many of the pre-merge custom migrations (80-83) a recorded official ledger holds, when the
@@ -391,6 +537,7 @@ export const convertLegacyCustomLedger = Effect.fn("customMigrationLedger.conver
   yield* ensureCustomMigrationTables();
   yield* sql`INSERT INTO t3_custom_migration_legacy_ledger (migration_id, name, created_at)
     SELECT migration_id, name, created_at FROM effect_sql_migrations`;
+  yield* sealLegacyArchive();
   yield* sql`INSERT INTO t3_custom_migrations (migration_id, name, origin, created_at)
     SELECT migration_id, name, 'legacy', created_at FROM effect_sql_migrations WHERE migration_id >= 80`;
   const [thread_mode] = yield* sql<{
@@ -418,8 +565,7 @@ export const hasPendingCustomMigrations = Effect.fn("customMigrationLedger.hasPe
 );
 
 /**
- * Runs the custom migrations missing from the custom ledger, one transaction each. Every pending
- * migration is checked against the schema first, so a half-present one fails before any write.
+ * Runs missing custom migrations one transaction each after startup validates all history/schema.
  */
 export const runCustomMigrations = Effect.fn("customMigrationLedger.run")(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -427,22 +573,21 @@ export const runCustomMigrations = Effect.fn("customMigrationLedger.run")(functi
   if (pending.length === 0) return [];
   const states: Array<readonly [number, string, EffectsState]> = [];
   for (const [id, name] of pending) states.push([id, name, yield* effectsState(id)]);
-  const inconsistent = states.filter(([, , state]) => state === "inconsistent");
+  const inconsistent = states.filter(([, , state]) => state !== "absent");
   if (inconsistent.length > 0) {
     return yield* badState(
       `The database schema partly contains custom migrations ${inconsistent.map(([id, name]) => `${id}_${name}`).join(", ")}, so they cannot be run or recorded. Nothing was changed.`,
     );
   }
   yield* ensureCustomMigrationTables();
+  yield* sealLegacyArchive();
   const executed: Array<readonly [number, string]> = [];
   for (const [id, name, migration] of pending) {
-    // An object set that already matches was made by an earlier run whose ledger row was lost.
-    const present = states.some(([stateId, , state]) => stateId === id && state === "present");
     yield* sql.withTransaction(
       Effect.gen(function* () {
-        if (!present) yield* migration;
+        yield* migration;
         yield* sql`INSERT INTO t3_custom_migrations (migration_id, name, origin)
-          VALUES (${id}, ${name}, ${present ? "adopted" : "executed"})`;
+          VALUES (${id}, ${name}, ${"executed"})`;
       }),
     );
     executed.push([id, name]);

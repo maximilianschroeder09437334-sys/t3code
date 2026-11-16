@@ -15,6 +15,7 @@ import {
   runMigrations,
   skippedV2Migrations,
 } from "./Migrations.ts";
+import V2Preview from "./Migrations/055_OrchestrationV2.ts";
 import ThreadNotes from "./Migrations/080_ThreadNotes.ts";
 import ScheduledThreadMode from "./Migrations/081_ScheduledTaskThreadMode.ts";
 import HookAutomation from "./Migrations/082_HookAutomation.ts";
@@ -306,6 +307,15 @@ describe("custom-through-83 histories", () => {
       sql`DROP TABLE hook_incidents`,
     "a recorded migration whose table has another shape": (sql: SqlClient.SqlClient) =>
       sql`ALTER TABLE thread_notes ADD COLUMN extra TEXT`,
+    "an altered hook partial predicate": (sql: SqlClient.SqlClient) =>
+      Effect.gen(function* () {
+        yield* sql`DROP INDEX hook_resource_due`;
+        yield* sql`CREATE INDEX hook_resource_due ON hook_resource_leases(status, expires_at) WHERE status='unused'`;
+      }),
+    "a missing official imports table": (sql: SqlClient.SqlClient) =>
+      sql`DROP TABLE orchestration_v2_legacy_imports`,
+    "an invalid current task mode": (sql: SqlClient.SqlClient) =>
+      sql`UPDATE scheduled_tasks SET thread_mode='INVALID'`,
     "a recorded thread mode without its column": (sql: SqlClient.SqlClient) =>
       sql`ALTER TABLE scheduled_tasks DROP COLUMN thread_mode`,
   };
@@ -394,6 +404,13 @@ describe("custom-through-83 histories", () => {
 });
 
 describe("official histories", () => {
+  it.effect("accepts every unchanged official prefix against the durable schema catalog", () =>
+    Effect.gen(function* () {
+      for (let id = 1; id <= 96; id++) yield* runMigrations({ toMigrationInclusive: id });
+      yield* runMigrations();
+      yield* expectCurrent;
+    }).pipe(Effect.provide(memory)),
+  );
   it.effect("creates every table on a fresh database and starts again without writes", () =>
     Effect.gen(function* () {
       assert.deepStrictEqual(yield* runMigrations(), migrationManifest);
@@ -557,24 +574,14 @@ describe("custom ledger runner", () => {
     }).pipe(Effect.provide(memory)),
   );
 
-  it.effect("adopts custom tables that match exactly but have no ledger row", () =>
+  it.effect("rejects custom tables whose execution ledger was lost", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
-      yield* sql`INSERT INTO thread_notes (thread_id, request_id, created_at, content) VALUES ('thread-1', 'request-1', '2026-11-09', 'Kept')`;
       yield* sql`DELETE FROM t3_custom_migrations WHERE migration_id = 80`;
-
-      assert.deepStrictEqual(yield* runMigrations(), []);
-
-      assert.deepStrictEqual(
-        (yield* customLedger).map((row) => [row.migration_id, row.origin]),
-        [
-          [80, "adopted"],
-          [82, "executed"],
-          [83, "executed"],
-        ],
-      );
-      assert.deepStrictEqual(yield* sql`SELECT content FROM thread_notes`, [{ content: "Kept" }]);
+      const before = yield* dump;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      assert.deepStrictEqual(yield* dump, before);
     }).pipe(Effect.provide(memory)),
   );
 
@@ -630,4 +637,114 @@ describe("custom ledger runner", () => {
       "invalid",
     );
   });
+});
+
+describe("repair round 1 preflight and sealing", () => {
+  it.effect.each([80, 53])("rejects malformed notes before official/preview %s writes", (prefix) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: prefix === 53 ? 52 : prefix });
+      if (prefix === 53)
+        yield* Migrator.make({})({
+          loader: Migrator.fromRecord({ "53_OrchestrationV2": V2Preview }),
+        });
+      yield* sql`CREATE TABLE thread_notes(id TEXT)`;
+      const before = yield* dump;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      assert.deepStrictEqual(yield* dump, before);
+    }).pipe(Effect.provide(memory)),
+  );
+  const corrupt = {
+    "missing recorded notes": (sql: SqlClient.SqlClient) => sql`DROP TABLE thread_notes`,
+    "wrong custom name": (sql: SqlClient.SqlClient) =>
+      sql`UPDATE t3_custom_migrations SET name='Wrong' WHERE migration_id=80`,
+    "unknown custom id": (sql: SqlClient.SqlClient) =>
+      sql`INSERT INTO t3_custom_migrations(migration_id,name,origin) VALUES(999,'Unknown','executed')`,
+    "unknown official id": (sql: SqlClient.SqlClient) =>
+      sql`INSERT INTO effect_sql_migrations(migration_id,name) VALUES(999,'Unknown')`,
+    "low official hole": (sql: SqlClient.SqlClient) =>
+      sql`DELETE FROM effect_sql_migrations WHERE migration_id=3`,
+    "low official name": (sql: SqlClient.SqlClient) =>
+      sql`UPDATE effect_sql_migrations SET name='Wrong' WHERE migration_id=3`,
+    "changed notes constraint": (sql: SqlClient.SqlClient) =>
+      Effect.gen(function* () {
+        yield* sql`DROP TABLE thread_notes`;
+        yield* sql`CREATE TABLE thread_notes(thread_id TEXT NOT NULL,request_id TEXT NOT NULL,created_at TEXT NOT NULL,content TEXT NOT NULL,attachments_json TEXT NOT NULL DEFAULT '[]',PRIMARY KEY(request_id,thread_id))`;
+      }),
+    "destructive notes trigger": (sql: SqlClient.SqlClient) =>
+      sql`CREATE TRIGGER destructive_note AFTER INSERT ON thread_notes BEGIN DELETE FROM thread_notes; END`,
+  };
+  it.effect.each(Object.keys(corrupt) as Array<keyof typeof corrupt>)(
+    "rejects %s on current startup unchanged",
+    (name) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations();
+        yield* corrupt[name](sql);
+        const before = yield* dump;
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+        assert.deepStrictEqual(yield* dump, before);
+      }).pipe(Effect.provide(memory)),
+  );
+  it.effect("rejects unrecorded lookalike notes with a destructive trigger", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 96 });
+      yield* ThreadNotes;
+      yield* sql`CREATE TRIGGER destructive_note AFTER INSERT ON thread_notes BEGIN DELETE FROM thread_notes; END`;
+      const before = yield* dump;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      assert.deepStrictEqual(yield* dump, before);
+    }).pipe(Effect.provide(memory)),
+  );
+  it.effect.each(["row", "trigger"])("rejects missing archive %s on reopen", (kind) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const open = NodeSqliteClient.layer({
+          filename: path.join(yield* fs.makeTempDirectoryScoped(), "archive.sqlite"),
+        });
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* buildLegacy(4);
+          yield* runMigrations();
+          yield* sql`DROP TRIGGER t3_custom_migration_legacy_ledger_no_delete`;
+          if (kind === "row") {
+            yield* sql`DELETE FROM t3_custom_migration_legacy_ledger WHERE migration_id=82`;
+            yield* sql`CREATE TRIGGER t3_custom_migration_legacy_ledger_no_delete BEFORE DELETE ON t3_custom_migration_legacy_ledger BEGIN SELECT RAISE(ABORT, 'The archived migration ledger is immutable.'); END`;
+          }
+        }).pipe(Effect.provide(open));
+        const before = yield* dump.pipe(Effect.provide(open));
+        assert.isTrue(
+          Exit.isFailure(yield* Effect.exit(runMigrations().pipe(Effect.provide(open)))),
+        );
+        assert.deepStrictEqual(yield* dump.pipe(Effect.provide(open)), before);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+  it.effect("seals the original ledger against every SQLite DML form", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* buildLegacy(4);
+      const original = yield* officialLedger;
+      yield* runMigrations();
+      const before = yield* dump;
+      for (const statement of [
+        "INSERT INTO t3_custom_migration_legacy_ledger(migration_id,name,created_at) VALUES(999,'fake','fake')",
+        "REPLACE INTO t3_custom_migration_legacy_ledger(migration_id,name,created_at) VALUES(80,'fake','fake')",
+        "INSERT OR REPLACE INTO t3_custom_migration_legacy_ledger(migration_id,name,created_at) VALUES(80,'fake','fake')",
+        "INSERT INTO t3_custom_migration_legacy_ledger(migration_id,name,created_at) VALUES(80,'fake','fake') ON CONFLICT(migration_id) DO UPDATE SET name=excluded.name",
+        "UPDATE t3_custom_migration_legacy_ledger SET created_at='fake'",
+        "DELETE FROM t3_custom_migration_legacy_ledger",
+      ]) {
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(sql.unsafe(statement))), statement);
+        assert.deepStrictEqual(yield* dump, before);
+      }
+      assert.deepStrictEqual(
+        yield* sql`SELECT migration_id,name,created_at FROM t3_custom_migration_legacy_ledger ORDER BY migration_id`,
+        original,
+      );
+    }).pipe(Effect.provide(memory)),
+  );
 });

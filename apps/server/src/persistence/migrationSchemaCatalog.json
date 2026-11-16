@@ -1,0 +1,2186 @@
+{
+  "objects": [
+    {
+      "type": "index",
+      "name": "idx_orch_events_command_id",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE INDEX idx_orch_events_command_id\n    ON orchestration_events(command_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_orch_events_correlation_id",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE INDEX idx_orch_events_correlation_id\n    ON orchestration_events(correlation_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_orch_events_stream_sequence",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE INDEX idx_orch_events_stream_sequence\n    ON orchestration_events(aggregate_kind, stream_id, sequence)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_orch_events_stream_version",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE UNIQUE INDEX idx_orch_events_stream_version\n    ON orchestration_events(aggregate_kind, stream_id, stream_version)\n  "
+    },
+    {
+      "type": "table",
+      "name": "orchestration_events",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE TABLE orchestration_events (\n      sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n      event_id TEXT NOT NULL UNIQUE,\n      aggregate_kind TEXT NOT NULL,\n      stream_id TEXT NOT NULL,\n      stream_version INTEGER NOT NULL,\n      event_type TEXT NOT NULL,\n      occurred_at TEXT NOT NULL,\n      command_id TEXT,\n      causation_event_id TEXT,\n      correlation_id TEXT,\n      actor_kind TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      metadata_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_orch_command_receipts_aggregate",
+      "tbl_name": "orchestration_command_receipts",
+      "sql": "CREATE INDEX idx_orch_command_receipts_aggregate\n    ON orchestration_command_receipts(aggregate_kind, aggregate_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_orch_command_receipts_sequence",
+      "tbl_name": "orchestration_command_receipts",
+      "sql": "CREATE INDEX idx_orch_command_receipts_sequence\n    ON orchestration_command_receipts(result_sequence)\n  "
+    },
+    {
+      "type": "table",
+      "name": "orchestration_command_receipts",
+      "tbl_name": "orchestration_command_receipts",
+      "sql": "CREATE TABLE orchestration_command_receipts (\n      command_id TEXT PRIMARY KEY,\n      aggregate_kind TEXT NOT NULL,\n      aggregate_id TEXT NOT NULL,\n      accepted_at TEXT NOT NULL,\n      result_sequence INTEGER NOT NULL,\n      status TEXT NOT NULL,\n      error TEXT\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_checkpoint_diff_blobs_thread_to_turn",
+      "tbl_name": "checkpoint_diff_blobs",
+      "sql": "CREATE INDEX idx_checkpoint_diff_blobs_thread_to_turn\n    ON checkpoint_diff_blobs(thread_id, to_turn_count)\n  "
+    },
+    {
+      "type": "table",
+      "name": "checkpoint_diff_blobs",
+      "tbl_name": "checkpoint_diff_blobs",
+      "sql": "CREATE TABLE checkpoint_diff_blobs (\n      thread_id TEXT NOT NULL,\n      from_turn_count INTEGER NOT NULL,\n      to_turn_count INTEGER NOT NULL,\n      diff TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      UNIQUE (thread_id, from_turn_count, to_turn_count)\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_provider_session_runtime_provider",
+      "tbl_name": "provider_session_runtime",
+      "sql": "CREATE INDEX idx_provider_session_runtime_provider\n    ON provider_session_runtime(provider_name)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_provider_session_runtime_status",
+      "tbl_name": "provider_session_runtime",
+      "sql": "CREATE INDEX idx_provider_session_runtime_status\n    ON provider_session_runtime(status)\n  "
+    },
+    {
+      "type": "table",
+      "name": "provider_session_runtime",
+      "tbl_name": "provider_session_runtime",
+      "sql": "CREATE TABLE provider_session_runtime (\n      thread_id TEXT PRIMARY KEY,\n      provider_name TEXT NOT NULL,\n      adapter_key TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL DEFAULT 'full-access',\n      status TEXT NOT NULL,\n      last_seen_at TEXT NOT NULL,\n      resume_cursor_json TEXT,\n      runtime_payload_json TEXT\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_pending_approvals_thread_status",
+      "tbl_name": "projection_pending_approvals",
+      "sql": "CREATE INDEX idx_projection_pending_approvals_thread_status\n    ON projection_pending_approvals(thread_id, status)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_projects_updated_at",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE INDEX idx_projection_projects_updated_at\n    ON projection_projects(updated_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_activities_thread_created",
+      "tbl_name": "projection_thread_activities",
+      "sql": "CREATE INDEX idx_projection_thread_activities_thread_created\n    ON projection_thread_activities(thread_id, created_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_messages_thread_created",
+      "tbl_name": "projection_thread_messages",
+      "sql": "CREATE INDEX idx_projection_thread_messages_thread_created\n    ON projection_thread_messages(thread_id, created_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_sessions_provider_session",
+      "tbl_name": "projection_thread_sessions",
+      "sql": "CREATE INDEX idx_projection_thread_sessions_provider_session\n    ON projection_thread_sessions(provider_session_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_threads_project_id",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE INDEX idx_projection_threads_project_id\n    ON projection_threads(project_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_turns_thread_checkpoint_completed",
+      "tbl_name": "projection_turns",
+      "sql": "CREATE INDEX idx_projection_turns_thread_checkpoint_completed\n    ON projection_turns(thread_id, checkpoint_turn_count, completed_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_turns_thread_requested",
+      "tbl_name": "projection_turns",
+      "sql": "CREATE INDEX idx_projection_turns_thread_requested\n    ON projection_turns(thread_id, requested_at)\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_pending_approvals",
+      "tbl_name": "projection_pending_approvals",
+      "sql": "CREATE TABLE projection_pending_approvals (\n      request_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      status TEXT NOT NULL,\n      decision TEXT,\n      created_at TEXT NOT NULL,\n      resolved_at TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      default_model TEXT,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_state",
+      "tbl_name": "projection_state",
+      "sql": "CREATE TABLE projection_state (\n      projector TEXT PRIMARY KEY,\n      last_applied_sequence INTEGER NOT NULL,\n      updated_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_activities",
+      "tbl_name": "projection_thread_activities",
+      "sql": "CREATE TABLE projection_thread_activities (\n      activity_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      tone TEXT NOT NULL,\n      kind TEXT NOT NULL,\n      summary TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      created_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_messages",
+      "tbl_name": "projection_thread_messages",
+      "sql": "CREATE TABLE projection_thread_messages (\n      message_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      role TEXT NOT NULL,\n      text TEXT NOT NULL,\n      is_streaming INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_sessions",
+      "tbl_name": "projection_thread_sessions",
+      "sql": "CREATE TABLE projection_thread_sessions (\n      thread_id TEXT PRIMARY KEY,\n      status TEXT NOT NULL,\n      provider_name TEXT,\n      provider_session_id TEXT,\n      provider_thread_id TEXT,\n      active_turn_id TEXT,\n      last_error TEXT,\n      updated_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      model TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_turns",
+      "tbl_name": "projection_turns",
+      "sql": "CREATE TABLE projection_turns (\n      row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      pending_message_id TEXT,\n      assistant_message_id TEXT,\n      state TEXT NOT NULL,\n      requested_at TEXT NOT NULL,\n      started_at TEXT,\n      completed_at TEXT,\n      checkpoint_turn_count INTEGER,\n      checkpoint_ref TEXT,\n      checkpoint_status TEXT,\n      checkpoint_files_json TEXT NOT NULL,\n      UNIQUE (thread_id, turn_id),\n      UNIQUE (thread_id, checkpoint_turn_count)\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_sessions",
+      "tbl_name": "projection_thread_sessions",
+      "sql": "CREATE TABLE projection_thread_sessions (\n      thread_id TEXT PRIMARY KEY,\n      status TEXT NOT NULL,\n      provider_name TEXT,\n      provider_session_id TEXT,\n      provider_thread_id TEXT,\n      active_turn_id TEXT,\n      last_error TEXT,\n      updated_at TEXT NOT NULL\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access')"
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_messages",
+      "tbl_name": "projection_thread_messages",
+      "sql": "CREATE TABLE projection_thread_messages (\n      message_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      role TEXT NOT NULL,\n      text TEXT NOT NULL,\n      is_streaming INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    , attachments_json TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_activities_thread_sequence",
+      "tbl_name": "projection_thread_activities",
+      "sql": "CREATE INDEX idx_projection_thread_activities_thread_sequence\n    ON projection_thread_activities(thread_id, sequence)\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_activities",
+      "tbl_name": "projection_thread_activities",
+      "sql": "CREATE TABLE projection_thread_activities (\n      activity_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      tone TEXT NOT NULL,\n      kind TEXT NOT NULL,\n      summary TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      created_at TEXT NOT NULL\n    , sequence INTEGER)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      model TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access')"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      model TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default')"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_proposed_plans_thread_created",
+      "tbl_name": "projection_thread_proposed_plans",
+      "sql": "CREATE INDEX idx_projection_thread_proposed_plans_thread_created\n    ON projection_thread_proposed_plans(thread_id, created_at)\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_proposed_plans",
+      "tbl_name": "projection_thread_proposed_plans",
+      "sql": "CREATE TABLE projection_thread_proposed_plans (\n      plan_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      plan_markdown TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_proposed_plans",
+      "tbl_name": "projection_thread_proposed_plans",
+      "sql": "CREATE TABLE projection_thread_proposed_plans (\n      plan_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      plan_markdown TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    , implemented_at TEXT, implementation_thread_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_turns",
+      "tbl_name": "projection_turns",
+      "sql": "CREATE TABLE projection_turns (\n      row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      pending_message_id TEXT,\n      assistant_message_id TEXT,\n      state TEXT NOT NULL,\n      requested_at TEXT NOT NULL,\n      started_at TEXT,\n      completed_at TEXT,\n      checkpoint_turn_count INTEGER,\n      checkpoint_ref TEXT,\n      checkpoint_status TEXT,\n      checkpoint_files_json TEXT NOT NULL, source_proposed_plan_thread_id TEXT, source_proposed_plan_id TEXT,\n      UNIQUE (thread_id, turn_id),\n      UNIQUE (thread_id, checkpoint_turn_count)\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_threads_project_archived_at",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE INDEX idx_projection_threads_project_archived_at\n    ON projection_threads(project_id, archived_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_projects_workspace_root_deleted_at",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE INDEX idx_projection_projects_workspace_root_deleted_at\n    ON projection_projects(workspace_root, deleted_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_threads_project_deleted_created",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE INDEX idx_projection_threads_project_deleted_created\n    ON projection_threads(project_id, deleted_at, created_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_auth_pairing_links_active",
+      "tbl_name": "auth_pairing_links",
+      "sql": "CREATE INDEX idx_auth_pairing_links_active\n    ON auth_pairing_links(revoked_at, consumed_at, expires_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_auth_sessions_active",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE INDEX idx_auth_sessions_active\n    ON auth_sessions(revoked_at, expires_at, issued_at)\n  "
+    },
+    {
+      "type": "table",
+      "name": "auth_pairing_links",
+      "tbl_name": "auth_pairing_links",
+      "sql": "CREATE TABLE auth_pairing_links (\n      id TEXT PRIMARY KEY,\n      credential TEXT NOT NULL UNIQUE,\n      method TEXT NOT NULL,\n      role TEXT NOT NULL,\n      subject TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      consumed_at TEXT,\n      revoked_at TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "auth_sessions",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      role TEXT NOT NULL,\n      method TEXT NOT NULL,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      revoked_at TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "auth_pairing_links",
+      "tbl_name": "auth_pairing_links",
+      "sql": "CREATE TABLE auth_pairing_links (\n      id TEXT PRIMARY KEY,\n      credential TEXT NOT NULL UNIQUE,\n      method TEXT NOT NULL,\n      role TEXT NOT NULL,\n      subject TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      consumed_at TEXT,\n      revoked_at TEXT\n    , label TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "auth_sessions",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      role TEXT NOT NULL,\n      method TEXT NOT NULL,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      revoked_at TEXT\n    , client_label TEXT, client_ip_address TEXT, client_user_agent TEXT, client_device_type TEXT NOT NULL DEFAULT 'unknown', client_os TEXT, client_browser TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "auth_sessions",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      role TEXT NOT NULL,\n      method TEXT NOT NULL,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      revoked_at TEXT\n    , client_label TEXT, client_ip_address TEXT, client_user_agent TEXT, client_device_type TEXT NOT NULL DEFAULT 'unknown', client_os TEXT, client_browser TEXT, last_connected_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "index",
+      "name": "idx_provider_session_runtime_instance",
+      "tbl_name": "provider_session_runtime",
+      "sql": "CREATE INDEX idx_provider_session_runtime_instance\n    ON provider_session_runtime(provider_instance_id)\n  "
+    },
+    {
+      "type": "table",
+      "name": "provider_session_runtime",
+      "tbl_name": "provider_session_runtime",
+      "sql": "CREATE TABLE provider_session_runtime (\n      thread_id TEXT PRIMARY KEY,\n      provider_name TEXT NOT NULL,\n      adapter_key TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL DEFAULT 'full-access',\n      status TEXT NOT NULL,\n      last_seen_at TEXT NOT NULL,\n      resume_cursor_json TEXT,\n      runtime_payload_json TEXT\n    , provider_instance_id TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_sessions_instance",
+      "tbl_name": "projection_thread_sessions",
+      "sql": "CREATE INDEX idx_projection_thread_sessions_instance\n    ON projection_thread_sessions(provider_instance_id)\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_sessions",
+      "tbl_name": "projection_thread_sessions",
+      "sql": "CREATE TABLE projection_thread_sessions (\n      thread_id TEXT PRIMARY KEY,\n      status TEXT NOT NULL,\n      provider_name TEXT,\n      provider_session_id TEXT,\n      provider_thread_id TEXT,\n      active_turn_id TEXT,\n      last_error TEXT,\n      updated_at TEXT NOT NULL\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', provider_instance_id TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_activities_thread_sequence_created_id",
+      "tbl_name": "projection_thread_activities",
+      "sql": "CREATE INDEX idx_projection_thread_activities_thread_sequence_created_id\n    ON projection_thread_activities(thread_id, sequence, created_at, activity_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_messages_thread_created_id",
+      "tbl_name": "projection_thread_messages",
+      "sql": "CREATE INDEX idx_projection_thread_messages_thread_created_id\n    ON projection_thread_messages(thread_id, created_at, message_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_threads_shell_active",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE INDEX idx_projection_threads_shell_active\n    ON projection_threads(deleted_at, archived_at, project_id, created_at, thread_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_threads_shell_archived",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE INDEX idx_projection_threads_shell_archived\n    ON projection_threads(deleted_at, archived_at, project_id, thread_id)\n  "
+    },
+    {
+      "type": "table",
+      "name": "auth_pairing_links",
+      "tbl_name": "auth_pairing_links",
+      "sql": "CREATE TABLE auth_pairing_links (\n      id TEXT PRIMARY KEY,\n      credential TEXT NOT NULL UNIQUE,\n      method TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      subject TEXT NOT NULL,\n      label TEXT,\n      created_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      consumed_at TEXT,\n      revoked_at TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "auth_sessions",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      method TEXT NOT NULL,\n      client_label TEXT,\n      client_ip_address TEXT,\n      client_user_agent TEXT,\n      client_device_type TEXT NOT NULL DEFAULT 'unknown',\n      client_os TEXT,\n      client_browser TEXT,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_connected_at TEXT,\n      revoked_at TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "auth_pairing_links",
+      "tbl_name": "auth_pairing_links",
+      "sql": "CREATE TABLE auth_pairing_links (\n      id TEXT PRIMARY KEY,\n      credential TEXT NOT NULL UNIQUE,\n      method TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      subject TEXT NOT NULL,\n      label TEXT,\n      created_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      consumed_at TEXT,\n      revoked_at TEXT\n    , proof_key_thumbprint TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_turns_thread_keyset",
+      "tbl_name": "projection_turns",
+      "sql": "CREATE INDEX idx_projection_turns_thread_keyset\n    ON projection_turns(thread_id, requested_at, turn_id)\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT, default_thread_env_mode TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT, default_thread_env_mode TEXT, favicon_path TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "auth_sessions",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      method TEXT NOT NULL,\n      client_label TEXT,\n      client_ip_address TEXT,\n      client_user_agent TEXT,\n      client_device_type TEXT NOT NULL DEFAULT 'unknown',\n      client_os TEXT,\n      client_browser TEXT,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_connected_at TEXT,\n      revoked_at TEXT\n    , client_surface TEXT, client_app_version TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT, linked_pull_request_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT, linked_pull_request_json TEXT, unsettled_at TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT, default_thread_env_mode TEXT, favicon_path TEXT, auto_pull INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT, default_thread_env_mode TEXT, favicon_path TEXT, auto_pull INTEGER NOT NULL DEFAULT 0, project_icon_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT, linked_pull_request_json TEXT, unsettled_at TEXT, branch_pull_request_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT, linked_pull_request_json TEXT, unsettled_at TEXT, branch_pull_request_json TEXT, active_order_key TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_projection_thread_pull_requests_pr",
+      "tbl_name": "projection_thread_pull_requests",
+      "sql": "CREATE INDEX idx_projection_thread_pull_requests_pr\n    ON projection_thread_pull_requests(host, repository, number)\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_pull_requests",
+      "tbl_name": "projection_thread_pull_requests",
+      "sql": "CREATE TABLE projection_thread_pull_requests (\n      thread_id TEXT NOT NULL,\n      host TEXT NOT NULL,\n      repository TEXT NOT NULL,\n      number INTEGER NOT NULL,\n      url TEXT NOT NULL,\n      source TEXT NOT NULL,\n      linked_at TEXT NOT NULL,\n      snapshot_json TEXT,\n      stack_json TEXT,\n      PRIMARY KEY (thread_id, host, repository, number)\n    )"
+    },
+    {
+      "type": "table",
+      "name": "projection_thread_messages",
+      "tbl_name": "projection_thread_messages",
+      "sql": "CREATE TABLE projection_thread_messages (\n      message_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      turn_id TEXT,\n      role TEXT NOT NULL,\n      text TEXT NOT NULL,\n      is_streaming INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    , attachments_json TEXT, context_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT, linked_pull_request_json TEXT, unsettled_at TEXT, branch_pull_request_json TEXT, active_order_key TEXT, title_state_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "pull_request_files_viewed",
+      "tbl_name": "pull_request_files_viewed",
+      "sql": "CREATE TABLE pull_request_files_viewed (\n      provider TEXT NOT NULL,\n      host TEXT NOT NULL,\n      repository TEXT NOT NULL,\n      number INTEGER NOT NULL,\n      viewer TEXT NOT NULL,\n      path TEXT NOT NULL,\n      revision TEXT,\n      viewed_at TEXT NOT NULL,\n      PRIMARY KEY (provider, host, repository, number, viewer, path)\n    ) WITHOUT ROWID\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_threads",
+      "tbl_name": "projection_threads",
+      "sql": "CREATE TABLE projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      branch TEXT,\n      worktree_path TEXT,\n      latest_turn_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , runtime_mode TEXT NOT NULL DEFAULT 'full-access', interaction_mode TEXT NOT NULL DEFAULT 'default', model_selection_json TEXT, archived_at TEXT, latest_user_message_at TEXT, pending_approval_count INTEGER NOT NULL DEFAULT 0, pending_user_input_count INTEGER NOT NULL DEFAULT 0, has_actionable_proposed_plan INTEGER NOT NULL DEFAULT 0, settled_override TEXT, settled_at TEXT, snoozed_until TEXT, snoozed_at TEXT, title_regeneration_request_id TEXT, title_regeneration_started_at TEXT, pinned_at TEXT, pin_order_key TEXT, linked_pull_request_json TEXT, unsettled_at TEXT, branch_pull_request_json TEXT, active_order_key TEXT, title_state_json TEXT, auto_settle_disabled_at TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_orchestration_events_agent_stream_sequence",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE INDEX idx_orchestration_events_agent_stream_sequence\n    ON orchestration_events(stream_id, sequence)\n    WHERE application_event_version = 2 AND aggregate_kind = 'thread'\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_orchestration_events_application_high_water",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE INDEX idx_orchestration_events_application_high_water\n    ON orchestration_events(sequence)\n    WHERE aggregate_kind = 'project'\n      OR (application_event_version = 2 AND aggregate_kind = 'thread')\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_orchestration_events_application_sequence",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE INDEX idx_orchestration_events_application_sequence\n    ON orchestration_events(application_event_version, sequence)\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_scheduled_tasks_due",
+      "tbl_name": "scheduled_tasks",
+      "sql": "CREATE INDEX idx_scheduled_tasks_due\n    ON scheduled_tasks(enabled, next_run_at)\n    WHERE enabled = 1 AND next_run_at IS NOT NULL\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_scheduled_tasks_project",
+      "tbl_name": "scheduled_tasks",
+      "sql": "CREATE INDEX idx_scheduled_tasks_project\n    ON scheduled_tasks(project_id, updated_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_events_v2_created_threads_idx",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE INDEX orchestration_events_v2_created_threads_idx\n    ON orchestration_events(stream_id)\n    WHERE application_event_version = 2\n      AND aggregate_kind = 'thread'\n      AND event_type = 'thread.created'\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_command_receipts_thread_sequence_idx",
+      "tbl_name": "orchestration_v2_command_receipts",
+      "sql": "CREATE INDEX orchestration_v2_command_receipts_thread_sequence_idx ON orchestration_v2_command_receipts(thread_id, result_sequence)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_effect_outbox_claim_idx",
+      "tbl_name": "orchestration_v2_effect_outbox",
+      "sql": "CREATE INDEX orchestration_v2_effect_outbox_claim_idx\n    ON orchestration_v2_effect_outbox(status, available_at, lease_expires_at, created_at)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_effect_outbox_command_idx",
+      "tbl_name": "orchestration_v2_effect_outbox",
+      "sql": "CREATE INDEX orchestration_v2_effect_outbox_command_idx\n    ON orchestration_v2_effect_outbox(command_id, effect_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_effect_outbox_thread_status_idx",
+      "tbl_name": "orchestration_v2_effect_outbox",
+      "sql": "CREATE INDEX orchestration_v2_effect_outbox_thread_status_idx\n    ON orchestration_v2_effect_outbox(thread_id, status, effect_type)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_events_command_idx",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE INDEX orchestration_v2_events_command_idx ON orchestration_v2_events(command_id, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_events_instance_sequence_idx",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE INDEX orchestration_v2_events_instance_sequence_idx ON orchestration_v2_events(provider_instance_id, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_events_node_sequence_idx",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE INDEX orchestration_v2_events_node_sequence_idx ON orchestration_v2_events(node_id, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_events_raw_event_idx",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE INDEX orchestration_v2_events_raw_event_idx ON orchestration_v2_events(raw_event_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_events_run_sequence_idx",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE INDEX orchestration_v2_events_run_sequence_idx ON orchestration_v2_events(run_id, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_events_thread_sequence_idx",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE INDEX orchestration_v2_events_thread_sequence_idx ON orchestration_v2_events(thread_id, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_events_thread_type_sequence_idx",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE INDEX orchestration_v2_events_thread_type_sequence_idx ON orchestration_v2_events(thread_id, event_type, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_legacy_imports_pending_transcript_idx",
+      "tbl_name": "orchestration_v2_legacy_imports",
+      "sql": "CREATE INDEX orchestration_v2_legacy_imports_pending_transcript_idx\n    ON orchestration_v2_legacy_imports(transcript_imported_at, shell_imported_at, thread_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_checkpoint_scopes_parent_idx",
+      "tbl_name": "orchestration_v2_projection_checkpoint_scopes",
+      "sql": "CREATE INDEX orchestration_v2_projection_checkpoint_scopes_parent_idx ON orchestration_v2_projection_checkpoint_scopes(parent_scope_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_checkpoint_scopes_thread_idx",
+      "tbl_name": "orchestration_v2_projection_checkpoint_scopes",
+      "sql": "CREATE INDEX orchestration_v2_projection_checkpoint_scopes_thread_idx ON orchestration_v2_projection_checkpoint_scopes(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_checkpoints_parent_idx",
+      "tbl_name": "orchestration_v2_projection_checkpoints",
+      "sql": "CREATE INDEX orchestration_v2_projection_checkpoints_parent_idx ON orchestration_v2_projection_checkpoints(parent_checkpoint_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_checkpoints_scope_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_checkpoints",
+      "sql": "CREATE UNIQUE INDEX orchestration_v2_projection_checkpoints_scope_ordinal_idx ON orchestration_v2_projection_checkpoints(scope_id, ordinal_within_scope)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_checkpoints_thread_idx",
+      "tbl_name": "orchestration_v2_projection_checkpoints",
+      "sql": "CREATE INDEX orchestration_v2_projection_checkpoints_thread_idx ON orchestration_v2_projection_checkpoints(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_context_handoffs_target_run_idx",
+      "tbl_name": "orchestration_v2_projection_context_handoffs",
+      "sql": "CREATE INDEX orchestration_v2_projection_context_handoffs_target_run_idx ON orchestration_v2_projection_context_handoffs(target_run_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_context_handoffs_thread_idx",
+      "tbl_name": "orchestration_v2_projection_context_handoffs",
+      "sql": "CREATE INDEX orchestration_v2_projection_context_handoffs_thread_idx ON orchestration_v2_projection_context_handoffs(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_context_transfers_source_thread_idx",
+      "tbl_name": "orchestration_v2_projection_context_transfers",
+      "sql": "CREATE INDEX orchestration_v2_projection_context_transfers_source_thread_idx ON orchestration_v2_projection_context_transfers(source_thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_context_transfers_target_run_idx",
+      "tbl_name": "orchestration_v2_projection_context_transfers",
+      "sql": "CREATE INDEX orchestration_v2_projection_context_transfers_target_run_idx ON orchestration_v2_projection_context_transfers(target_run_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_context_transfers_target_thread_idx",
+      "tbl_name": "orchestration_v2_projection_context_transfers",
+      "sql": "CREATE INDEX orchestration_v2_projection_context_transfers_target_thread_idx ON orchestration_v2_projection_context_transfers(target_thread_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_messages_latest_user_idx",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE INDEX orchestration_v2_projection_messages_latest_user_idx\n    ON orchestration_v2_projection_messages(thread_id, updated_at DESC, message_id DESC)\n    WHERE role = 'user'\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_messages_node_idx",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE INDEX orchestration_v2_projection_messages_node_idx ON orchestration_v2_projection_messages(node_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_messages_run_idx",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE INDEX orchestration_v2_projection_messages_run_idx ON orchestration_v2_projection_messages(run_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_messages_thread_created_idx",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE INDEX orchestration_v2_projection_messages_thread_created_idx ON orchestration_v2_projection_messages(thread_id, created_at, message_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_nodes_parent_idx",
+      "tbl_name": "orchestration_v2_projection_nodes",
+      "sql": "CREATE INDEX orchestration_v2_projection_nodes_parent_idx ON orchestration_v2_projection_nodes(parent_node_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_nodes_provider_turn_idx",
+      "tbl_name": "orchestration_v2_projection_nodes",
+      "sql": "CREATE INDEX orchestration_v2_projection_nodes_provider_turn_idx ON orchestration_v2_projection_nodes(provider_turn_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_nodes_thread_run_idx",
+      "tbl_name": "orchestration_v2_projection_nodes",
+      "sql": "CREATE INDEX orchestration_v2_projection_nodes_thread_run_idx ON orchestration_v2_projection_nodes(thread_id, run_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_plans_run_idx",
+      "tbl_name": "orchestration_v2_projection_plans",
+      "sql": "CREATE INDEX orchestration_v2_projection_plans_run_idx ON orchestration_v2_projection_plans(run_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_plans_thread_idx",
+      "tbl_name": "orchestration_v2_projection_plans",
+      "sql": "CREATE INDEX orchestration_v2_projection_plans_thread_idx ON orchestration_v2_projection_plans(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_session_bindings_thread_idx",
+      "tbl_name": "orchestration_v2_projection_provider_session_bindings",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_session_bindings_thread_idx\n    ON orchestration_v2_projection_provider_session_bindings(thread_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_sessions_instance_status_idx",
+      "tbl_name": "orchestration_v2_projection_provider_sessions",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_sessions_instance_status_idx ON orchestration_v2_projection_provider_sessions(provider_instance_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_sessions_provider_status_idx",
+      "tbl_name": "orchestration_v2_projection_provider_sessions",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_sessions_provider_status_idx ON orchestration_v2_projection_provider_sessions(provider, status)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_sessions_thread_idx",
+      "tbl_name": "orchestration_v2_projection_provider_sessions",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_sessions_thread_idx ON orchestration_v2_projection_provider_sessions(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_threads_instance_status_idx",
+      "tbl_name": "orchestration_v2_projection_provider_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_threads_instance_status_idx ON orchestration_v2_projection_provider_threads(provider_instance_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_threads_owner_idx",
+      "tbl_name": "orchestration_v2_projection_provider_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_threads_owner_idx ON orchestration_v2_projection_provider_threads(owner_node_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_threads_session_idx",
+      "tbl_name": "orchestration_v2_projection_provider_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_threads_session_idx ON orchestration_v2_projection_provider_threads(provider_session_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_threads_thread_idx",
+      "tbl_name": "orchestration_v2_projection_provider_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_threads_thread_idx ON orchestration_v2_projection_provider_threads(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_turns_thread_idx",
+      "tbl_name": "orchestration_v2_projection_provider_turns",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_turns_thread_idx ON orchestration_v2_projection_provider_turns(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_turns_thread_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_provider_turns",
+      "sql": "CREATE UNIQUE INDEX orchestration_v2_projection_provider_turns_thread_ordinal_idx ON orchestration_v2_projection_provider_turns(provider_thread_id, ordinal)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_requests_recovery_idx",
+      "tbl_name": "orchestration_v2_projection_runtime_requests",
+      "sql": "CREATE INDEX orchestration_v2_projection_requests_recovery_idx\n    ON orchestration_v2_projection_runtime_requests(thread_id)\n    WHERE status = 'pending'\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_run_attempts_run_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_run_attempts",
+      "sql": "CREATE UNIQUE INDEX orchestration_v2_projection_run_attempts_run_ordinal_idx ON orchestration_v2_projection_run_attempts(run_id, attempt_ordinal)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_run_attempts_thread_idx",
+      "tbl_name": "orchestration_v2_projection_run_attempts",
+      "sql": "CREATE INDEX orchestration_v2_projection_run_attempts_thread_idx ON orchestration_v2_projection_run_attempts(thread_id, run_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runs_provider_thread_idx",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE INDEX orchestration_v2_projection_runs_provider_thread_idx ON orchestration_v2_projection_runs(provider_thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runs_recovery_idx",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE INDEX orchestration_v2_projection_runs_recovery_idx\n    ON orchestration_v2_projection_runs(status, thread_id)\n    WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runs_thread_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE UNIQUE INDEX orchestration_v2_projection_runs_thread_ordinal_idx ON orchestration_v2_projection_runs(thread_id, ordinal)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runs_thread_status_idx",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE INDEX orchestration_v2_projection_runs_thread_status_idx ON orchestration_v2_projection_runs(thread_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runtime_requests_provider_turn_idx",
+      "tbl_name": "orchestration_v2_projection_runtime_requests",
+      "sql": "CREATE INDEX orchestration_v2_projection_runtime_requests_provider_turn_idx ON orchestration_v2_projection_runtime_requests(provider_turn_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runtime_requests_thread_status_idx",
+      "tbl_name": "orchestration_v2_projection_runtime_requests",
+      "sql": "CREATE INDEX orchestration_v2_projection_runtime_requests_thread_status_idx ON orchestration_v2_projection_runtime_requests(thread_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_subagents_child_thread_idx",
+      "tbl_name": "orchestration_v2_projection_subagents",
+      "sql": "CREATE INDEX orchestration_v2_projection_subagents_child_thread_idx ON orchestration_v2_projection_subagents(child_thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_subagents_parent_node_idx",
+      "tbl_name": "orchestration_v2_projection_subagents",
+      "sql": "CREATE INDEX orchestration_v2_projection_subagents_parent_node_idx ON orchestration_v2_projection_subagents(parent_node_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_subagents_provider_thread_idx",
+      "tbl_name": "orchestration_v2_projection_subagents",
+      "sql": "CREATE INDEX orchestration_v2_projection_subagents_provider_thread_idx ON orchestration_v2_projection_subagents(provider_thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_subagents_thread_idx",
+      "tbl_name": "orchestration_v2_projection_subagents",
+      "sql": "CREATE INDEX orchestration_v2_projection_subagents_thread_idx ON orchestration_v2_projection_subagents(thread_id, started_at, subagent_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_threads_project_updated_idx",
+      "tbl_name": "orchestration_v2_projection_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_threads_project_updated_idx ON orchestration_v2_projection_threads(project_id, updated_at)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_node_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_node_ordinal_idx ON orchestration_v2_projection_turn_items(node_id, ordinal)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_provider_turn_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_provider_turn_idx ON orchestration_v2_projection_turn_items(provider_turn_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_recovery_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_recovery_idx\n    ON orchestration_v2_projection_turn_items(thread_id)\n    WHERE type IN ('command_execution', 'dynamic_tool', 'subagent')\n      AND status IN ('pending', 'running', 'waiting')\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_run_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_run_ordinal_idx ON orchestration_v2_projection_turn_items(run_id, ordinal)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_shell_pending_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_shell_pending_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE type IN ('command_execution', 'dynamic_tool', 'subagent')\n      AND status NOT IN ('completed', 'interrupted', 'failed', 'cancelled')\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_thread_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_thread_ordinal_idx ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_thread_run_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_thread_run_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n  "
+    },
+    {
+      "type": "table",
+      "name": "orchestration_command_receipts",
+      "tbl_name": "orchestration_command_receipts",
+      "sql": "CREATE TABLE orchestration_command_receipts (\n      command_id TEXT PRIMARY KEY,\n      aggregate_kind TEXT NOT NULL,\n      aggregate_id TEXT NOT NULL,\n      accepted_at TEXT NOT NULL,\n      result_sequence INTEGER NOT NULL,\n      status TEXT NOT NULL,\n      error TEXT\n    , command_type TEXT NOT NULL DEFAULT 'legacy')"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_events",
+      "tbl_name": "orchestration_events",
+      "sql": "CREATE TABLE orchestration_events (\n      sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n      event_id TEXT NOT NULL UNIQUE,\n      aggregate_kind TEXT NOT NULL,\n      stream_id TEXT NOT NULL,\n      stream_version INTEGER NOT NULL,\n      event_type TEXT NOT NULL,\n      occurred_at TEXT NOT NULL,\n      command_id TEXT,\n      causation_event_id TEXT,\n      correlation_id TEXT,\n      actor_kind TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      metadata_json TEXT NOT NULL\n    , application_event_version INTEGER NOT NULL DEFAULT 1)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_command_receipts",
+      "tbl_name": "orchestration_v2_command_receipts",
+      "sql": "CREATE TABLE orchestration_v2_command_receipts (\n      command_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      command_type TEXT NOT NULL,\n      accepted_at TEXT NOT NULL,\n      result_sequence INTEGER NOT NULL,\n      status TEXT NOT NULL,\n      error TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_effect_outbox",
+      "tbl_name": "orchestration_v2_effect_outbox",
+      "sql": "CREATE TABLE \"orchestration_v2_effect_outbox\" (\n      effect_id TEXT PRIMARY KEY,\n      command_id TEXT NOT NULL,\n      thread_id TEXT NOT NULL,\n      effect_type TEXT NOT NULL,\n      payload_json TEXT NOT NULL,\n      status TEXT NOT NULL CHECK (\n        status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')\n      ),\n      attempt_count INTEGER NOT NULL DEFAULT 0,\n      available_at TEXT NOT NULL,\n      lease_owner TEXT,\n      lease_expires_at TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      completed_at TEXT,\n      last_error TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_events",
+      "tbl_name": "orchestration_v2_events",
+      "sql": "CREATE TABLE orchestration_v2_events (\n      sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n      event_id TEXT NOT NULL UNIQUE,\n      command_id TEXT,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      provider TEXT,\n      raw_event_id TEXT,\n      event_type TEXT NOT NULL,\n      occurred_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , driver TEXT, provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_legacy_imports",
+      "tbl_name": "orchestration_v2_legacy_imports",
+      "sql": "CREATE TABLE orchestration_v2_legacy_imports (\n      thread_id TEXT PRIMARY KEY,\n      source_updated_at TEXT NOT NULL,\n      shell_imported_at TEXT NOT NULL,\n      transcript_imported_at TEXT,\n      imported_message_count INTEGER NOT NULL DEFAULT 0,\n      last_error TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_checkpoint_scopes",
+      "tbl_name": "orchestration_v2_projection_checkpoint_scopes",
+      "sql": "CREATE TABLE orchestration_v2_projection_checkpoint_scopes (\n      scope_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT NOT NULL,\n      parent_scope_id TEXT,\n      provider_thread_id TEXT,\n      kind TEXT NOT NULL,\n      ordinal_within_parent INTEGER NOT NULL,\n      advances_app_run_count INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_checkpoints",
+      "tbl_name": "orchestration_v2_projection_checkpoints",
+      "sql": "CREATE TABLE orchestration_v2_projection_checkpoints (\n      checkpoint_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      scope_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT NOT NULL,\n      parent_checkpoint_id TEXT,\n      ordinal_within_scope INTEGER NOT NULL,\n      app_run_ordinal INTEGER,\n      status TEXT NOT NULL,\n      captured_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_context_handoffs",
+      "tbl_name": "orchestration_v2_projection_context_handoffs",
+      "sql": "CREATE TABLE orchestration_v2_projection_context_handoffs (\n      context_handoff_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      target_run_id TEXT NOT NULL,\n      to_provider_thread_id TEXT NOT NULL,\n      strategy TEXT NOT NULL,\n      status TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_context_transfers",
+      "tbl_name": "orchestration_v2_projection_context_transfers",
+      "sql": "CREATE TABLE orchestration_v2_projection_context_transfers (\n      context_transfer_id TEXT PRIMARY KEY,\n      source_thread_id TEXT NOT NULL,\n      target_thread_id TEXT NOT NULL,\n      target_run_id TEXT,\n      type TEXT NOT NULL,\n      status TEXT NOT NULL,\n      source_provider TEXT,\n      target_provider TEXT,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , source_provider_instance_id TEXT, target_provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_messages",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TABLE orchestration_v2_projection_messages (\n      message_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      role TEXT NOT NULL,\n      streaming INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_metadata",
+      "tbl_name": "orchestration_v2_projection_metadata",
+      "sql": "CREATE TABLE orchestration_v2_projection_metadata (\n      projection_name TEXT PRIMARY KEY,\n      schema_version INTEGER NOT NULL,\n      last_sequence INTEGER NOT NULL,\n      updated_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_nodes",
+      "tbl_name": "orchestration_v2_projection_nodes",
+      "sql": "CREATE TABLE orchestration_v2_projection_nodes (\n      node_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      parent_node_id TEXT,\n      root_node_id TEXT NOT NULL,\n      kind TEXT NOT NULL,\n      status TEXT NOT NULL,\n      provider_thread_id TEXT,\n      provider_turn_id TEXT,\n      runtime_request_id TEXT,\n      checkpoint_scope_id TEXT,\n      started_at TEXT,\n      completed_at TEXT,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_plans",
+      "tbl_name": "orchestration_v2_projection_plans",
+      "sql": "CREATE TABLE orchestration_v2_projection_plans (\n      plan_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT NOT NULL,\n      kind TEXT NOT NULL,\n      status TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_provider_session_bindings",
+      "tbl_name": "orchestration_v2_projection_provider_session_bindings",
+      "sql": "CREATE TABLE orchestration_v2_projection_provider_session_bindings (\n      provider_session_id TEXT NOT NULL,\n      thread_id TEXT NOT NULL,\n      PRIMARY KEY (provider_session_id, thread_id)\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_provider_sessions",
+      "tbl_name": "orchestration_v2_projection_provider_sessions",
+      "sql": "CREATE TABLE orchestration_v2_projection_provider_sessions (\n      provider_session_id TEXT PRIMARY KEY,\n      thread_id TEXT,\n      provider TEXT NOT NULL,\n      status TEXT NOT NULL,\n      model TEXT,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , driver TEXT, provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_provider_threads",
+      "tbl_name": "orchestration_v2_projection_provider_threads",
+      "sql": "CREATE TABLE orchestration_v2_projection_provider_threads (\n      provider_thread_id TEXT PRIMARY KEY,\n      thread_id TEXT,\n      owner_node_id TEXT,\n      provider TEXT NOT NULL,\n      provider_session_id TEXT,\n      status TEXT NOT NULL,\n      first_run_ordinal INTEGER,\n      last_run_ordinal INTEGER,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , driver TEXT, provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_provider_turns",
+      "tbl_name": "orchestration_v2_projection_provider_turns",
+      "sql": "CREATE TABLE orchestration_v2_projection_provider_turns (\n      provider_turn_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      provider_thread_id TEXT NOT NULL,\n      node_id TEXT NOT NULL,\n      run_attempt_id TEXT,\n      ordinal INTEGER NOT NULL,\n      status TEXT NOT NULL,\n      started_at TEXT,\n      completed_at TEXT,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_run_attempts",
+      "tbl_name": "orchestration_v2_projection_run_attempts",
+      "sql": "CREATE TABLE orchestration_v2_projection_run_attempts (\n      attempt_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT NOT NULL,\n      attempt_ordinal INTEGER NOT NULL,\n      root_node_id TEXT NOT NULL,\n      provider TEXT NOT NULL,\n      provider_thread_id TEXT NOT NULL,\n      provider_turn_id TEXT,\n      status TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_runs",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE TABLE orchestration_v2_projection_runs (\n      run_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      ordinal INTEGER NOT NULL,\n      provider TEXT NOT NULL,\n      provider_thread_id TEXT,\n      status TEXT NOT NULL,\n      requested_at TEXT NOT NULL,\n      completed_at TEXT,\n      payload_json TEXT NOT NULL\n    , provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_runtime_requests",
+      "tbl_name": "orchestration_v2_projection_runtime_requests",
+      "sql": "CREATE TABLE orchestration_v2_projection_runtime_requests (\n      runtime_request_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      node_id TEXT NOT NULL,\n      provider_turn_id TEXT,\n      kind TEXT NOT NULL,\n      status TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      resolved_at TEXT,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_subagents",
+      "tbl_name": "orchestration_v2_projection_subagents",
+      "sql": "CREATE TABLE orchestration_v2_projection_subagents (\n      subagent_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      parent_node_id TEXT NOT NULL,\n      provider TEXT NOT NULL,\n      provider_thread_id TEXT,\n      child_thread_id TEXT,\n      origin TEXT NOT NULL,\n      status TEXT NOT NULL,\n      started_at TEXT,\n      completed_at TEXT,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , driver TEXT, provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_threads",
+      "tbl_name": "orchestration_v2_projection_threads",
+      "sql": "CREATE TABLE orchestration_v2_projection_threads (\n      thread_id TEXT PRIMARY KEY,\n      project_id TEXT NOT NULL,\n      title TEXT NOT NULL,\n      default_provider TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL,\n      interaction_mode TEXT NOT NULL,\n      active_provider_thread_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      archived_at TEXT,\n      deleted_at TEXT,\n      payload_json TEXT NOT NULL\n    , provider_instance_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_turn_items",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE TABLE orchestration_v2_projection_turn_items (\n      turn_item_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      provider_thread_id TEXT,\n      provider_turn_id TEXT,\n      parent_item_id TEXT,\n      ordinal INTEGER NOT NULL,\n      type TEXT NOT NULL,\n      status TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_thread_launch_workflows",
+      "tbl_name": "orchestration_v2_thread_launch_workflows",
+      "sql": "CREATE TABLE orchestration_v2_thread_launch_workflows (\n      command_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      project_id TEXT NOT NULL,\n      status TEXT NOT NULL,\n      title TEXT NOT NULL,\n      worktree_path TEXT,\n      branch TEXT,\n      setup_committed INTEGER NOT NULL DEFAULT 0,\n      thread_committed INTEGER NOT NULL DEFAULT 0,\n      message_committed INTEGER NOT NULL DEFAULT 0,\n      last_error TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_turn_item_positions",
+      "tbl_name": "orchestration_v2_turn_item_positions",
+      "sql": "CREATE TABLE orchestration_v2_turn_item_positions (\n      thread_id TEXT NOT NULL,\n      turn_item_id TEXT NOT NULL,\n      ordinal INTEGER NOT NULL,\n      PRIMARY KEY (thread_id, turn_item_id),\n      UNIQUE (thread_id, ordinal)\n    )"
+    },
+    {
+      "type": "table",
+      "name": "scheduled_tasks",
+      "tbl_name": "scheduled_tasks",
+      "sql": "CREATE TABLE scheduled_tasks (\n      task_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      prompt TEXT NOT NULL,\n      enabled INTEGER NOT NULL,\n      schedule_json TEXT NOT NULL,\n      project_id TEXT NOT NULL,\n      thread_id TEXT,\n      workspace_strategy_json TEXT NOT NULL,\n      model_selection_json TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL,\n      interaction_mode TEXT NOT NULL,\n      created_by TEXT NOT NULL,\n      creation_source TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      next_run_at TEXT,\n      last_run_at TEXT,\n      last_run_status TEXT NOT NULL,\n      last_run_error TEXT,\n      run_count INTEGER NOT NULL\n    )"
+    },
+    {
+      "type": "index",
+      "name": "idx_scheduled_task_webhook_deliveries_task",
+      "tbl_name": "scheduled_task_webhook_deliveries",
+      "sql": "CREATE INDEX idx_scheduled_task_webhook_deliveries_task\n    ON scheduled_task_webhook_deliveries(task_id, received_at)\n  "
+    },
+    {
+      "type": "table",
+      "name": "scheduled_task_webhook_deliveries",
+      "tbl_name": "scheduled_task_webhook_deliveries",
+      "sql": "CREATE TABLE scheduled_task_webhook_deliveries (\n      delivery_id TEXT PRIMARY KEY,\n      task_id TEXT NOT NULL,\n      received_at TEXT NOT NULL,\n      method TEXT NOT NULL,\n      query TEXT NOT NULL,\n      headers_json TEXT NOT NULL,\n      body TEXT NOT NULL,\n      body_bytes INTEGER NOT NULL,\n      body_truncated INTEGER NOT NULL,\n      outcome TEXT NOT NULL,\n      signature_verified INTEGER NOT NULL,\n      missing_fields_json TEXT NOT NULL,\n      rendered_prompt TEXT,\n      error TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "scheduled_tasks",
+      "tbl_name": "scheduled_tasks",
+      "sql": "CREATE TABLE scheduled_tasks (\n      task_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      prompt TEXT NOT NULL,\n      enabled INTEGER NOT NULL,\n      schedule_json TEXT NOT NULL,\n      project_id TEXT NOT NULL,\n      thread_id TEXT,\n      workspace_strategy_json TEXT NOT NULL,\n      model_selection_json TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL,\n      interaction_mode TEXT NOT NULL,\n      created_by TEXT NOT NULL,\n      creation_source TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      next_run_at TEXT,\n      last_run_at TEXT,\n      last_run_status TEXT NOT NULL,\n      last_run_error TEXT,\n      run_count INTEGER NOT NULL\n    , webhook_token TEXT, webhook_secret TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "idx_scheduled_task_webhook_relay_deliveries_seen",
+      "tbl_name": "scheduled_task_webhook_relay_deliveries",
+      "sql": "CREATE INDEX idx_scheduled_task_webhook_relay_deliveries_seen\n    ON scheduled_task_webhook_relay_deliveries(seen_at)\n  "
+    },
+    {
+      "type": "table",
+      "name": "scheduled_task_webhook_relay_deliveries",
+      "tbl_name": "scheduled_task_webhook_relay_deliveries",
+      "sql": "CREATE TABLE scheduled_task_webhook_relay_deliveries (\n      relay_delivery_id TEXT PRIMARY KEY,\n      task_id TEXT NOT NULL,\n      seen_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "mcp_app_model_context",
+      "tbl_name": "mcp_app_model_context",
+      "sql": "CREATE TABLE mcp_app_model_context (\n      thread_id TEXT NOT NULL,\n      item_id TEXT NOT NULL,\n      server TEXT NOT NULL,\n      tool TEXT NOT NULL,\n      text TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      PRIMARY KEY (thread_id, item_id)\n    )"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_nodes_live_idx",
+      "tbl_name": "orchestration_v2_projection_nodes",
+      "sql": "CREATE INDEX orchestration_v2_projection_nodes_live_idx\n    ON orchestration_v2_projection_nodes(thread_id)\n    WHERE status IN ('pending', 'starting', 'running', 'waiting')\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_user_message_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_user_message_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)\n    WHERE type = 'user_message'\n  "
+    },
+    {
+      "type": "table",
+      "name": "pull_request_review_guides",
+      "tbl_name": "pull_request_review_guides",
+      "sql": "CREATE TABLE pull_request_review_guides (\n      host TEXT NOT NULL,\n      repository TEXT NOT NULL,\n      number INTEGER NOT NULL,\n      guide_json TEXT NOT NULL,\n      PRIMARY KEY (host, repository, number)\n    ) WITHOUT ROWID\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_failed_error_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_failed_error_idx\n    ON orchestration_v2_projection_turn_items(\n      thread_id, run_id, node_id, updated_at DESC, ordinal DESC, turn_item_id DESC\n    )\n    WHERE type = 'error' AND status = 'failed'\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_provider_turns_codex_native_id_idx",
+      "tbl_name": "orchestration_v2_projection_provider_turns",
+      "sql": "CREATE INDEX orchestration_v2_provider_turns_codex_native_id_idx\n    ON orchestration_v2_projection_provider_turns (\n      json_extract(payload_json, '$.nativeTurnRef.nativeId')\n    )\n    WHERE json_extract(payload_json, '$.nativeTurnRef.driver') = 'codex'\n  "
+    },
+    {
+      "type": "index",
+      "name": "idx_webhook_pending_due",
+      "tbl_name": "scheduled_task_webhook_pending",
+      "sql": "CREATE INDEX idx_webhook_pending_due ON scheduled_task_webhook_pending(state, due_at)"
+    },
+    {
+      "type": "index",
+      "name": "idx_webhook_pending_key",
+      "tbl_name": "scheduled_task_webhook_pending",
+      "sql": "CREATE UNIQUE INDEX idx_webhook_pending_key\n    ON scheduled_task_webhook_pending(task_id, coalesce_key) WHERE state = 'pending'"
+    },
+    {
+      "type": "index",
+      "name": "idx_webhook_replay_delivery",
+      "tbl_name": "scheduled_task_webhook_replay_keys",
+      "sql": "CREATE INDEX idx_webhook_replay_delivery ON scheduled_task_webhook_replay_keys(delivery_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_webhook_replay_expiry",
+      "tbl_name": "scheduled_task_webhook_replay_keys",
+      "sql": "CREATE INDEX idx_webhook_replay_expiry ON scheduled_task_webhook_replay_keys(expires_at)"
+    },
+    {
+      "type": "table",
+      "name": "scheduled_task_webhook_pending",
+      "tbl_name": "scheduled_task_webhook_pending",
+      "sql": "CREATE TABLE scheduled_task_webhook_pending (\n    delivery_id TEXT PRIMARY KEY,\n    task_id TEXT NOT NULL REFERENCES scheduled_tasks(task_id) ON DELETE CASCADE,\n    coalesce_key TEXT NOT NULL,\n    due_at INTEGER NOT NULL,\n    state TEXT NOT NULL DEFAULT 'pending',\n    task_json TEXT NOT NULL,\n    request_json TEXT NOT NULL,\n    delivery_ids_json TEXT NOT NULL\n  )"
+    },
+    {
+      "type": "table",
+      "name": "scheduled_task_webhook_replay_keys",
+      "tbl_name": "scheduled_task_webhook_replay_keys",
+      "sql": "CREATE TABLE scheduled_task_webhook_replay_keys (\n    task_id TEXT NOT NULL REFERENCES scheduled_tasks(task_id) ON DELETE CASCADE,\n    replay_key TEXT NOT NULL,\n    delivery_id TEXT NOT NULL,\n    expires_at INTEGER NOT NULL,\n    PRIMARY KEY (task_id, replay_key)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "scheduled_tasks",
+      "tbl_name": "scheduled_tasks",
+      "sql": "CREATE TABLE scheduled_tasks (\n      task_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      prompt TEXT NOT NULL,\n      enabled INTEGER NOT NULL,\n      schedule_json TEXT NOT NULL,\n      project_id TEXT NOT NULL,\n      thread_id TEXT,\n      workspace_strategy_json TEXT NOT NULL,\n      model_selection_json TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL,\n      interaction_mode TEXT NOT NULL,\n      created_by TEXT NOT NULL,\n      creation_source TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      next_run_at TEXT,\n      last_run_at TEXT,\n      last_run_status TEXT NOT NULL,\n      last_run_error TEXT,\n      run_count INTEGER NOT NULL\n    , webhook_token TEXT, webhook_secret TEXT, last_run_webhook_delivery_id TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_stop_request_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_stop_request_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE type = 'run_interrupt_request'\n  "
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_message_search",
+      "tbl_name": "orchestration_v2_message_search",
+      "sql": "CREATE VIRTUAL TABLE orchestration_v2_message_search USING fts5(\n      text,\n      content = '',\n      contentless_delete = 1,\n      tokenize = 'trigram remove_diacritics 1'\n    )"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_message_search_config",
+      "tbl_name": "orchestration_v2_message_search_config",
+      "sql": "CREATE TABLE 'orchestration_v2_message_search_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_message_search_data",
+      "tbl_name": "orchestration_v2_message_search_data",
+      "sql": "CREATE TABLE 'orchestration_v2_message_search_data'(id INTEGER PRIMARY KEY, block BLOB)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_message_search_docsize",
+      "tbl_name": "orchestration_v2_message_search_docsize",
+      "sql": "CREATE TABLE 'orchestration_v2_message_search_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER)"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_message_search_idx",
+      "tbl_name": "orchestration_v2_message_search_idx",
+      "sql": "CREATE TABLE 'orchestration_v2_message_search_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_message_search_delete",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TRIGGER orchestration_v2_message_search_delete\n      AFTER DELETE ON orchestration_v2_projection_messages\n      WHEN old.streaming = 0\n      BEGIN\n        DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_message_search_insert",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TRIGGER orchestration_v2_message_search_insert\n      AFTER INSERT ON orchestration_v2_projection_messages\n      WHEN \n  \n  new.streaming = 0\n  AND (\n    new.role = 'assistant'\n    OR (\n      new.role = 'user'\n      AND COALESCE(json_extract(new.payload_json, '$.createdBy'), 'user') = 'user'\n    )\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads\n    WHERE subagent_threads.thread_id = new.thread_id\n      AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'\n  )\n\n  AND \n  CASE\n    WHEN substr(json_extract(new.payload_json, '$.text'), 1, 11) = 'Ultrathink:' COLLATE NOCASE\n      THEN ltrim(substr(json_extract(new.payload_json, '$.text'), 12), '\t\n\u000b\f\r                  　﻿')\n    ELSE json_extract(new.payload_json, '$.text')\n  END COLLATE BINARY <> '[User attached one or more files without additional text. Respond using the conversation context and the attached files.]'\n\n\n      BEGIN\n        INSERT INTO orchestration_v2_message_search (rowid, text)\n        SELECT new.rowid, replace(replace(json_extract(new.payload_json, '$.text'), '’', ''''), '‘', '''')\n        WHERE json_extract(new.payload_json, '$.text') IS NOT NULL;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_message_search_update",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TRIGGER orchestration_v2_message_search_update\n      AFTER UPDATE ON orchestration_v2_projection_messages\n      WHEN (old.streaming = 0 OR new.streaming = 0)\n        AND (\n          old.streaming IS NOT new.streaming\n          OR old.role IS NOT new.role\n          OR replace(replace(json_extract(old.payload_json, '$.text'), '’', ''''), '‘', '''') IS NOT replace(replace(json_extract(new.payload_json, '$.text'), '’', ''''), '‘', '''')\n          OR json_extract(old.payload_json, '$.createdBy')\n            IS NOT json_extract(new.payload_json, '$.createdBy')\n        )\n      BEGIN\n        DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid AND old.streaming = 0;\n        INSERT INTO orchestration_v2_message_search (rowid, text)\n        SELECT new.rowid, replace(replace(json_extract(new.payload_json, '$.text'), '’', ''''), '‘', '''')\n        WHERE \n  \n  new.streaming = 0\n  AND (\n    new.role = 'assistant'\n    OR (\n      new.role = 'user'\n      AND COALESCE(json_extract(new.payload_json, '$.createdBy'), 'user') = 'user'\n    )\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads\n    WHERE subagent_threads.thread_id = new.thread_id\n      AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'\n  )\n\n  AND \n  CASE\n    WHEN substr(json_extract(new.payload_json, '$.text'), 1, 11) = 'Ultrathink:' COLLATE NOCASE\n      THEN ltrim(substr(json_extract(new.payload_json, '$.text'), 12), '\t\n\u000b\f\r                  　﻿')\n    ELSE json_extract(new.payload_json, '$.text')\n  END COLLATE BINARY <> '[User attached one or more files without additional text. Respond using the conversation context and the attached files.]'\n\n\n          AND json_extract(new.payload_json, '$.text') IS NOT NULL;\n      END"
+    },
+    {
+      "type": "table",
+      "name": "peer_environment_links",
+      "tbl_name": "peer_environment_links",
+      "sql": "CREATE TABLE peer_environment_links (\n      environment_id TEXT PRIMARY KEY,\n      secret_name TEXT NOT NULL,\n      label TEXT NOT NULL,\n      urls_json TEXT NOT NULL,\n      access TEXT NOT NULL,\n      linked_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_reached_at TEXT,\n      last_error TEXT\n    )"
+    },
+    {
+      "type": "table",
+      "name": "peer_environment_links",
+      "tbl_name": "peer_environment_links",
+      "sql": "CREATE TABLE peer_environment_links (\n      environment_id TEXT PRIMARY KEY,\n      secret_name TEXT NOT NULL,\n      label TEXT NOT NULL,\n      urls_json TEXT NOT NULL,\n      access TEXT NOT NULL,\n      linked_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_reached_at TEXT,\n      last_error TEXT\n    , fenced INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_waiting_link_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_waiting_link_idx\n    ON orchestration_v2_projection_turn_items(thread_id, updated_at DESC, turn_item_id DESC)\n    WHERE type = 'link_request' AND status = 'waiting'\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_active_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_active_ordinal_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)\n    WHERE status IN ('pending', 'running', 'waiting')\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_active_run_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_active_run_idx\n    ON orchestration_v2_projection_turn_items(thread_id, run_id)\n    WHERE status IN ('pending', 'running', 'waiting')\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_subagents_settled_idx",
+      "tbl_name": "orchestration_v2_projection_subagents",
+      "sql": "CREATE INDEX orchestration_v2_projection_subagents_settled_idx\n    ON orchestration_v2_projection_subagents(thread_id, status, completion_delivery_state, run_id)\n  "
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_subagents",
+      "tbl_name": "orchestration_v2_projection_subagents",
+      "sql": "CREATE TABLE orchestration_v2_projection_subagents (\n      subagent_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      parent_node_id TEXT NOT NULL,\n      provider TEXT NOT NULL,\n      provider_thread_id TEXT,\n      child_thread_id TEXT,\n      origin TEXT NOT NULL,\n      status TEXT NOT NULL,\n      started_at TEXT,\n      completed_at TEXT,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , driver TEXT, provider_instance_id TEXT, completion_delivery_state TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT, default_thread_env_mode TEXT, favicon_path TEXT, auto_pull INTEGER NOT NULL DEFAULT 0, project_icon_json TEXT, pinned_at TEXT, archived_at TEXT)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runs_delegated_delivery_idx",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE INDEX orchestration_v2_projection_runs_delegated_delivery_idx\n    ON orchestration_v2_projection_runs(thread_id)\n    WHERE CASE WHEN json_valid(payload_json)\n      THEN json_type(payload_json, '$.delegatedCompletion.delivery') = 'object'\n      ELSE 0 END\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_threads_subagent_result_idx",
+      "tbl_name": "orchestration_v2_projection_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_threads_subagent_result_idx\n    ON orchestration_v2_projection_threads(\n      thread_id, json_extract(payload_json, '$.lineage.parentThreadId')\n    )\n    WHERE CASE WHEN json_valid(payload_json) THEN\n      json_extract(payload_json, '$.lineage.relationshipToParent') = 'subagent'\n      AND json_extract(payload_json, '$.lineage.parentThreadId') IS NOT NULL\n      AND json_extract(payload_json, '$.forkedFrom.type') = 'node'\n      ELSE 0 END\n  "
+    },
+    {
+      "type": "table",
+      "name": "scheduled_tasks",
+      "tbl_name": "scheduled_tasks",
+      "sql": "CREATE TABLE scheduled_tasks (\n      task_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      prompt TEXT NOT NULL,\n      enabled INTEGER NOT NULL,\n      schedule_json TEXT NOT NULL,\n      project_id TEXT NOT NULL,\n      thread_id TEXT,\n      workspace_strategy_json TEXT NOT NULL,\n      model_selection_json TEXT NOT NULL,\n      runtime_mode TEXT NOT NULL,\n      interaction_mode TEXT NOT NULL,\n      created_by TEXT NOT NULL,\n      creation_source TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      next_run_at TEXT,\n      last_run_at TEXT,\n      last_run_status TEXT NOT NULL,\n      last_run_error TEXT,\n      run_count INTEGER NOT NULL\n    , webhook_token TEXT, webhook_secret TEXT, last_run_webhook_delivery_id TEXT, thread_mode TEXT NOT NULL DEFAULT 'new_thread')"
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_messages",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TABLE orchestration_v2_projection_messages (\n      message_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      role TEXT NOT NULL,\n      streaming INTEGER NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , search_text TEXT)"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_message_search_insert",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TRIGGER orchestration_v2_message_search_insert\n      AFTER INSERT ON orchestration_v2_projection_messages\n      WHEN \n  \n  new.streaming = 0\n  AND (\n    new.role = 'assistant'\n    OR (\n      new.role = 'user'\n      AND COALESCE(json_extract(new.payload_json, '$.createdBy'), 'user') = 'user'\n    )\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads\n    WHERE subagent_threads.thread_id = new.thread_id\n      AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'\n  )\n\n  AND \n  CASE\n    WHEN substr(json_extract(new.payload_json, '$.text'), 1, 11) = 'Ultrathink:' COLLATE NOCASE\n      THEN ltrim(substr(json_extract(new.payload_json, '$.text'), 12), '\t\n\u000b\f\r                  　﻿')\n    ELSE json_extract(new.payload_json, '$.text')\n  END COLLATE BINARY <> '[User attached one or more files without additional text. Respond using the conversation context and the attached files.]'\n\n\n      BEGIN\n        INSERT INTO orchestration_v2_message_search (rowid, text)\n        SELECT new.rowid, replace(replace(COALESCE(new.search_text, json_extract(new.payload_json, '$.text')), '’', ''''), '‘', '''')\n        WHERE json_extract(new.payload_json, '$.text') IS NOT NULL;\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_message_search_update",
+      "tbl_name": "orchestration_v2_projection_messages",
+      "sql": "CREATE TRIGGER orchestration_v2_message_search_update\n      AFTER UPDATE ON orchestration_v2_projection_messages\n      WHEN (old.streaming = 0 OR new.streaming = 0)\n        AND (\n          old.streaming IS NOT new.streaming\n          OR old.role IS NOT new.role\n          OR replace(replace(COALESCE(old.search_text, json_extract(old.payload_json, '$.text')), '’', ''''), '‘', '''') IS NOT replace(replace(COALESCE(new.search_text, json_extract(new.payload_json, '$.text')), '’', ''''), '‘', '''')\n          OR json_extract(old.payload_json, '$.createdBy')\n            IS NOT json_extract(new.payload_json, '$.createdBy')\n        )\n      BEGIN\n        DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid AND old.streaming = 0;\n        INSERT INTO orchestration_v2_message_search (rowid, text)\n        SELECT new.rowid, replace(replace(COALESCE(new.search_text, json_extract(new.payload_json, '$.text')), '’', ''''), '‘', '''')\n        WHERE \n  \n  new.streaming = 0\n  AND (\n    new.role = 'assistant'\n    OR (\n      new.role = 'user'\n      AND COALESCE(json_extract(new.payload_json, '$.createdBy'), 'user') = 'user'\n    )\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads\n    WHERE subagent_threads.thread_id = new.thread_id\n      AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'\n  )\n\n  AND \n  CASE\n    WHEN substr(json_extract(new.payload_json, '$.text'), 1, 11) = 'Ultrathink:' COLLATE NOCASE\n      THEN ltrim(substr(json_extract(new.payload_json, '$.text'), 12), '\t\n\u000b\f\r                  　﻿')\n    ELSE json_extract(new.payload_json, '$.text')\n  END COLLATE BINARY <> '[User attached one or more files without additional text. Respond using the conversation context and the attached files.]'\n\n\n          AND json_extract(new.payload_json, '$.text') IS NOT NULL;\n      END"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_conversation_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_conversation_idx\n    ON orchestration_v2_projection_turn_items(thread_id, ordinal, type, run_id)\n    WHERE type NOT IN (\n      'command_execution', 'reasoning', 'file_change', 'file_search', 'web_search', 'dynamic_tool'\n    )\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_context_transfers_source_thread_status_idx",
+      "tbl_name": "orchestration_v2_projection_context_transfers",
+      "sql": "CREATE INDEX orchestration_v2_projection_context_transfers_source_thread_status_idx\n    ON orchestration_v2_projection_context_transfers(source_thread_id, status)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_nodes_settled_leaf_idx",
+      "tbl_name": "orchestration_v2_projection_nodes",
+      "sql": "CREATE INDEX orchestration_v2_projection_nodes_settled_leaf_idx\n    ON orchestration_v2_projection_nodes(\n      thread_id,\n      (kind IN ('tool_call', 'assistant_message', 'reasoning')\n        AND status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')\n        AND run_id IS NOT NULL)\n    )\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runs_last_executed_idx",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE INDEX orchestration_v2_projection_runs_last_executed_idx\n    ON orchestration_v2_projection_runs(\n      thread_id, (completed_at IS NULL) DESC, completed_at DESC, ordinal DESC, run_id DESC\n    )\n    WHERE status <> 'queued'\n      AND NOT (status = 'cancelled' AND json_extract(payload_json, '$.startedAt') IS NULL)\n  "
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_turn_item_counts",
+      "tbl_name": "orchestration_v2_projection_turn_item_counts",
+      "sql": "CREATE TABLE orchestration_v2_projection_turn_item_counts (\n      thread_id TEXT NOT NULL,\n      run_key TEXT NOT NULL,\n      item_count INTEGER NOT NULL,\n      PRIMARY KEY (thread_id, run_key)\n    ) WITHOUT ROWID\n  "
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_turn_item_counts_delete",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE TRIGGER orchestration_v2_turn_item_counts_delete\n    AFTER DELETE ON orchestration_v2_projection_turn_items\n    BEGIN\n      UPDATE orchestration_v2_projection_turn_item_counts SET item_count = item_count - 1\n      WHERE thread_id = old.thread_id AND run_key = COALESCE(old.run_id, '');\n      DELETE FROM orchestration_v2_projection_turn_item_counts\n      WHERE thread_id = old.thread_id AND run_key = COALESCE(old.run_id, '') AND item_count <= 0;\n    END"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_turn_item_counts_insert",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE TRIGGER orchestration_v2_turn_item_counts_insert\n    AFTER INSERT ON orchestration_v2_projection_turn_items\n    BEGIN\n      INSERT INTO orchestration_v2_projection_turn_item_counts (thread_id, run_key, item_count)\n      VALUES (new.thread_id, COALESCE(new.run_id, ''), 1)\n      ON CONFLICT (thread_id, run_key) DO UPDATE SET item_count = item_count + 1;\n    END"
+    },
+    {
+      "type": "trigger",
+      "name": "orchestration_v2_turn_item_counts_update",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE TRIGGER orchestration_v2_turn_item_counts_update\n    AFTER UPDATE OF thread_id, run_id ON orchestration_v2_projection_turn_items\n    WHEN old.thread_id IS NOT new.thread_id OR old.run_id IS NOT new.run_id\n    BEGIN\n      UPDATE orchestration_v2_projection_turn_item_counts SET item_count = item_count - 1\n      WHERE thread_id = old.thread_id AND run_key = COALESCE(old.run_id, '');\n      DELETE FROM orchestration_v2_projection_turn_item_counts\n      WHERE thread_id = old.thread_id AND run_key = COALESCE(old.run_id, '') AND item_count <= 0;\n      INSERT INTO orchestration_v2_projection_turn_item_counts (thread_id, run_key, item_count)\n      VALUES (new.thread_id, COALESCE(new.run_id, ''), 1)\n      ON CONFLICT (thread_id, run_key) DO UPDATE SET item_count = item_count + 1;\n    END"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_queued_input_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_queued_input_idx\n    ON orchestration_v2_projection_turn_items(run_id)\n    WHERE type = 'user_message'\n      AND json_valid(payload_json)\n      AND json_extract(payload_json, '$.inputIntent') = 'queued_turn'\n  "
+    },
+    {
+      "type": "table",
+      "name": "projection_projects",
+      "tbl_name": "projection_projects",
+      "sql": "CREATE TABLE projection_projects (\n      project_id TEXT PRIMARY KEY,\n      title TEXT NOT NULL,\n      workspace_root TEXT NOT NULL,\n      scripts_json TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      deleted_at TEXT\n    , default_model_selection_json TEXT, default_thread_env_mode TEXT, favicon_path TEXT, auto_pull INTEGER NOT NULL DEFAULT 0, project_icon_json TEXT, pinned_at TEXT, archived_at TEXT, has_custom_title INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_thread_type_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_thread_type_idx\n    ON orchestration_v2_projection_turn_items(thread_id, type, status)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_runs_run_status_idx",
+      "tbl_name": "orchestration_v2_projection_runs",
+      "sql": "CREATE INDEX orchestration_v2_projection_runs_run_status_idx\n    ON orchestration_v2_projection_runs(run_id, status)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_threads_root_thread_idx",
+      "tbl_name": "orchestration_v2_projection_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_threads_root_thread_idx\n    ON orchestration_v2_projection_threads(\n      CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.lineage.rootThreadId') END\n    )\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_threads_worktree_path_idx",
+      "tbl_name": "orchestration_v2_projection_threads",
+      "sql": "CREATE INDEX orchestration_v2_projection_threads_worktree_path_idx\n    ON orchestration_v2_projection_threads(\n      CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.worktreePath') END\n    )\n  "
+    },
+    {
+      "type": "table",
+      "name": "auth_connect_devices",
+      "tbl_name": "auth_connect_devices",
+      "sql": "CREATE TABLE auth_connect_devices (\n      proof_key_thumbprint TEXT PRIMARY KEY,\n      client_json TEXT,\n      approved_at TEXT NOT NULL\n    )"
+    },
+    {
+      "type": "table",
+      "name": "auth_pairing_links",
+      "tbl_name": "auth_pairing_links",
+      "sql": "CREATE TABLE auth_pairing_links (\n      id TEXT PRIMARY KEY,\n      credential TEXT NOT NULL UNIQUE,\n      method TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      subject TEXT NOT NULL,\n      label TEXT,\n      created_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      consumed_at TEXT,\n      revoked_at TEXT\n    , proof_key_thumbprint TEXT, requires_connect_approval INTEGER NOT NULL DEFAULT 0, requested_client_json TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "auth_sessions",
+      "tbl_name": "auth_sessions",
+      "sql": "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      method TEXT NOT NULL,\n      client_label TEXT,\n      client_ip_address TEXT,\n      client_user_agent TEXT,\n      client_device_type TEXT NOT NULL DEFAULT 'unknown',\n      client_os TEXT,\n      client_browser TEXT,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_connected_at TEXT,\n      revoked_at TEXT\n    , client_surface TEXT, client_app_version TEXT, proof_key_thumbprint TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "auth_pairing_links",
+      "tbl_name": "auth_pairing_links",
+      "sql": "CREATE TABLE auth_pairing_links (\n      id TEXT PRIMARY KEY,\n      credential TEXT NOT NULL UNIQUE,\n      method TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      subject TEXT NOT NULL,\n      label TEXT,\n      created_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      consumed_at TEXT,\n      revoked_at TEXT\n    , proof_key_thumbprint TEXT, requires_connect_approval INTEGER NOT NULL DEFAULT 0, requested_client_json TEXT, connect_denied INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_provider_turns_attempt_idx",
+      "tbl_name": "orchestration_v2_projection_provider_turns",
+      "sql": "CREATE INDEX orchestration_v2_projection_provider_turns_attempt_idx\n    ON orchestration_v2_projection_provider_turns(run_attempt_id)\n  "
+    },
+    {
+      "type": "index",
+      "name": "orchestration_v2_projection_turn_items_message_ordinal_idx",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE INDEX orchestration_v2_projection_turn_items_message_ordinal_idx\n    ON orchestration_v2_projection_turn_items(\n      thread_id, json_extract(payload_json, '$.messageId'), ordinal\n    )\n    WHERE type IN ('user_message', 'assistant_message') AND json_valid(payload_json)\n  "
+    },
+    {
+      "type": "table",
+      "name": "orchestration_v2_projection_turn_items",
+      "tbl_name": "orchestration_v2_projection_turn_items",
+      "sql": "CREATE TABLE orchestration_v2_projection_turn_items (\n      turn_item_id TEXT PRIMARY KEY,\n      thread_id TEXT NOT NULL,\n      run_id TEXT,\n      node_id TEXT,\n      provider_thread_id TEXT,\n      provider_turn_id TEXT,\n      parent_item_id TEXT,\n      ordinal INTEGER NOT NULL,\n      type TEXT NOT NULL,\n      status TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      payload_json TEXT NOT NULL\n    , inline_work_output INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "table",
+      "name": "thread_notes",
+      "tbl_name": "thread_notes",
+      "sql": "CREATE TABLE thread_notes (\n      thread_id TEXT NOT NULL,\n      request_id TEXT NOT NULL,\n      created_at TEXT NOT NULL,\n      content TEXT NOT NULL,\n      attachments_json TEXT NOT NULL DEFAULT '[]',\n      PRIMARY KEY (thread_id, request_id)\n    )"
+    },
+    {
+      "type": "index",
+      "name": "hook_incident_thread",
+      "tbl_name": "hook_incidents",
+      "sql": "CREATE INDEX hook_incident_thread ON hook_incidents(thread_id, updated_at)"
+    },
+    {
+      "type": "index",
+      "name": "hook_resource_due",
+      "tbl_name": "hook_resource_leases",
+      "sql": "CREATE INDEX hook_resource_due ON hook_resource_leases(status, expires_at)"
+    },
+    {
+      "type": "index",
+      "name": "hook_work_due",
+      "tbl_name": "hook_work_obligations",
+      "sql": "CREATE INDEX hook_work_due ON hook_work_obligations(status, due_at)"
+    },
+    {
+      "type": "table",
+      "name": "hook_incidents",
+      "tbl_name": "hook_incidents",
+      "sql": "CREATE TABLE hook_incidents (\n    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, thread_id TEXT NOT NULL,\n    event TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,\n    summary TEXT NOT NULL, receipt_json TEXT NOT NULL DEFAULT '{}'\n  )"
+    },
+    {
+      "type": "table",
+      "name": "hook_resource_leases",
+      "tbl_name": "hook_resource_leases",
+      "sql": "CREATE TABLE hook_resource_leases (\n    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, thread_id TEXT NOT NULL,\n    run_id TEXT NOT NULL, resource TEXT NOT NULL, generation INTEGER NOT NULL,\n    expires_at INTEGER NOT NULL, status TEXT NOT NULL, backend_ended INTEGER NOT NULL DEFAULT 0,\n    notification TEXT NOT NULL DEFAULT 'none', UNIQUE(thread_id, resource)\n  )"
+    },
+    {
+      "type": "table",
+      "name": "hook_work_obligations",
+      "tbl_name": "hook_work_obligations",
+      "sql": "CREATE TABLE hook_work_obligations (\n    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL,\n    summary TEXT NOT NULL, status TEXT NOT NULL, due_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,\n    first_failure_at INTEGER, last_delivery_id TEXT, last_repair_prompt TEXT\n  )"
+    },
+    {
+      "type": "index",
+      "name": "web_push_delivery_due",
+      "tbl_name": "web_push_deliveries",
+      "sql": "CREATE INDEX web_push_delivery_due ON web_push_deliveries(status, next_at)"
+    },
+    {
+      "type": "index",
+      "name": "web_push_session",
+      "tbl_name": "web_push_subscriptions",
+      "sql": "CREATE INDEX web_push_session ON web_push_subscriptions(session_id, enabled)"
+    },
+    {
+      "type": "table",
+      "name": "web_push_deliveries",
+      "tbl_name": "web_push_deliveries",
+      "sql": "CREATE TABLE web_push_deliveries (id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, event_key TEXT NOT NULL, thread_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, next_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_status INTEGER)"
+    },
+    {
+      "type": "table",
+      "name": "web_push_subscriptions",
+      "tbl_name": "web_push_subscriptions",
+      "sql": "CREATE TABLE web_push_subscriptions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, subscription_json TEXT NOT NULL, label TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, last_status INTEGER)"
+    },
+    {
+      "type": "table",
+      "name": "web_push_thread_state",
+      "tbl_name": "web_push_thread_state",
+      "sql": "CREATE TABLE web_push_thread_state (thread_id TEXT PRIMARY KEY, identity TEXT, phase TEXT, updated_at INTEGER NOT NULL)"
+    }
+  ],
+  "histories": {
+    "0": [],
+    "1": [0, 1, 2, 3, 4],
+    "2": [5, 6, 0, 1, 2, 3, 7, 4],
+    "3": [8, 5, 6, 0, 1, 2, 3, 9, 7, 4],
+    "4": [8, 5, 6, 0, 1, 2, 3, 10, 11, 9, 7, 4, 12],
+    "5": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 24, 25, 26,
+      27, 28, 12
+    ],
+    "6": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 24, 25, 29,
+      27, 28, 12
+    ],
+    "7": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 24, 30, 29,
+      27, 28, 12
+    ],
+    "8": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32, 30,
+      29, 27, 28, 12
+    ],
+    "9": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32, 30,
+      29, 27, 28, 12
+    ],
+    "10": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32, 30,
+      29, 33, 28, 12
+    ],
+    "11": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32, 30,
+      29, 33, 28, 12
+    ],
+    "12": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32, 30,
+      29, 34, 28, 12
+    ],
+    "13": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 35, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32,
+      30, 36, 29, 34, 28, 12
+    ],
+    "14": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 35, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32,
+      30, 37, 29, 34, 28, 12
+    ],
+    "15": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 35, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 22, 23, 32,
+      30, 37, 29, 34, 38, 12
+    ],
+    "16": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 35, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 39, 23, 32,
+      30, 37, 29, 40, 38, 12
+    ],
+    "17": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 35, 17, 18, 19, 20, 10, 11, 9, 7, 4, 21, 39, 23, 32,
+      30, 37, 29, 41, 38, 12
+    ],
+    "18": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 15, 31, 16, 35, 17, 42, 18, 19, 20, 10, 11, 9, 7, 4, 21, 39, 23,
+      32, 30, 37, 29, 41, 38, 12
+    ],
+    "19": [
+      8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 9, 7, 4, 21,
+      39, 23, 32, 30, 37, 29, 41, 38, 12
+    ],
+    "20": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 47,
+      48, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 41, 38, 12
+    ],
+    "21": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      50, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 41, 38, 12
+    ],
+    "22": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 41, 38, 12
+    ],
+    "23": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 52, 38, 12
+    ],
+    "24": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 52, 38, 12
+    ],
+    "25": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 52, 38, 12
+    ],
+    "26": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 10, 11, 49,
+      51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 52, 38, 12
+    ],
+    "27": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 17, 42, 44, 18, 19, 20, 53, 10, 11,
+      49, 51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 29, 52, 38, 54
+    ],
+    "28": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 16, 35, 55, 17, 42, 44, 18, 19, 20, 53, 10,
+      11, 49, 51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 54
+    ],
+    "29": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 19, 20,
+      53, 10, 11, 49, 51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 54
+    ],
+    "30": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 20, 53, 10, 11, 49, 51, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 54
+    ],
+    "31": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 20, 53, 10, 11, 61, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 54
+    ],
+    "32": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 52, 38, 54
+    ],
+    "33": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 64, 38, 54
+    ],
+    "34": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 65, 38, 54
+    ],
+    "35": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 66, 38, 54
+    ],
+    "36": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 67, 38, 54
+    ],
+    "37": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 67, 38, 54
+    ],
+    "38": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 39, 23, 32, 30, 37, 56, 69, 38, 54
+    ],
+    "39": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 70, 23, 32, 30, 37, 56, 69, 38, 54
+    ],
+    "40": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 62, 9, 7, 4, 21, 71, 23, 32, 30, 37, 56, 69, 38, 54
+    ],
+    "41": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 71, 23, 32, 30, 37, 56, 69, 38, 54
+    ],
+    "42": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 71, 23, 32, 30, 37, 56, 73, 38, 54
+    ],
+    "43": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 71, 23, 32, 30, 37, 56, 74, 38, 54
+    ],
+    "44": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 71, 23, 32, 30, 37, 56, 74, 38, 54
+    ],
+    "45": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 75, 23, 32, 30, 37, 56, 74, 38, 54
+    ],
+    "46": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 75, 23, 32, 30, 37, 56, 74, 38, 54
+    ],
+    "47": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 30, 37, 56, 74, 38, 54
+    ],
+    "48": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 30, 37, 56, 77, 38, 54
+    ],
+    "49": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 55, 17, 42, 44, 18, 59, 60,
+      19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 30, 37, 56, 78, 38, 54
+    ],
+    "50": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42, 44, 18, 59,
+      60, 19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 30, 37, 80, 56, 78, 38, 54
+    ],
+    "51": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42, 44, 18, 59,
+      60, 19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 81, 37, 80, 56, 78, 38, 54
+    ],
+    "52": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42, 44, 18, 59,
+      60, 19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 81, 37, 80, 56, 82, 38, 54
+    ],
+    "53": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42, 44, 18, 59,
+      60, 19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 81, 37, 80, 56, 82, 38, 54, 83
+    ],
+    "54": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42, 44, 18, 59,
+      60, 19, 68, 20, 53, 10, 11, 63, 72, 9, 7, 4, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83
+    ],
+    "55": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42,
+      44, 18, 59, 60, 19, 68, 20, 53, 10, 11, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
+      101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+      120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+      139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 153, 154,
+      155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173,
+      174, 175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 179
+    ],
+    "56": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122,
+      123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141,
+      142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 153, 154, 155, 156, 157,
+      158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176,
+      177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 179
+    ],
+    "57": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 180, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
+      103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 153, 154, 155, 156,
+      157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175,
+      176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 181, 182
+    ],
+    "58": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 180, 183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
+      102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139,
+      140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 153, 154, 155,
+      156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
+      175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 181, 184, 182
+    ],
+    "59": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 180, 183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
+      102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139,
+      140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 185, 153, 154,
+      155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173,
+      174, 175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 181, 184, 182
+    ],
+    "60": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 180, 183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
+      102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119,
+      120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+      139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 187, 63, 72, 9, 185,
+      153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171,
+      172, 173, 174, 175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 181, 184,
+      182
+    ],
+    "61": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 180, 183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
+      102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119,
+      120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+      139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 187, 63, 72, 9, 185,
+      153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171,
+      172, 173, 174, 175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 188, 181,
+      184, 182
+    ],
+    "62": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 180, 183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101,
+      102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119,
+      120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+      139, 140, 141, 142, 143, 144, 145, 189, 146, 147, 148, 149, 150, 151, 152, 187, 63, 72, 9,
+      185, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170,
+      171, 172, 173, 174, 175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 84, 38, 54, 83, 188,
+      181, 184, 182
+    ],
+    "63": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
+      108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121, 122, 123, 124, 125,
+      126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144,
+      145, 189, 146, 147, 148, 149, 150, 151, 152, 187, 63, 72, 185, 153, 154, 155, 156, 157, 158,
+      159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177,
+      178, 76, 81, 80, 56, 84, 54, 83, 188, 181, 184, 182
+    ],
+    "64": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
+      108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121, 122, 123, 124, 125,
+      126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144,
+      145, 189, 146, 147, 148, 149, 150, 151, 152, 187, 63, 72, 185, 153, 154, 155, 156, 157, 158,
+      159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177,
+      178, 76, 81, 80, 56, 84, 54, 83, 188, 181, 184, 182
+    ],
+    "65": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
+      108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121, 122, 123, 124, 125,
+      126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144,
+      145, 189, 146, 147, 148, 149, 150, 151, 152, 187, 190, 63, 72, 185, 153, 154, 155, 156, 157,
+      158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176,
+      177, 178, 76, 81, 80, 56, 84, 54, 83, 188, 181, 184, 182
+    ],
+    "66": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
+      108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121, 122, 123, 124, 125,
+      126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144,
+      145, 189, 146, 147, 148, 149, 150, 151, 152, 187, 190, 63, 72, 185, 153, 154, 155, 156, 157,
+      158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176,
+      177, 178, 76, 81, 80, 56, 84, 54, 83, 188, 181, 184, 182
+    ],
+    "67": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 189, 146, 147, 148, 149, 150, 151, 152, 187, 190, 63, 72, 185, 153,
+      154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172,
+      173, 174, 175, 176, 177, 178, 76, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 197
+    ],
+    "68": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 190, 63, 72, 185,
+      153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171,
+      172, 173, 174, 175, 176, 177, 178, 76, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 197
+    ],
+    "69": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 190, 63, 72, 185,
+      153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 163, 164, 165, 166,
+      167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 76, 81, 80, 56, 84, 54, 83, 188,
+      181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "70": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 190, 63, 72, 185,
+      153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 163, 164, 165, 166,
+      167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 207, 76, 81, 80, 56, 84, 54, 83,
+      188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "71": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 190, 63, 72, 185,
+      153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 163, 164, 165, 166,
+      167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 208, 76, 81, 80, 56, 84, 54, 83,
+      188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "72": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209, 190, 63, 72,
+      185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 163, 164, 165,
+      166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 208, 76, 81, 80, 56, 84, 54,
+      83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "73": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209, 190,
+      63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 163,
+      164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 208, 76, 81, 80,
+      56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "74": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 144, 145, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209, 190,
+      63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 163,
+      164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 208, 76, 81, 80,
+      56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "75": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 212, 144, 145, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209,
+      190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162,
+      163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208, 76, 81,
+      80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "76": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 212, 144, 145, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209,
+      190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162,
+      163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208, 214, 81,
+      80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "77": [
+      45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 212, 144, 145, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209,
+      190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162,
+      163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208, 214, 81,
+      80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "78": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+      141, 142, 143, 212, 144, 145, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152, 187, 209,
+      190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162,
+      163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208, 214, 81,
+      80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "79": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 135, 136, 137, 138, 139,
+      140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152,
+      187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160,
+      161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208,
+      214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 197, 204, 205, 206
+    ],
+    "80": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 135, 136, 137, 138, 139,
+      140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152,
+      187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160,
+      161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208,
+      214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 205, 206
+    ],
+    "81": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 135, 136, 137, 138, 139,
+      140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 189, 146, 147, 148, 149, 150, 198, 151, 152,
+      187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160,
+      161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208,
+      214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219, 220
+    ],
+    "82": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 186, 117, 118, 119, 120, 121,
+      122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 135, 136, 137, 138, 139,
+      140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 148, 149, 150, 198, 151,
+      152, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159,
+      160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178,
+      208, 214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219, 220
+    ],
+    "83": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 135, 136, 137, 138,
+      139, 140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 148, 149, 150, 198,
+      151, 152, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203,
+      159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177,
+      178, 208, 214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219, 220
+    ],
+    "84": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 137,
+      138, 139, 140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 148, 149, 150,
+      198, 151, 152, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202,
+      203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176,
+      177, 178, 208, 214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219, 220
+    ],
+    "85": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 137,
+      138, 139, 140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 148, 149, 150,
+      198, 151, 152, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202,
+      203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 225,
+      176, 177, 178, 208, 214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219, 220,
+      226, 227, 228
+    ],
+    "86": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 137,
+      138, 139, 140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 229, 148, 149,
+      150, 198, 151, 152, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201,
+      202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175,
+      225, 176, 177, 178, 208, 214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219,
+      220, 226, 227, 228
+    ],
+    "87": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 137,
+      138, 139, 140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 229, 148, 149,
+      150, 198, 151, 152, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201,
+      202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175,
+      225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 219,
+      220, 226, 227, 228
+    ],
+    "88": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 137,
+      138, 139, 140, 141, 142, 143, 212, 144, 145, 216, 210, 211, 221, 189, 146, 147, 229, 148, 149,
+      150, 198, 151, 152, 231, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200,
+      201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213,
+      175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204,
+      219, 220, 226, 227, 228
+    ],
+    "89": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 232,
+      137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 146, 147,
+      229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157,
+      158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170, 171,
+      172, 173, 213, 175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184,
+      196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "90": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 232,
+      137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 146, 147,
+      229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 236, 237, 185, 153, 154, 155, 156,
+      157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170,
+      171, 172, 173, 213, 175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195,
+      184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "91": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 232,
+      137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 146, 147,
+      229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 238, 237, 185, 153, 154, 155, 156,
+      157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170,
+      171, 172, 173, 213, 175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195,
+      184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "92": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 215, 224, 135, 136, 232,
+      137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 146, 147,
+      229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 238, 237, 185, 153, 154, 155, 156,
+      157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169, 170,
+      171, 172, 173, 213, 175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181, 195,
+      184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "93": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 239, 130, 131, 132, 133, 134, 215, 224, 135, 136,
+      232, 137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 146,
+      147, 229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 238, 237, 185, 153, 154, 155,
+      156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168, 169,
+      170, 171, 172, 173, 213, 175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188, 181,
+      195, 184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "94": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 239, 130, 131, 132, 133, 134, 215, 224, 135, 136,
+      232, 137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 240,
+      146, 147, 229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 238, 237, 185, 153, 154,
+      155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168,
+      169, 170, 171, 172, 173, 213, 175, 225, 176, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188,
+      181, 195, 184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "95": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 239, 130, 131, 132, 133, 134, 215, 224, 135, 136,
+      232, 137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 240,
+      146, 147, 229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 238, 237, 185, 153, 154,
+      155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168,
+      169, 170, 171, 172, 173, 213, 175, 225, 241, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188,
+      181, 195, 184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "96": [
+      45, 46, 5, 6, 0, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
+      183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 222, 111, 112, 113, 114, 115, 116, 186, 117, 118, 223, 119, 120,
+      121, 122, 123, 124, 125, 126, 127, 128, 129, 239, 130, 131, 132, 133, 134, 215, 224, 135, 136,
+      232, 137, 138, 139, 140, 141, 142, 143, 212, 144, 145, 233, 216, 234, 210, 211, 221, 189, 240,
+      146, 147, 229, 148, 149, 150, 198, 151, 152, 231, 187, 209, 190, 235, 238, 237, 185, 153, 154,
+      155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160, 161, 162, 218, 164, 165, 166, 167, 168,
+      169, 170, 171, 172, 173, 213, 175, 225, 241, 177, 178, 208, 230, 81, 80, 56, 84, 54, 83, 188,
+      181, 195, 184, 196, 217, 204, 219, 220, 226, 227, 228
+    ],
+    "preview53": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42,
+      44, 18, 59, 60, 19, 68, 20, 53, 10, 11, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
+      101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+      120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+      139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 153, 154,
+      155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173,
+      174, 175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 82, 38, 54, 179
+    ],
+    "preview54": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 31, 57, 16, 58, 35, 79, 55, 17, 42,
+      44, 18, 59, 60, 19, 68, 20, 53, 10, 11, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
+      101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+      120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+      139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 153, 154,
+      155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173,
+      174, 175, 176, 177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 82, 38, 54, 83, 179
+    ],
+    "preview55": [
+      45, 46, 8, 5, 6, 0, 1, 2, 3, 85, 86, 87, 13, 14, 43, 15, 57, 58, 35, 79, 55, 17, 42, 44, 59,
+      60, 19, 68, 53, 10, 11, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+      104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122,
+      123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141,
+      142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 63, 72, 9, 153, 154, 155, 156, 157,
+      158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176,
+      177, 178, 21, 76, 23, 32, 81, 37, 80, 56, 82, 38, 54, 83, 179
+    ],
+    "custom80": [242],
+    "custom82": [243, 244, 245, 246, 247, 248],
+    "custom83": [249, 250, 251, 252, 253]
+  }
+}

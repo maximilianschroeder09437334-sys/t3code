@@ -12,8 +12,13 @@ import {
   legacyCustomPrefix,
   planLegacyCustomConversion,
   runCustomMigrations,
+  validateCustomMigrationState,
 } from "./customMigrationLedger.ts";
-import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
+import { validateMigrationSchema } from "./migrationSchemaValidation.ts";
+import {
+  reconciledV2PreviewHistory,
+  reconcileV2PreviewMigration,
+} from "./reconcileV2PreviewMigration.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -224,8 +229,6 @@ const makeMigrationLoader = (throughId?: number) =>
   );
 
 const FIRST_V2_MIGRATION_ID = 55;
-// Custom 80-83 share these ids with official migrations; see customMigrationLedger.ts.
-const FIRST_CUSTOM_MIGRATION_ID = 80;
 
 export function skippedV2Migrations(
   recorded: ReadonlyArray<{ readonly id: number; readonly name: string }>,
@@ -342,13 +345,48 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   if (started) yield* Effect.log(DATABASE_MIGRATIONS_STARTED_MESSAGE);
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
-  const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
   const sql = yield* SqlClient.SqlClient;
-  // Validated before any write: a custom history that is not exactly recognized stays untouched.
-  const customPrefix =
-    toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_CUSTOM_MIGRATION_ID
-      ? yield* planLegacyCustomConversion(migrationManifest)
-      : undefined;
+  const exists =
+    yield* sql`SELECT 1 FROM sqlite_master WHERE name='effect_sql_migrations' AND type='table'`;
+  const rows = exists.length
+    ? yield* sql<{
+        readonly migration_id: number;
+        readonly name: string;
+      }>`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`
+    : [];
+  const raw = rows.map((row) => ({ id: row.migration_id, name: row.name }));
+  const customPrefix = yield* planLegacyCustomConversion(migrationManifest);
+  const reconciled = reconciledV2PreviewHistory(raw);
+  if (reconciled === null)
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message: "Unexpected preview history. Nothing was changed.",
+    });
+  const effective = customPrefix === undefined ? reconciled : raw.filter((row) => row.id < 80);
+  const expected = migrationManifest.slice(0, effective.length);
+  if (
+    effective.length > migrationManifest.length ||
+    expected.some(([id, name], i) => effective[i]?.id !== id || effective[i]?.name !== name)
+  ) {
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message: "Unknown official migration history (identity or gap). Nothing was changed.",
+    });
+  }
+  yield* validateCustomMigrationState(migrationManifest, customPrefix);
+  const preview = raw.find(
+    (row) => row.name === "OrchestrationV2" && (row.id === 53 || row.id === 54),
+  );
+  const schemaKey = preview
+    ? `preview${raw.some((row) => row.id === 55) ? 55 : preview.id}`
+    : String(customPrefix === undefined ? effective.length : customPrefix >= 2 ? 80 : 79);
+  // Official 70-72 explicitly support replay of their idempotent schema when their tail rows
+  // are absent. Validate that entire known schema before actually executing those modules.
+  const peerTail =
+    effective.length === 69 &&
+    (yield* sql`SELECT 1 FROM sqlite_master WHERE name='peer_environment_links'`).length > 0;
+  yield* validateMigrationSchema(peerTail ? "72" : schemaKey, []);
+  const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
   const upgrade = Effect.gen(function* () {
     if (customPrefix !== undefined) yield* convertLegacyCustomLedger(customPrefix);
     if (includesV2) yield* assertV2MigrationsCanRun(toMigrationInclusive);
@@ -369,24 +407,5 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ? Effect.logDebug("Database schema is current")
     : Effect.log(DATABASE_MIGRATIONS_FINISHED_MESSAGE).pipe(Effect.annotateLogs({ migrations }));
 
-  const recorded = yield* sql<{
-    readonly migration_id: number;
-    readonly name: string;
-  }>`SELECT migration_id, name FROM effect_sql_migrations`;
-  const manifestNames = new Map<number, string>(migrationEntries.map(([id, name]) => [id, name]));
-  const divergent = recorded.flatMap((row) => {
-    const expected = manifestNames.get(row.migration_id);
-    if (expected === undefined) {
-      return [`${row.migration_id}:${row.name} (unknown to this build)`];
-    }
-    return expected === row.name
-      ? []
-      : [`${row.migration_id}:${row.name} (this build: ${expected})`];
-  });
-  if (divergent.length > 0) {
-    yield* Effect.logWarning(
-      "Database migration history diverges from this build; recorded migration ids are skipped, not reconciled by name.",
-    ).pipe(Effect.annotateLogs({ divergent }));
-  }
   return executedMigrations;
 });
