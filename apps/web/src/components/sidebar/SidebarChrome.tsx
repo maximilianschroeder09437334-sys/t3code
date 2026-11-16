@@ -17,6 +17,7 @@ import { cn } from "../../lib/utils";
 import { usePullRequestsSupported } from "../../state/environments";
 import { T3Wordmark } from "../T3Wordmark";
 import {
+  resolveClientStageBackdropVariant,
   resolveEnvironmentIdentificationPillLabel,
   resolveSidebarStageBackdropVariant,
   SidebarStageBackdrop,
@@ -48,9 +49,9 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
 }) {
   const stageLabel = useEnvironmentStageLabel();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
-  const backdropVariant = resolveSidebarStageBackdropVariant(
-    stageLabel,
-    environmentIdentificationMode,
+  const backdropVariant = resolveClientStageBackdropVariant(
+    resolveSidebarStageBackdropVariant(stageLabel, environmentIdentificationMode),
+    isElectron,
   );
   const pillLabel =
     environmentIdentificationMode === "pill"
