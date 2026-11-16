@@ -325,6 +325,9 @@ const makeLaptop = Effect.gen(function* () {
           Effect.succeed({
             thread: liveThreadShell(threadId, { runtimeMode: "full-access" }),
           } as never),
+        // The sender's handoff hook needs the run it sends from.
+        getThreadRecords: () =>
+          Effect.succeed({ runs: [{ id: RunId.make("run:laptop"), status: "running" }] } as never),
       }),
     ),
     Layer.provide(

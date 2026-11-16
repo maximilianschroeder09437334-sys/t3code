@@ -2,6 +2,7 @@ import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
 import { runHookedHandoff } from "../../../hooks/HookHandoffGateway.ts";
+import { followUpOwnerRun } from "../../../orchestration-v2/CommandPolicy.ts";
 
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
@@ -12,6 +13,42 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+
+/**
+ * `delivery` once the calling thread's handoff hooks allow it; client callers have no hooks. A local
+ * send needs a running owner run. A send to a linked environment may follow a parent whose own run
+ * ended, as upstream allows, so it falls back to the run its follow-up binds to.
+ */
+const gateHandoff = Effect.fn("OrchestratorHandlers.gateHandoff")(function* <A, E, R>(
+  payload: unknown,
+  delivery: Effect.Effect<A, E, R>,
+  options: { readonly endedOwner: "refuse" | "follow-up" },
+) {
+  const { caller, threads } = yield* readCaller();
+  if (caller === undefined) return yield* delivery;
+  const records = yield* threads.getThreadRecords(caller.id, ["runs"]).pipe(
+    Effect.mapError(
+      () =>
+        new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: "The handoff owner could not be checked.",
+        }),
+    ),
+  );
+  const run =
+    records.runs.findLast((run) => run.status === "running") ??
+    (options.endedOwner === "follow-up" ? followUpOwnerRun(records.runs) : null);
+  if (run === null)
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "The handoff owner is no longer running.",
+    });
+  return yield* runHookedHandoff(
+    { projectId: caller.projectId, threadId: caller.id, runId: run.id },
+    payload,
+    delivery,
+  );
+});
 
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads((input) =>
@@ -175,35 +212,23 @@ const handlers = {
       }),
   ),
   t3_thread_send: McpToolAccess.afterForwarding(
-    McpToolAccess.writesThreads(
-      (input) => [input.threadId],
-      (input) =>
-        Effect.gen(function* () {
-          const scope = yield* McpInvocationContext.McpInvocationContext;
-          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-          const { caller, threads } = yield* readCaller();
-          if (caller === undefined) return yield* service.sendToThread(scope, input);
-          const records = yield* threads.getThreadRecords(caller.id, ["runs"]).pipe(
-            Effect.mapError(
-              () =>
-                new OrchestratorMcpFailure({
-                  code: "orchestration_error",
-                  message: "The handoff owner could not be checked.",
-                }),
-            ),
-          );
-          const run = records.runs.findLast((run) => run.status === "running");
-          if (run === undefined)
-            return yield* new OrchestratorMcpFailure({
-              code: "invalid_request",
-              message: "The handoff owner is no longer running.",
-            });
-          return yield* runHookedHandoff(
-            { projectId: caller.projectId, threadId: caller.id, runId: run.id },
-            input,
-            Effect.suspend(() => service.sendToThread(scope, input)),
-          );
-        }),
+    McpToolAccess.aroundForwarding(
+      McpToolAccess.writesThreads(
+        (input) => [input.threadId],
+        (input) =>
+          Effect.gen(function* () {
+            const scope = yield* McpInvocationContext.McpInvocationContext;
+            const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+            return yield* gateHandoff(
+              input,
+              Effect.suspend(() => service.sendToThread(scope, input)),
+              { endedOwner: "refuse" },
+            );
+          }),
+      ),
+      // The sender's hook runs here, before the linked environment sees the message.
+      (input, environmentId, send) =>
+        gateHandoff({ ...input, environmentId }, send, { endedOwner: "follow-up" }),
     ),
     // There the thread's parent is here, so only this side can make a follow-up a task.
     (input, environmentId, sent) =>

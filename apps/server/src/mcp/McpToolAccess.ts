@@ -62,11 +62,11 @@ type RemoteCheck<P> = (
 ) => Effect.Effect<unknown, OrchestratorMcpFailure, Effect.Services<typeof writingCaller>>;
 let remoteCheckOf: <Handler>(declaration: Declaration<Handler>) => RemoteCheck<never> | undefined;
 
-/** What a call answered in a linked environment does here before it returns. */
+/** How a call bound for a linked environment runs here; `send` is its delivery there. */
 type Forwarded<P, A, E, R> = (
   params: P,
   environmentId: EnvironmentId,
-  result: A,
+  send: Effect.Effect<A, OrchestratorMcpFailure>,
 ) => Effect.Effect<A, E, R>;
 let forwardedOf: <Handler>(
   declaration: Declaration<Handler>,
@@ -366,13 +366,38 @@ export const either = <P, A, E, R, A2, E2, R2>(
  */
 export const afterForwarding = <P, A, E, R, E2, R2>(
   declaration: Declaration<(params: P) => Effect.Effect<A, E, R>>,
-  forwarded: Forwarded<P, A, E2, R2>,
+  forwarded: (params: P, environmentId: EnvironmentId, result: A) => Effect.Effect<A, E2, R2>,
 ) =>
-  declare(
+  aroundForwarding(declaration, (params, environmentId, send) =>
+    Effect.flatMap(send, (result) => forwarded(params, environmentId, result)),
+  );
+
+/**
+ * `declaration`, whose delivery to a linked environment runs inside `around`
+ * here. `around` may refuse before `send` runs, so the delivery then never happens.
+ */
+export const aroundForwarding = <P, A, E, R, E2, R2>(
+  declaration: Declaration<(params: P) => Effect.Effect<A, E, R>>,
+  around: (
+    params: P,
+    environmentId: EnvironmentId,
+    send: Effect.Effect<A, OrchestratorMcpFailure>,
+  ) => Effect.Effect<A, E2, R2>,
+) => {
+  const inner = forwardedOf(declaration) as
+    | Forwarded<P, A, OrchestratorMcpFailure, never>
+    | undefined;
+  return declare(
     checkedHandler(declaration) as (params: P) => Effect.Effect<A, E | E2, R | R2>,
     remoteCheckOf(declaration) as RemoteCheck<P> | undefined,
-    forwarded,
+    ((params, environmentId, send) =>
+      around(
+        params,
+        environmentId,
+        inner === undefined ? send : inner(params, environmentId, send),
+      )) as Forwarded<P, A, E | E2, R | R2>,
   );
+};
 
 const fullAccessRequired =
   "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.";
@@ -507,11 +532,11 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
         if (scope.linkedEnvironments === false) return yield* PeerForwarding.linkedEnvironmentsOff;
         yield* (remote as RemoteCheck<typeof params>)(params);
         if (Option.isNone(forwarding)) return yield* linksUnavailable;
-        const result = yield* forwarding.value.call(scope, tool, target, {
+        const send = forwarding.value.call(scope, tool, target, {
           ...params,
           environmentId,
         });
-        return forwarded === undefined ? result : yield* forwarded(params, target, result);
+        return yield* forwarded === undefined ? send : forwarded(params, target, send);
       });
   }
   return handlers as Toolkit.HandlersFrom<Tools>;

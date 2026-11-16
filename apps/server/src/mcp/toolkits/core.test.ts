@@ -9,6 +9,7 @@ import {
   ChatImageAttachment,
   CommandId,
   EnvironmentId,
+  MessageId,
   NodeId,
   OrchestratorMcpThreadReadResult,
   ProjectId,
@@ -1487,6 +1488,101 @@ it.effect(
           Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
           Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
           Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "gates a linked-environment t3_thread_send on the sender's handoff hook before forwarding",
+  () => {
+    const events: Array<string> = [];
+    let allow = false;
+    const sent = {
+      threadId: ThreadId.make("remote-thread"),
+      messageId: MessageId.make("remote-message"),
+      runId: RunId.make("remote-run"),
+      status: "running",
+      delivery: "queued",
+    } as const;
+    const linked = EnvironmentId.make("environment-box");
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const send = server
+        .callTool({
+          name: "t3_thread_send",
+          arguments: { environmentId: linked, threadId: sent.threadId, message: "Do the work" },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      const denied = yield* send;
+      expect(declaredFailure(denied)).toMatchObject({ code: "invalid_request" });
+      expect(events).toEqual(["hook:before_handoff"]);
+
+      events.length = 0;
+      allow = true;
+      const delivered = yield* send;
+      expect(delivered.isError).toBe(false);
+      expect(events).toEqual([
+        "hook:before_handoff",
+        "forward:environment-box",
+        "hook:handoff_completed",
+        "followUp",
+      ]);
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.layerOrchestratorToolkit.pipe(
+          Layer.provide(
+            Layer.mock(HookAutomation.HookAutomation)({
+              emit: (_owner, event) =>
+                Effect.sync(() => {
+                  events.push(`hook:${event}`);
+                  return { allowed: event !== "before_handoff" || allow, messages: ["Use a plan"] };
+                }),
+            }),
+          ),
+          Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+          Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+              getThreadRecords: () =>
+                Effect.succeed({
+                  runs: [{ id: RunId.make("caller-run"), status: "running" }],
+                } as never),
+            }),
+          ),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+          Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+          Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+          Layer.provide(
+            Layer.mock(PeerForwarding.PeerForwarding)({
+              call: (_scope, _tool, environmentId) =>
+                Effect.sync(() => {
+                  events.push(`forward:${environmentId}`);
+                  return sent as never;
+                }),
+            }),
+          ),
+          Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+          Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+          Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+          Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+          Layer.provide(
+            Layer.mock(RemoteDelegation.RemoteDelegation)({
+              followUp: (_scope, _environmentId, _request, result) =>
+                Effect.sync(() => {
+                  events.push("followUp");
+                  return result;
+                }),
+            }),
+          ),
         ),
       ),
     );
