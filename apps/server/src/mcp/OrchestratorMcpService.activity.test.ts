@@ -125,7 +125,10 @@ function makeRun(input: {
 
 it("readThread preserves caller access errors and prefers activity-run status over a newer cancelled queued run", async () => {
   let callerUnavailable = false;
-  const timelineOptions: Array<{ readonly afterPosition?: number; readonly beforePosition?: number }> = [];
+  const timelineOptions: Array<{
+    readonly afterPosition?: number;
+    readonly beforePosition?: number;
+  }> = [];
   let pendingBackgroundTasks: OrchestrationV2ThreadShell["pendingBackgroundTasks"] = [
     {
       taskId: "task-subagent",

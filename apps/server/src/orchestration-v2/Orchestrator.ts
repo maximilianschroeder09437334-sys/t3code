@@ -7032,7 +7032,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     // A run the thread queues for itself continues the task of the run that sent it.
-    const continuedFromRunId = command.restartContinuationOfRunId ?? command.hookContinuationOfRunId;
+    const continuedFromRunId =
+      command.restartContinuationOfRunId ?? command.hookContinuationOfRunId;
     const continuedTaskId = projection.runs.find((run) =>
       continuedFromRunId === undefined
         ? command.senderThreadId === command.threadId && isActiveRun(run)

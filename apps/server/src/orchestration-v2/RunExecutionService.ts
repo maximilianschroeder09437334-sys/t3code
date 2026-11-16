@@ -1309,7 +1309,9 @@ export const layer: Layer.Layer<
               ...(repair === undefined ? {} : { repair }),
               ...(stageWorkspaceRoot === undefined ? {} : { stageWorkspaceRoot }),
               failureItemPersisted:
-                settledTerminal === terminal ? failureItemPersisted : settledTerminal.status === "failed",
+                settledTerminal === terminal
+                  ? failureItemPersisted
+                  : settledTerminal.status === "failed",
               refreshAfterTurn,
             }).pipe(
               Effect.mapError(
