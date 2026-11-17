@@ -53,6 +53,24 @@ it.layer(layer)("NotionOutbox", (it) => {
         page_id: string;
       }>`SELECT status, page_id FROM notion_outbox WHERE event_sequence = 1`;
       assert.deepStrictEqual(done, { status: "done", page_id: "notion-page" });
+      assert.strictEqual(yield* outbox.rememberPage("target", "feature", "page-1"), "page-1");
+      assert.strictEqual(yield* outbox.rememberPage("target", "feature", "page-2"), "page-1");
+      assert.strictEqual(yield* outbox.getPage("target", "feature"), "page-1");
+      assert.isTrue(yield* outbox.begin(2, "creating"));
+      yield* outbox.recover();
+      assert.strictEqual((yield* outbox.fallback(10))[0]?.event_sequence, 2);
+      assert.isTrue(yield* outbox.begin(3, "creating"));
+      yield* outbox.created(3, "target", "other", "page-3");
+      assert.strictEqual(yield* outbox.getPage("target", "other"), "page-3");
+      assert.isTrue(yield* outbox.begin(3, "appending"));
+      assert.isTrue(yield* outbox.completed(3, "block-3"));
+      assert.isFalse(yield* outbox.completed(3, "block-other"));
+      assert.isTrue(yield* outbox.begin(4, "appending"));
+      yield* outbox.recover();
+      assert.deepStrictEqual(
+        (yield* outbox.fallback(10)).map((row) => row.event_sequence),
+        [2, 4],
+      );
     }),
   );
   it("backs off and sends access failures or repeated errors to fallback", () => {

@@ -24,7 +24,7 @@ import {
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
 import { UsageModelFilter } from "./usage.ts";
-import { SecretProviderId, SecretProviderSlug } from "./secretReference.ts";
+import { SecretProviderId, SecretProviderSlug, SecretReference } from "./secretReference.ts";
 import { SettingsSecretValue } from "./settingsSecretValue.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
@@ -1356,7 +1356,24 @@ export const CloudSpeechCredentials = Schema.Struct({
   openrouter: CloudSpeechCredential,
 });
 
+export const NotionSyncSettings = Schema.Struct({
+  token: Schema.NullOr(SecretReference),
+  projects: Schema.Record(
+    ProjectId,
+    Schema.NullOr(
+      Schema.Struct({
+        dataSourceId: Schema.NullOr(TrimmedNonEmptyString),
+        format: Schema.Literals(["t3", "pipeline"]),
+        sharePage: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
+});
+
 export const ServerSettings = Schema.Struct({
+  notionSync: Schema.NullOr(NotionSyncSettings).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   providerModelPreferences: Schema.NullOr(ProviderModelPreferences).pipe(
@@ -1791,6 +1808,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  notionSync: Schema.optionalKey(Schema.NullOr(NotionSyncSettings)),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

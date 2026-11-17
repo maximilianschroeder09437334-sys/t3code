@@ -42,6 +42,30 @@ export class NotionOutbox extends Context.Service<
       now: number,
     ) => Effect.Effect<void, SqlError.SqlError>;
     readonly ack: (sequence: number, pageId: string) => Effect.Effect<boolean, SqlError.SqlError>;
+    readonly rememberPage: (
+      target: string,
+      key: string,
+      pageId: string,
+    ) => Effect.Effect<string, SqlError.SqlError>;
+    readonly getPage: (
+      target: string,
+      key: string,
+    ) => Effect.Effect<string | null, SqlError.SqlError>;
+    readonly begin: (
+      sequence: number,
+      phase: "creating" | "appending",
+    ) => Effect.Effect<boolean, SqlError.SqlError>;
+    readonly recover: () => Effect.Effect<void, SqlError.SqlError>;
+    readonly created: (
+      sequence: number,
+      target: string,
+      key: string,
+      pageId: string,
+    ) => Effect.Effect<void, SqlError.SqlError>;
+    readonly completed: (
+      sequence: number,
+      blockId: string,
+    ) => Effect.Effect<boolean, SqlError.SqlError>;
   }
 >()("t3/activity/NotionOutbox") {}
 
@@ -91,6 +115,70 @@ const make = Effect.gen(function* () {
       yield* sql<OutboxRow>`UPDATE notion_outbox SET status = 'done', page_id = ${pageId} WHERE event_sequence = ${sequence} AND status = 'fallback' RETURNING *`;
     return rows.length > 0;
   });
-  return NotionOutbox.of({ capture, due, fallback, fail, ack });
+  const getPage = Effect.fn("NotionOutbox.getPage")(function* (target: string, key: string) {
+    const [row] = yield* sql<{
+      readonly page_id: string;
+    }>`SELECT page_id FROM notion_sync_pages WHERE target = ${target} AND page_key = ${key}`;
+    return row?.page_id ?? null;
+  });
+  const rememberPage = Effect.fn("NotionOutbox.rememberPage")(function* (
+    target: string,
+    key: string,
+    pageId: string,
+  ) {
+    yield* sql`INSERT INTO notion_sync_pages (target, page_key, page_id) VALUES (${target}, ${key}, ${pageId}) ON CONFLICT (target, page_key) DO NOTHING`;
+    const stored = yield* getPage(target, key);
+    if (stored === null) return yield* Effect.die("Notion page mapping was not persisted");
+    return stored;
+  });
+  const begin = Effect.fn("NotionOutbox.begin")(function* (
+    sequence: number,
+    phase: "creating" | "appending",
+  ) {
+    const rows =
+      yield* sql<OutboxRow>`UPDATE notion_outbox SET status = ${phase} WHERE event_sequence = ${sequence} AND status = 'pending' RETURNING *`;
+    return rows.length > 0;
+  });
+  const recover = Effect.fn("NotionOutbox.recover")(function* () {
+    yield* sql`UPDATE notion_outbox SET status = 'fallback', last_error = 'uncertain remote write' WHERE status IN ('creating', 'appending')`;
+  });
+  const created = Effect.fn("NotionOutbox.created")(function* (
+    sequence: number,
+    target: string,
+    key: string,
+    pageId: string,
+  ) {
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const [row] =
+          yield* sql<OutboxRow>`SELECT * FROM notion_outbox WHERE event_sequence = ${sequence} AND status = 'creating'`;
+        if (row === undefined) return;
+        const stored = yield* rememberPage(target, key, pageId);
+        if (stored !== pageId) return yield* Effect.die("Conflicting Notion page mapping");
+        yield* sql`UPDATE notion_outbox SET page_id = ${pageId}, status = 'pending' WHERE event_sequence = ${sequence} AND status = 'creating'`;
+      }),
+    );
+  });
+  const completed = Effect.fn("NotionOutbox.completed")(function* (
+    sequence: number,
+    blockId: string,
+  ) {
+    const rows =
+      yield* sql<OutboxRow>`UPDATE notion_outbox SET status = 'done', block_id = ${blockId} WHERE event_sequence = ${sequence} AND status = 'appending' RETURNING *`;
+    return rows.length > 0;
+  });
+  return NotionOutbox.of({
+    capture,
+    due,
+    fallback,
+    fail,
+    ack,
+    getPage,
+    rememberPage,
+    begin,
+    recover,
+    created,
+    completed,
+  });
 });
 export const layer = Layer.effect(NotionOutbox, make);

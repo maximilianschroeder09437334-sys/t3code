@@ -33,6 +33,26 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
+it("replaces and clears Notion targets without retaining old project mappings", () => {
+  const previous = decodeServerSettings({
+    notionSync: {
+      token: null,
+      projects: { old: { dataSourceId: "old", format: "t3", sharePage: "old" } },
+    },
+  });
+  const patch = decodeServerSettingsPatch({
+    notionSync: {
+      token: null,
+      projects: { fresh: { dataSourceId: null, format: "pipeline", sharePage: "share" } },
+    },
+  });
+  const next = applyServerSettingsPatch(previous, patch);
+  expect(Object.keys(next.notionSync?.projects ?? {})).toEqual(["fresh"]);
+  expect(
+    applyServerSettingsPatch(next, decodeServerSettingsPatch({ notionSync: null })).notionSync,
+  ).toBeNull();
+});
+
 describe("fallbackTextGenerationModelSelection", () => {
   it("uses Big Pickle when only OpenCode is enabled", () => {
     expect(
