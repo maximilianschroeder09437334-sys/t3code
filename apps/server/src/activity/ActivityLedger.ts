@@ -42,6 +42,10 @@ export class ActivityLedger extends Context.Service<
     readonly list: (
       query: ActivityListInput,
     ) => Effect.Effect<ReadonlyArray<ActivityEvent>, ActivityLedgerError>;
+    readonly listAfter: (
+      afterSequence: number,
+      limit: number,
+    ) => Effect.Effect<ReadonlyArray<ActivityEvent>, ActivityLedgerError>;
     /** New events only, after `afterSequence` when given; history is never replayed past that. */
     readonly stream: (
       filter: ActivitySubscribeInput,
@@ -177,6 +181,15 @@ const make = Effect.gen(function* () {
     return yield* rowsToEvents(rows);
   }, storage);
 
+  const listAfter: ActivityLedger["Service"]["listAfter"] = Effect.fn("ActivityLedger.listAfter")(
+    function* (afterSequence, limit) {
+      const rows = yield* sql<Row>`SELECT * FROM activity_events WHERE sequence > ${afterSequence}
+      ORDER BY sequence ASC LIMIT ${limit}`;
+      return yield* rowsToEvents(rows);
+    },
+    storage,
+  );
+
   const stream: ActivityLedger["Service"]["stream"] = (filter) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -244,7 +257,7 @@ const make = Effect.gen(function* () {
     storage,
   );
 
-  return ActivityLedger.of({ append, list, stream, getCheckIn, sinceCheckIn, markSeen });
+  return ActivityLedger.of({ append, list, listAfter, stream, getCheckIn, sinceCheckIn, markSeen });
 });
 
 export const layer = Layer.effect(ActivityLedger, make);

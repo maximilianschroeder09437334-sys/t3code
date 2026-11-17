@@ -41,6 +41,31 @@ it.layer(layer)("ActivityLedger", (it) => {
     }),
   );
 
+  it.effect("recovers more than 500 events in ascending pages across a resumed cursor", () =>
+    Effect.gen(function* () {
+      const ledger = yield* ActivityLedger.ActivityLedger;
+      const start = (yield* ledger.list({ limit: 1 })).at(-1)?.sequence ?? 0;
+      yield* Effect.forEach(
+        Array.from({ length: 1051 }, (_, i) => i),
+        (i) => ledger.append(report(`recovery-${i}`)),
+        { discard: true },
+      );
+      const first = yield* ledger.listAfter(start, 500);
+      const cursor = first.at(-1)!.sequence;
+      const second = yield* ledger.listAfter(cursor, 500);
+      const resumed = yield* ledger.listAfter(cursor, 500);
+      const last = yield* ledger.listAfter(second.at(-1)!.sequence, 500);
+      assert.strictEqual(first.length, 500);
+      assert.strictEqual(second.length, 500);
+      assert.strictEqual(last.length, 51);
+      assert.deepStrictEqual(resumed, second);
+      assert.deepStrictEqual(
+        [...first, ...second, ...last].map((event) => event.summary),
+        Array.from({ length: 1051 }, (_, i) => `recovery-${i}`),
+      );
+    }),
+  );
+
   it.effect("rejects a summary over three lines before writing", () =>
     Effect.gen(function* () {
       const ledger = yield* ActivityLedger.ActivityLedger;
