@@ -434,6 +434,17 @@ import {
   ThreadNotesMutationResult,
 } from "./threadNotes.ts";
 import { OrchestratorMcpFailure } from "./orchestratorMcp.ts";
+import {
+  ActivityCheckIn,
+  ActivityCheckInGetInput,
+  ActivityCheckInGetResult,
+  ActivityEvent,
+  ActivityLedgerError,
+  ActivityListInput,
+  ActivityListResult,
+  ActivityMarkSeenInput,
+  ActivitySubscribeInput,
+} from "./activityLedger.ts";
 
 export const WS_METHODS = {
   projectsListEntries: "projects.listEntries",
@@ -457,6 +468,10 @@ export const WS_METHODS = {
   threadNotesRead: "threadNotes.read",
   threadNotesSave: "threadNotes.save",
   threadNotesDelete: "threadNotes.delete",
+  activityList: "activity.list",
+  activitySubscribe: "activity.subscribe",
+  activityCheckInGet: "activity.checkIn.get",
+  activityCheckInMarkSeen: "activity.checkIn.markSeen",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -1587,6 +1602,29 @@ const WsThreadNotesDeleteRpc = Rpc.make(WS_METHODS.threadNotesDelete, {
   error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
 });
 
+const activityError = Schema.Union([ActivityLedgerError, EnvironmentAuthorizationError]);
+const WsActivityListRpc = Rpc.make(WS_METHODS.activityList, {
+  payload: ActivityListInput,
+  success: ActivityListResult,
+  error: activityError,
+});
+const WsActivitySubscribeRpc = Rpc.make(WS_METHODS.activitySubscribe, {
+  payload: ActivitySubscribeInput,
+  success: ActivityEvent,
+  error: activityError,
+  stream: true,
+});
+const WsActivityCheckInGetRpc = Rpc.make(WS_METHODS.activityCheckInGet, {
+  payload: ActivityCheckInGetInput,
+  success: ActivityCheckInGetResult,
+  error: activityError,
+});
+const WsActivityCheckInMarkSeenRpc = Rpc.make(WS_METHODS.activityCheckInMarkSeen, {
+  payload: ActivityMarkSeenInput,
+  success: ActivityCheckIn,
+  error: activityError,
+});
+
 const WsAssetsPersistChatAttachmentsRpc = Rpc.make(WS_METHODS.assetsPersistChatAttachments, {
   payload: PersistChatAttachmentsInput,
   success: PersistChatAttachmentsResult,
@@ -2378,6 +2416,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsThreadNotesReadRpc,
   WsThreadNotesSaveRpc,
   WsThreadNotesDeleteRpc,
+  WsActivityListRpc,
+  WsActivitySubscribeRpc,
+  WsActivityCheckInGetRpc,
+  WsActivityCheckInMarkSeenRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,

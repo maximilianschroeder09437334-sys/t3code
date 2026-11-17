@@ -54,6 +54,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.projectsCreateFromThread]: AuthOrchestrationOperateScope,
   [WS_METHODS.threadNotesSave]: AuthOrchestrationOperateScope,
   [WS_METHODS.threadNotesDelete]: AuthOrchestrationOperateScope,
+  [WS_METHODS.activityCheckInMarkSeen]: AuthOrchestrationOperateScope,
   [WS_METHODS.sourceControlCloneRepository]: AuthSourceControlWriteScope,
   [WS_METHODS.sourceControlPublishRepository]: AuthSourceControlWriteScope,
   [WS_METHODS.sourceControlStar]: AuthSourceControlWriteScope,

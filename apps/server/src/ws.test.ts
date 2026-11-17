@@ -1,4 +1,5 @@
 import * as WebPushNotifications from "./notifications/WebPushNotifications.ts";
+import * as ActivityLedger from "./activity/ActivityLedger.ts";
 import * as HookAutomation from "./hooks/HookAutomation.ts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
@@ -906,6 +907,7 @@ const layerConfigSources = Layer.mergeAll(
   Layer.mock(HookRegistry.HookRegistry)({}),
   Layer.mock(HookAutomation.HookAutomation)({}),
   Layer.mock(WebPushNotifications.WebPushNotifications)({}),
+  ActivityLedger.layer,
   Keybindings.layer,
   AssetSigner.layer.pipe(Layer.provide(ServerSecretStore.layer)),
   ServerSettings.layer.pipe(
@@ -1013,6 +1015,96 @@ it.effect("serves thread notes through the typed WebSocket RPC handlers", () =>
       notes: [],
       truncated: false,
     });
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      Layer.mergeAll(Layer.fresh(layerConfigSources), Layer.mock(ServerBrowser.ServerBrowser)({})),
+    ),
+  ),
+);
+
+it.effect("serves the activity ledger and guards marking it seen", () =>
+  Effect.gen(function* () {
+    const ledger = yield* ActivityLedger.ActivityLedger;
+    const appended = yield* ledger.append({
+      key: "ws-activity",
+      kind: "done",
+      projectId: ProjectId.make("project:activity-rpc"),
+      threadId: ThreadId.make("thread:activity-rpc"),
+      summary: "Ledger served",
+    });
+    const browser = yield* ServerBrowser.ServerBrowser;
+    const rpcLayer = layerWsRpc(
+      {
+        sessionId: AuthSessionId.make("activity-rpc-test"),
+        subject: "owner",
+        method: "browser-session-cookie",
+        scopes: [AuthOrchestrationOperateScope, AuthOrchestrationReadScope],
+      },
+      {},
+      browser,
+      () => Effect.void,
+      { secretReferences: false },
+    ).pipe(Layer.provide(layerUnusedConfigRpcServices));
+    const methods = [
+      WS_METHODS.activityList,
+      WS_METHODS.activityCheckInGet,
+      WS_METHODS.activityCheckInMarkSeen,
+    ] as const;
+    const listHandler = yield* WsRpcGroup.accessHandler(WS_METHODS.activityList).pipe(
+      Effect.provide(rpcLayer),
+    );
+    const getHandler = yield* WsRpcGroup.accessHandler(WS_METHODS.activityCheckInGet).pipe(
+      Effect.provide(rpcLayer),
+    );
+    const markHandler = yield* WsRpcGroup.accessHandler(WS_METHODS.activityCheckInMarkSeen).pipe(
+      Effect.provide(rpcLayer),
+    );
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
+          (typeof methods)[number]
+        > => !(methods as ReadonlyArray<string>).includes(tag),
+      ),
+    );
+    const handlers = Layer.mergeAll(
+      group.toLayerHandler(WS_METHODS.activityList, (payload, context) =>
+        listHandler(payload, context),
+      ),
+      group.toLayerHandler(WS_METHODS.activityCheckInGet, (payload, context) =>
+        getHandler(payload, context),
+      ),
+      group.toLayerHandler(WS_METHODS.activityCheckInMarkSeen, (payload, context) =>
+        markHandler(payload, context),
+      ),
+    );
+    const makeClient = (scopes: ReadonlyArray<string>) =>
+      RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer(scopes as never))),
+      );
+
+    const readOnly = yield* makeClient([AuthOrchestrationReadScope]);
+    assert.deepEqual(
+      (yield* readOnly[WS_METHODS.activityList]({ limit: 10 })).events.map((event) => event.id),
+      [appended.event.id],
+    );
+    yield* readOnly[WS_METHODS.activityCheckInMarkSeen]({}).pipe(Effect.flip);
+    const unseen = yield* readOnly[WS_METHODS.activityCheckInGet]({});
+    assert.isNull(unseen.checkIn);
+    assert.deepEqual(
+      unseen.events.map((event) => event.id),
+      [appended.event.id],
+    );
+
+    const operator = yield* makeClient([AuthOrchestrationOperateScope, AuthOrchestrationReadScope]);
+    const marked = yield* operator[WS_METHODS.activityCheckInMarkSeen]({});
+    assert.equal(marked.seenSequence, appended.event.sequence);
+    // The check-in belongs to the session's subject, not to anything the client sends.
+    assert.deepEqual(yield* ledger.getCheckIn("owner"), marked);
+    assert.deepEqual((yield* operator[WS_METHODS.activityCheckInGet]({})).events, []);
   }).pipe(
     Effect.scoped,
     Effect.provide(
@@ -2757,6 +2849,7 @@ it.effect("direct project writes give hooks the same path field as staged writes
       }),
       Layer.mock(HookAutomation.HookAutomation)({}),
       Layer.mock(WebPushNotifications.WebPushNotifications)({}),
+      Layer.mock(ActivityLedger.ActivityLedger)({}),
       Layer.mock(HookRegistry.HookRegistry)({
         runEvent: (input) =>
           Effect.sync(() => {

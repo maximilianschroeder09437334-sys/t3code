@@ -115,6 +115,8 @@ const preservedTables = [
   "web_push_subscriptions",
   "web_push_thread_state",
   "web_push_deliveries",
+  "activity_events",
+  "activity_check_ins",
 ] as const;
 
 const tableExists = (table: string) =>
@@ -283,6 +285,7 @@ describe("custom-through-83 histories", () => {
               [80, "ThreadNotes"],
               [82, "HookAutomation"],
               [83, "WebPushNotifications"],
+              [84, "ActivityLedger"],
             ]
               .filter(([id]) => (id as number) > 79 + count)
               .map(([id, name]) => [id, name, "executed"]),
@@ -443,6 +446,7 @@ describe("official histories", () => {
           [80, "ThreadNotes", "executed"],
           [82, "HookAutomation", "executed"],
           [83, "WebPushNotifications", "executed"],
+          [84, "ActivityLedger", "executed"],
         ],
       );
       yield* expectCurrent;
@@ -468,6 +472,7 @@ describe("official histories", () => {
           [80, "executed"],
           [82, "executed"],
           [83, "executed"],
+          [84, "executed"],
         ],
       );
       yield* expectCurrent;
@@ -486,6 +491,8 @@ describe("official histories", () => {
         "web_push_subscriptions",
         "web_push_thread_state",
         "web_push_deliveries",
+        "activity_events",
+        "activity_check_ins",
         "t3_custom_migrations",
         "t3_custom_migration_legacy_ledger",
       ]) {
@@ -523,6 +530,8 @@ const withoutCustomTables = Effect.gen(function* () {
     "web_push_subscriptions",
     "web_push_thread_state",
     "web_push_deliveries",
+    "activity_events",
+    "activity_check_ins",
     "t3_custom_migrations",
     "t3_custom_migration_legacy_ledger",
   ]) {
@@ -553,7 +562,7 @@ describe("custom ledger runner", () => {
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(
         (yield* customLedger).map((row) => row.migration_id),
-        [80, 82, 83],
+        [80, 82, 83, 84],
       );
       assert.isFalse(yield* hasPendingMigrations());
       yield* expectCurrent;
@@ -847,7 +856,7 @@ describe("repair round 2 supported no-FTS history", () => {
       yield* expectPreserved(rows);
       assert.deepStrictEqual(
         (yield* customLedger).map((row) => row.migration_id),
-        [80, 82, 83],
+        [80, 82, 83, 84],
       );
       const before = yield* dump;
       assert.deepStrictEqual(yield* runMigrations(), []);

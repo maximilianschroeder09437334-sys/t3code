@@ -248,6 +248,10 @@ const RPC_AGGREGATES = {
   [WS_METHODS.threadNotesRead]: "orchestration",
   [WS_METHODS.threadNotesSave]: "orchestration",
   [WS_METHODS.threadNotesDelete]: "orchestration",
+  [WS_METHODS.activityList]: "orchestration",
+  [WS_METHODS.activitySubscribe]: "orchestration",
+  [WS_METHODS.activityCheckInGet]: "orchestration",
+  [WS_METHODS.activityCheckInMarkSeen]: "orchestration",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";

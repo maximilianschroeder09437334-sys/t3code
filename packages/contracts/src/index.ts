@@ -77,5 +77,6 @@ export * from "./clientRpcPermissions.ts";
 export * from "./threadNotes.ts";
 
 export * from "./hookAutomation.ts";
+export * from "./activityLedger.ts";
 
 export * from "./webPush.ts";

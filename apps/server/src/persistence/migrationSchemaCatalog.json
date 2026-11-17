@@ -1541,6 +1541,36 @@
       "name": "orchestration_v2_message_search_update",
       "tbl_name": "orchestration_v2_projection_messages",
       "sql": "CREATE TRIGGER orchestration_v2_message_search_update\n          AFTER UPDATE OF payload_json ON orchestration_v2_projection_messages\n          BEGIN\n            DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid;\n            INSERT INTO orchestration_v2_message_search (rowid, text)\n            VALUES (new.rowid, json_extract(new.payload_json, '$.text'));\n          END"
+    },
+    {
+      "type": "table",
+      "name": "activity_events",
+      "tbl_name": "activity_events",
+      "sql": "CREATE TABLE activity_events (sequence INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, idempotency_key TEXT NOT NULL UNIQUE, at TEXT NOT NULL, kind TEXT NOT NULL, project_id TEXT NOT NULL, thread_id TEXT NOT NULL, feature_key TEXT, summary TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}')"
+    },
+    {
+      "type": "index",
+      "name": "activity_events_at",
+      "tbl_name": "activity_events",
+      "sql": "CREATE INDEX activity_events_at ON activity_events(at)"
+    },
+    {
+      "type": "index",
+      "name": "activity_events_thread",
+      "tbl_name": "activity_events",
+      "sql": "CREATE INDEX activity_events_thread ON activity_events(thread_id, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "activity_events_feature",
+      "tbl_name": "activity_events",
+      "sql": "CREATE INDEX activity_events_feature ON activity_events(feature_key, sequence)"
+    },
+    {
+      "type": "table",
+      "name": "activity_check_ins",
+      "tbl_name": "activity_check_ins",
+      "sql": "CREATE TABLE activity_check_ins (user_key TEXT PRIMARY KEY, seen_at TEXT NOT NULL, seen_sequence INTEGER NOT NULL)"
     }
   ],
   "histories": {
@@ -2200,6 +2230,7 @@
     "custom80": [242],
     "custom82": [243, 244, 245, 246, 247, 248],
     "custom83": [249, 250, 251, 252, 253],
+    "custom84": [257, 258, 259, 260, 261],
     "nofts69": [
       45, 46, 5, 6, 0, 1, 2, 3, 85, 86, 87, 14, 43, 58, 79, 55, 17, 42, 44, 59, 60, 53, 10, 11, 180,
       183, 88, 89, 191, 192, 193, 194, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,

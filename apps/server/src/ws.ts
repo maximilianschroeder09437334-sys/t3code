@@ -1,4 +1,5 @@
 import * as WebPushNotifications from "./notifications/WebPushNotifications.ts";
+import * as ActivityLedger from "./activity/ActivityLedger.ts";
 import { HookRegistryError } from "@t3tools/contracts";
 import * as HookAutomation from "./hooks/HookAutomation.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
@@ -1553,6 +1554,7 @@ export const layerWsRpc = (
       const hookRegistry = yield* HookRegistry.HookRegistry;
       const hookAutomation = yield* HookAutomation.HookAutomation;
       const webPush = yield* WebPushNotifications.WebPushNotifications;
+      const activityLedger = yield* ActivityLedger.ActivityLedger;
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
@@ -2690,6 +2692,13 @@ export const layerWsRpc = (
             ),
         [WS_METHODS.hooksUpdateDraft]: (input) => hookRegistry.updateDraft(input),
         [WS_METHODS.hooksCreateDraft]: (input) => hookRegistry.createDraft(input),
+        [WS_METHODS.activityList]: (input) =>
+          activityLedger.list(input).pipe(Effect.map((events) => ({ events }))),
+        [WS_METHODS.activitySubscribe]: (input) => activityLedger.stream(input),
+        // Check-ins belong to the authenticated subject, so every device of one owner shares one.
+        [WS_METHODS.activityCheckInGet]: () => activityLedger.sinceCheckIn(currentSession.subject),
+        [WS_METHODS.activityCheckInMarkSeen]: (input) =>
+          activityLedger.markSeen(currentSession.subject, input.seenSequence),
         [WS_METHODS.webPushInfo]: () => webPush.info(currentSessionId),
         [WS_METHODS.webPushPrepare]: () => webPush.prepare(),
         [WS_METHODS.webPushSubscribe]: (input) => webPush.subscribe(currentSessionId, input),
@@ -3737,6 +3746,7 @@ export const layer = Layer.unwrap(
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const hookAutomation = yield* HookAutomation.HookAutomation;
     const webPush = yield* WebPushNotifications.WebPushNotifications;
+    const activityLedger = yield* ActivityLedger.ActivityLedger;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const npmRelease = yield* NpmRelease.NpmRelease;
     const pullRequests = yield* PullRequestService.PullRequestService;
@@ -3825,9 +3835,10 @@ export const layer = Layer.unwrap(
               Layer.provide(AcpRegistrySessions.layer),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(
-                Layer.merge(
+                Layer.mergeAll(
                   Layer.succeed(HookAutomation.HookAutomation, hookAutomation),
                   Layer.succeed(WebPushNotifications.WebPushNotifications, webPush),
+                  Layer.succeed(ActivityLedger.ActivityLedger, activityLedger),
                 ),
               ),
               Layer.provide(ProviderMaintenanceRunner.layer),

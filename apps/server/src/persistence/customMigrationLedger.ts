@@ -7,6 +7,7 @@ import { validateMigrationSchema } from "./migrationSchemaValidation.ts";
 import ThreadNotes from "./Migrations/080_ThreadNotes.ts";
 import HookAutomation from "./Migrations/082_HookAutomation.ts";
 import WebPushNotifications from "./Migrations/083_WebPushNotifications.ts";
+import ActivityLedger from "./Migrations/084_ActivityLedger.ts";
 
 // Maxi's own migrations live in a separate ledger so they never occupy an official migration id.
 // Ids 80-83 are the names of the files and of the rows the pre-merge build wrote into the official
@@ -16,12 +17,14 @@ export const customMigrationFiles = [
   [81, "ScheduledTaskThreadMode"],
   [82, "HookAutomation"],
   [83, "WebPushNotifications"],
+  [84, "ActivityLedger"],
 ] as const;
 
 const runnableCustomMigrations = [
   [80, "ThreadNotes", ThreadNotes],
   [82, "HookAutomation", HookAutomation],
   [83, "WebPushNotifications", WebPushNotifications],
+  [84, "ActivityLedger", ActivityLedger],
 ] as const;
 
 type Probe =
@@ -181,6 +184,46 @@ const customEffects: Record<number, readonly Probe[]> = {
       table: "web_push_deliveries",
       index: "web_push_delivery_due",
       columns: ["status", "next_at"],
+    },
+  ],
+  84: [
+    {
+      kind: "table",
+      table: "activity_events",
+      columns: [
+        col("sequence", "INTEGER", false, "", 1),
+        col("id", "TEXT"),
+        col("idempotency_key", "TEXT"),
+        col("at", "TEXT"),
+        col("kind", "TEXT"),
+        col("project_id", "TEXT"),
+        col("thread_id", "TEXT"),
+        col("feature_key", "TEXT", false),
+        col("summary", "TEXT"),
+        col("details_json", "TEXT", true, "'{}'"),
+      ],
+    },
+    { kind: "index", table: "activity_events", index: "activity_events_at", columns: ["at"] },
+    {
+      kind: "index",
+      table: "activity_events",
+      index: "activity_events_thread",
+      columns: ["thread_id", "sequence"],
+    },
+    {
+      kind: "index",
+      table: "activity_events",
+      index: "activity_events_feature",
+      columns: ["feature_key", "sequence"],
+    },
+    {
+      kind: "table",
+      table: "activity_check_ins",
+      columns: [
+        col("user_key", "TEXT", false, "", 1),
+        col("seen_at", "TEXT"),
+        col("seen_sequence", "INTEGER"),
+      ],
     },
   ],
 };
@@ -432,7 +475,7 @@ export const validateCustomMigrationState = Effect.fn("customMigrationLedger.val
   }
   const legacy = recorded.filter((row) => row.origin === "legacy");
   const count = legacy.length;
-  const expectedIds = [80, 82, 83];
+  const expectedIds = [80, 82, 83, 84];
   const executed = recorded.filter((row) => row.origin !== "legacy");
   if (
     recorded.some(

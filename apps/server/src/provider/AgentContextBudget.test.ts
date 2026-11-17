@@ -1,4 +1,5 @@
 import * as HookAutomation from "../hooks/HookAutomation.ts";
+import * as ActivityLedger from "../activity/ActivityLedger.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -117,6 +118,7 @@ const codexAdditionalContext = () =>
 
 const layerAdvertisedTools = McpHttpServer.layerTools.pipe(
   Layer.provide(Layer.mock(HookAutomation.HookAutomation)({})),
+  Layer.provide(Layer.mock(ActivityLedger.ActivityLedger)({})),
   Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
   Layer.provide(toolHandlerServices),
 );
