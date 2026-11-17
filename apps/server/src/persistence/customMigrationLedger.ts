@@ -9,6 +9,7 @@ import HookAutomation from "./Migrations/082_HookAutomation.ts";
 import WebPushNotifications from "./Migrations/083_WebPushNotifications.ts";
 import ActivityLedger from "./Migrations/084_ActivityLedger.ts";
 import NotionOutbox from "./Migrations/085_NotionOutbox.ts";
+import NotionRollup from "./Migrations/086_NotionRollup.ts";
 
 // Maxi's own migrations live in a separate ledger so they never occupy an official migration id.
 // Ids 80-83 are the names of the files and of the rows the pre-merge build wrote into the official
@@ -20,6 +21,7 @@ export const customMigrationFiles = [
   [83, "WebPushNotifications"],
   [84, "ActivityLedger"],
   [85, "NotionOutbox"],
+  [86, "NotionRollup"],
 ] as const;
 
 const runnableCustomMigrations = [
@@ -28,6 +30,7 @@ const runnableCustomMigrations = [
   [83, "WebPushNotifications", WebPushNotifications],
   [84, "ActivityLedger", ActivityLedger],
   [85, "NotionOutbox", NotionOutbox],
+  [86, "NotionRollup", NotionRollup],
 ] as const;
 
 type Probe =
@@ -261,6 +264,37 @@ const customEffects: Record<number, readonly Probe[]> = {
         col("target", "TEXT", true, "", 1),
         col("page_key", "TEXT", true, "", 2),
         col("page_id", "TEXT"),
+      ],
+    },
+  ],
+  86: [
+    {
+      kind: "index",
+      table: "notion_rollup_members",
+      index: "notion_rollup_members_day",
+      columns: ["project_id", "day", "event_sequence"],
+    },
+    {
+      kind: "table",
+      table: "notion_rollups",
+      columns: [
+        col("project_id", "TEXT", true, "", 1),
+        col("day", "TEXT", true, "", 2),
+        col("status", "TEXT", true, "'pending'"),
+        col("page_id", "TEXT", false),
+        col("through_sequence", "INTEGER"),
+        col("synced_sequence", "INTEGER", true, "0"),
+        col("attempts", "INTEGER", true, "0"),
+        col("next_at", "INTEGER", true, "0"),
+      ],
+    },
+    {
+      kind: "table",
+      table: "notion_rollup_members",
+      columns: [
+        col("event_sequence", "INTEGER", false, "", 1),
+        col("project_id", "TEXT"),
+        col("day", "TEXT"),
       ],
     },
   ],
@@ -513,7 +547,7 @@ export const validateCustomMigrationState = Effect.fn("customMigrationLedger.val
   }
   const legacy = recorded.filter((row) => row.origin === "legacy");
   const count = legacy.length;
-  const expectedIds = [80, 82, 83, 84, 85];
+  const expectedIds = [80, 82, 83, 84, 85, 86];
   const executed = recorded.filter((row) => row.origin !== "legacy");
   if (
     recorded.some(

@@ -288,6 +288,7 @@ describe("custom-through-83 histories", () => {
               [83, "WebPushNotifications"],
               [84, "ActivityLedger"],
               [85, "NotionOutbox"],
+              [86, "NotionRollup"],
             ]
               .filter(([id]) => (id as number) > 79 + count)
               .map(([id, name]) => [id, name, "executed"]),
@@ -450,6 +451,7 @@ describe("official histories", () => {
           [83, "WebPushNotifications", "executed"],
           [84, "ActivityLedger", "executed"],
           [85, "NotionOutbox", "executed"],
+          [86, "NotionRollup", "executed"],
         ],
       );
       yield* expectCurrent;
@@ -477,6 +479,7 @@ describe("official histories", () => {
           [83, "executed"],
           [84, "executed"],
           [85, "executed"],
+          [86, "executed"],
         ],
       );
       yield* expectCurrent;
@@ -496,6 +499,8 @@ describe("official histories", () => {
         "web_push_thread_state",
         "web_push_deliveries",
         "activity_events",
+        "notion_rollup_members",
+        "notion_rollups",
         "notion_outbox",
         "notion_sync_cursor",
         "notion_sync_pages",
@@ -538,6 +543,8 @@ const withoutCustomTables = Effect.gen(function* () {
     "web_push_thread_state",
     "web_push_deliveries",
     "activity_events",
+    "notion_rollup_members",
+    "notion_rollups",
     "notion_outbox",
     "notion_sync_cursor",
     "notion_sync_pages",
@@ -572,7 +579,7 @@ describe("custom ledger runner", () => {
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(
         (yield* customLedger).map((row) => row.migration_id),
-        [80, 82, 83, 84, 85],
+        [80, 82, 83, 84, 85, 86],
       );
       assert.isFalse(yield* hasPendingMigrations());
       yield* expectCurrent;
@@ -866,7 +873,7 @@ describe("repair round 2 supported no-FTS history", () => {
       yield* expectPreserved(rows);
       assert.deepStrictEqual(
         (yield* customLedger).map((row) => row.migration_id),
-        [80, 82, 83, 84, 85],
+        [80, 82, 83, 84, 85, 86],
       );
       const before = yield* dump;
       assert.deepStrictEqual(yield* runMigrations(), []);

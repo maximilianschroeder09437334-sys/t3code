@@ -1601,6 +1601,24 @@
       "name": "notion_sync_pages",
       "tbl_name": "notion_sync_pages",
       "sql": "CREATE TABLE notion_sync_pages (target TEXT NOT NULL, page_key TEXT NOT NULL, page_id TEXT NOT NULL, PRIMARY KEY (target, page_key))"
+    },
+    {
+      "type": "table",
+      "name": "notion_rollups",
+      "tbl_name": "notion_rollups",
+      "sql": "CREATE TABLE notion_rollups (project_id TEXT NOT NULL, day TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', page_id TEXT, through_sequence INTEGER NOT NULL, synced_sequence INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (project_id, day))"
+    },
+    {
+      "type": "table",
+      "name": "notion_rollup_members",
+      "tbl_name": "notion_rollup_members",
+      "sql": "CREATE TABLE notion_rollup_members (event_sequence INTEGER PRIMARY KEY, project_id TEXT NOT NULL, day TEXT NOT NULL)"
+    },
+    {
+      "type": "index",
+      "name": "notion_rollup_members_day",
+      "tbl_name": "notion_rollup_members",
+      "sql": "CREATE INDEX notion_rollup_members_day ON notion_rollup_members(project_id, day, event_sequence)"
     }
   ],
   "histories": {
@@ -2609,7 +2627,8 @@
       161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208,
       214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 205, 262
     ],
-    "custom85": [263, 264, 265, 266]
+    "custom85": [263, 264, 265, 266],
+    "custom86": [267, 268, 269]
   },
   "repairSources": {
     "repair26-provider": {

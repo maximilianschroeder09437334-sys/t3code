@@ -39,9 +39,10 @@ export const makeNotionClient = Effect.fn("NotionClient.make")(function* (
                 Effect.mapError(() => new NotionRequestError({ status: null, retryAfterMs: 0 })),
               );
         const response = yield* Effect.tryPromise({
-          try: () =>
+          try: (signal) =>
             fetcher(`https://api.notion.com/v1/${path}`, {
               method,
+              signal,
               headers: {
                 Authorization: `Bearer ${token}`,
                 "Notion-Version": "2025-09-03",
@@ -50,7 +51,10 @@ export const makeNotionClient = Effect.fn("NotionClient.make")(function* (
               ...(encoded === undefined ? {} : { body: encoded }),
             }),
           catch: () => new NotionRequestError({ status: null, retryAfterMs: 0 }),
-        });
+        }).pipe(
+          Effect.timeout("30 seconds"),
+          Effect.mapError(() => new NotionRequestError({ status: null, retryAfterMs: 0 })),
+        );
         if (!response.ok) {
           const retry = Number(response.headers.get("retry-after"));
           const retryAfterMs = Number.isFinite(retry) ? Math.max(0, retry * 1000) : 0;
@@ -66,7 +70,10 @@ export const makeNotionClient = Effect.fn("NotionClient.make")(function* (
         return yield* Effect.tryPromise({
           try: () => response.json() as Promise<unknown>,
           catch: () => new NotionRequestError({ status: null, retryAfterMs: 0 }),
-        });
+        }).pipe(
+          Effect.timeout("30 seconds"),
+          Effect.mapError(() => new NotionRequestError({ status: null, retryAfterMs: 0 })),
+        );
       }),
     );
   });

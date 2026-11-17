@@ -27,12 +27,36 @@ it.layer(layer)("NotionOutbox", (it) => {
       assert.strictEqual(checkpoint?.sequence, first.at(-1)?.event_sequence);
       const [count] = yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM notion_outbox`;
       assert.strictEqual(count?.count, 500);
+      const [members] = yield* sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM notion_rollup_members`;
+      assert.strictEqual(members?.count, 500);
       yield* sql`DROP TRIGGER reject_cursor`;
       const second = yield* outbox.capture(500);
       const last = yield* outbox.capture(500);
       assert.strictEqual(second.length, 500);
       assert.strictEqual(last.length, 51);
       assert.strictEqual((yield* outbox.capture(500)).length, 0);
+      yield* sql`DELETE FROM notion_rollup_members WHERE event_sequence = 1`;
+      assert.strictEqual(yield* outbox.backfillRollups(500), 500);
+      assert.strictEqual(yield* outbox.backfillRollups(500), 500);
+      assert.strictEqual(yield* outbox.backfillRollups(500), 51);
+      assert.strictEqual(yield* outbox.backfillRollups(500), 0);
+      const [backfilled] = yield* sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM notion_rollup_members`;
+      assert.strictEqual(backfilled?.count, 1051);
+      const [rollup] = yield* outbox.rollupsDue("2026-01-02", 0, 10);
+      assert.strictEqual(rollup?.day, "2026-01-01");
+      assert.isTrue(yield* outbox.beginRollup("project", "2026-01-01"));
+      yield* outbox.recover();
+      assert.strictEqual((yield* outbox.rollupsFallback("project", 10)).length, 1);
+      assert.isFalse(yield* outbox.ackRollup("other", "2026-01-01", "daily", 500));
+      assert.isTrue(yield* outbox.ackRollup("project", "2026-01-01", "daily", 500));
+      assert.strictEqual((yield* outbox.rollupsDue("2026-01-02", 0, 10)).length, 1);
+      yield* outbox.fallbackRollup("project", "2026-01-01", "daily");
+      assert.isTrue(yield* outbox.ackRollup("project", "2026-01-01", "daily", 1051));
+      assert.strictEqual((yield* outbox.rollupsDue("2026-01-02", 0, 10)).length, 0);
       assert.deepStrictEqual(
         [...first, ...second, ...last].map((r) => r.event_sequence),
         Array.from({ length: 1051 }, (_, i) => i + 1),
@@ -86,6 +110,12 @@ it.layer(layer)("NotionOutbox", (it) => {
       assert.isTrue(yield* outbox.begin(5, "creating"));
       yield* outbox.rejected(5, null, 4000, 0);
       assert.isTrue((yield* outbox.fallback(10)).some((row) => row.event_sequence === 5));
+      assert.isTrue(yield* outbox.reserveAux(6, "target", "week:project:2026-W01"));
+      assert.isFalse(yield* outbox.reserveAux(7, "target", "week:project:2026-W01"));
+      yield* outbox.recover();
+      assert.isFalse(yield* outbox.ackAux("other", 6, "week-page"));
+      assert.isTrue(yield* outbox.ackAux("project", 6, "week-page"));
+      assert.strictEqual(yield* outbox.getPage("target", "week:project:2026-W01"), "week-page");
     }),
   );
   it("backs off and sends access failures or repeated errors to fallback", () => {
@@ -97,5 +127,6 @@ it.layer(layer)("NotionOutbox", (it) => {
     for (const code of [401, 403, 404])
       assert.strictEqual(NotionOutbox.retryDecision(0, code, 100).status, "fallback");
     assert.strictEqual(NotionOutbox.retryDecision(4, 500, 100).status, "fallback");
+    assert.strictEqual(NotionOutbox.berlinDay("2026-11-16T23:30:00.000Z"), "2026-11-17");
   });
 });

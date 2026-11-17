@@ -28,6 +28,17 @@ const List = Tool.make("t3_notion_outbox_list", {
         target: Schema.NullOr(Schema.String),
       }),
     ),
+    rollups: Schema.Array(
+      Schema.Struct({
+        day: Schema.String,
+        pageId: Schema.NullOr(Schema.String),
+        target: Schema.NullOr(Schema.String),
+        summary: Schema.String,
+        lastStep: Schema.String,
+        nextStep: Schema.String,
+        throughSequence: Schema.Int,
+      }),
+    ),
   }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
@@ -35,11 +46,14 @@ const List = Tool.make("t3_notion_outbox_list", {
 });
 const Ack = Tool.make("t3_notion_outbox_ack", {
   description:
-    "Acknowledge a reconciled item after confirming its Notion page and event block exist.",
+    "Confirm a reconciled event with sequence, pageId and blockId; an auxiliary week/day/topic with sequence, pageId and auxiliary=true; or a completed daily rollup with day, pageId and the listed throughSequence. Preserve existing content.",
   parameters: Schema.Struct({
-    sequence: Schema.Int.check(Schema.isGreaterThan(0)),
+    sequence: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+    day: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/))),
     pageId: Schema.String.check(Schema.isMinLength(1)),
-    blockId: Schema.String.check(Schema.isMinLength(1)),
+    blockId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1))),
+    auxiliary: Schema.optionalKey(Schema.Boolean),
+    throughSequence: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
   }),
   success: Schema.Struct({ acknowledged: Schema.Boolean }),
   failure: OrchestratorMcpFailure,

@@ -39,3 +39,21 @@ it.effect("paces Notion requests and reports retry-after without exposing the to
     assert.strictEqual(headers["Notion-Version"], "2025-09-03");
   }),
 );
+
+it.effect("times out a stalled request without retrying an ambiguous write", () =>
+  Effect.gen(function* () {
+    let calls = 0;
+    const fetcher: typeof fetch = () => {
+      calls++;
+      return new Promise(() => {});
+    };
+    const client = yield* makeNotionClient("sensitive", fetcher);
+    const fiber = yield* client
+      .request("POST", "pages", {})
+      .pipe(Effect.asVoid, Effect.flip, Effect.forkChild);
+    yield* TestClock.adjust("30 seconds");
+    const error = yield* Fiber.join(fiber);
+    assert.isNull(error.status);
+    assert.strictEqual(calls, 1);
+  }),
+);

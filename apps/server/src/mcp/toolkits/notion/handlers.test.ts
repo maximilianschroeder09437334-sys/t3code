@@ -90,6 +90,34 @@ const call = (name: string, arguments_: Record<string, unknown>, as: ThreadId = 
     );
   });
 it.layer(layer)("notion outbox tools", (it) => {
+  it.effect("requires auxiliary acknowledgement before resuming an uncertain parent create", () =>
+    Effect.gen(function* () {
+      const ledger = yield* ActivityLedger.ActivityLedger;
+      const outbox = yield* NotionOutbox.NotionOutbox;
+      const { event } = yield* ledger.append({
+        key: "auxiliary",
+        kind: "progress",
+        projectId: caller.projectId,
+        threadId: caller.id,
+        summary: "auxiliary",
+      });
+      yield* outbox.capture(10);
+      assert.isTrue(yield* outbox.reserveAux(event.sequence, "source", "week:test"));
+      yield* outbox.recover();
+      yield* call("t3_notion_outbox_ack", {
+        sequence: event.sequence,
+        pageId: "parent",
+        blockId: "wrong",
+      });
+      assert.strictEqual((yield* outbox.fallbackForProject(caller.projectId, 10)).length, 1);
+      yield* call("t3_notion_outbox_ack", {
+        sequence: event.sequence,
+        pageId: "parent",
+        auxiliary: true,
+      });
+      assert.strictEqual(yield* outbox.getPage("source", "week:test"), "parent");
+    }),
+  );
   it.effect("lists and acknowledges only the caller's project", () =>
     Effect.gen(function* () {
       const ledger = yield* ActivityLedger.ActivityLedger;
@@ -111,10 +139,21 @@ it.layer(layer)("notion outbox tools", (it) => {
       yield* outbox.capture(10);
       yield* outbox.fail(own.event.sequence, 403, 0);
       yield* outbox.fail(theirs.event.sequence, 403, 0);
+      assert.isTrue(yield* outbox.beginRollup(caller.projectId, "1970-01-01"));
+      yield* outbox.rejectRollup(caller.projectId, "1970-01-01", null, 0, 0);
       const list = yield* call("t3_notion_outbox_list", { limit: 10 });
       assert.isFalse(list.isError);
       assert.include(JSON.stringify(list), "own event");
       assert.notInclude(JSON.stringify(list), "other event");
+      assert.include(JSON.stringify(list), "1970-01-01");
+      const invalid = yield* call("t3_notion_outbox_ack", {
+        sequence: own.event.sequence,
+        day: "1970-01-01",
+        pageId: "page",
+        blockId: "block",
+      });
+      assert.isTrue(invalid.isError);
+      assert.strictEqual((yield* outbox.fallbackForProject(caller.projectId, 10)).length, 1);
       yield* call("t3_notion_outbox_ack", {
         sequence: theirs.event.sequence,
         pageId: "page",
@@ -127,6 +166,12 @@ it.layer(layer)("notion outbox tools", (it) => {
         blockId: "block",
       });
       assert.strictEqual((yield* outbox.fallbackForProject(caller.projectId, 10)).length, 0);
+      yield* call("t3_notion_outbox_ack", {
+        day: "1970-01-01",
+        pageId: "daily-page",
+        throughSequence: own.event.sequence,
+      });
+      assert.strictEqual((yield* outbox.rollupsFallback(caller.projectId, 10)).length, 0);
     }),
   );
 });

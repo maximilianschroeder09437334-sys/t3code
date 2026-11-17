@@ -2,6 +2,8 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
+import * as DateTime from "effect/DateTime";
+import { ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -11,13 +13,15 @@ import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ActivityLedger from "./ActivityLedger.ts";
-import { makeNotionClient, NotionRequestError } from "./NotionClient.ts";
+import { makeNotionClient } from "./NotionClient.ts";
 import * as NotionOutbox from "./NotionOutbox.ts";
-import { syncOne, type Client } from "./NotionSync.ts";
+import * as NotionSync from "./NotionSync.ts";
+import type { Client } from "./NotionSync.ts";
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const outbox = yield* NotionOutbox.NotionOutbox;
+    const sync = yield* NotionSync.NotionSync;
     const ledger = yield* ActivityLedger.ActivityLedger;
     const settings = yield* ServerSettings.ServerSettingsService;
     const files = yield* FileSystem.FileSystem;
@@ -47,29 +51,50 @@ export const layer = Layer.effectDiscard(
       while ((yield* outbox.capture(500)).length === 500) {
         /* Drain every durable page before advancing to live work. */
       }
+      while ((yield* outbox.backfillRollups(500)) === 500) {}
       const config = (yield* settings.getSettings).notionSync;
       if (config === null) return;
       const token = yield* tokenFor(config.token);
+      const now = yield* Clock.currentTimeMillis;
+      if (token === "") {
+        const rows = yield* outbox.due(now, 100);
+        for (const row of rows) {
+          const [event] = yield* ledger.listAfter(row.event_sequence - 1, 1);
+          if (event?.sequence !== row.event_sequence)
+            return yield* Effect.die("Outbox event is missing");
+          yield* sync.reportMissingToken(event);
+          yield* outbox.rejected(row.event_sequence, 401, now, 0);
+        }
+        const today = NotionOutbox.berlinDay(DateTime.formatIso(DateTime.makeUnsafe(now)));
+        const rollups = yield* outbox.rollupsDue(today, now, 100);
+        for (const row of rollups) {
+          const [event] = yield* ledger.listAfter(row.through_sequence - 1, 1);
+          if (event?.sequence !== row.through_sequence)
+            return yield* Effect.die("Rollup event is missing");
+          yield* sync.reportMissingToken(event);
+          yield* outbox.rejectRollup(row.project_id, row.day, 401, now, 0);
+        }
+        return;
+      }
       let cached = yield* Ref.get(cache);
       if (cached?.token !== token) {
-        const client: Client =
-          token === ""
-            ? {
-                request: () =>
-                  Effect.fail(new NotionRequestError({ status: 401, retryAfterMs: 0 })),
-              }
-            : yield* makeNotionClient(token);
+        const client: Client = yield* makeNotionClient(token);
         cached = { token, client };
         yield* Ref.set(cache, cached);
       }
-      const now = yield* Clock.currentTimeMillis;
       const rows = yield* outbox.due(now, 100);
       for (const row of rows) {
         const [event] = yield* ledger.listAfter(row.event_sequence - 1, 1);
         if (event?.sequence !== row.event_sequence)
           return yield* Effect.die("Outbox event is missing");
         const target = config.projects[event.projectId] ?? null;
-        yield* syncOne({ row, event, target, client: cached.client, now });
+        yield* sync.syncOne({ row, event, target, client: cached.client, now });
+      }
+      const today = NotionOutbox.berlinDay(DateTime.formatIso(DateTime.makeUnsafe(now)));
+      const rollups = yield* outbox.rollupsDue(today, now, 100);
+      for (const row of rollups) {
+        const target = config.projects[ProjectId.make(row.project_id)] ?? null;
+        yield* sync.syncDaily({ row, target, client: cached.client, now });
       }
     });
     yield* forkParked(
