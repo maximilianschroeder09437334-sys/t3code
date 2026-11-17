@@ -79,6 +79,22 @@ const RemoteCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   failureMode: "return",
 });
 
+export const requireRemoteAgentModelPolicy = Effect.fn(
+  "RemoteDelegation.requireRemoteAgentModelPolicy",
+)(function* (
+  scope: McpInvocationContext.McpInvocationScope,
+  environmentId: EnvironmentId,
+  forwarding: PeerForwarding.PeerForwarding["Service"],
+) {
+  const remote = yield* forwarding.call(scope, RemoteCapabilitiesTool, environmentId, {});
+  if (remote.features.agentModelPolicyVersion !== 1)
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message:
+        "The linked environment cannot verify agent model policy; update it before starting agent work there.",
+    });
+});
+
 /**
  * `delegate_task` to a linked environment. The task's child is an ordinary
  * thread there, launched through the link; the parent here records the task
@@ -344,6 +360,8 @@ const make = Effect.gen(function* () {
       const key = input.clientRequestId ?? (yield* random.uuidV4());
       const task = taskPrompt(input);
       const title = input.title ?? parent.thread.title;
+      yield* forwarding.checkLaunch(scope, target.environmentId, { runtimeMode });
+      yield* requireRemoteAgentModelPolicy(scope, target.environmentId, forwarding);
       const launched = yield* forwarding.call(
         scope,
         ProjectToolkit.tools.t3_thread_launch,
@@ -354,6 +372,9 @@ const make = Effect.gen(function* () {
           modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
           ...(runtimeMode === undefined ? {} : { runtimeMode }),
           ...(interactionMode === undefined ? {} : { interactionMode }),
+          ...(input.planningPurpose === undefined
+            ? {}
+            : { planningPurpose: input.planningPurpose }),
           message: task,
           clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
           // The thread there shows it is this thread's subagent, with a way back.

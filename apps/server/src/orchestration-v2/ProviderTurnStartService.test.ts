@@ -107,6 +107,17 @@ function startWithMissingWorktree(
     [managedWorktreesDir]: managedWorktreesDir,
     [`${managedWorktreesDir}/project`]: `${managedWorktreesDir}/project`,
   },
+  agentOpus = false,
+  intent?: {
+    readonly modelSelection: {
+      readonly instanceId: ReturnType<typeof ProviderInstanceId.make>;
+      readonly model: string;
+      readonly options: ReadonlyArray<{ readonly id: string; readonly value: string }>;
+    };
+    readonly interactionMode?: "plan";
+    readonly planningPurpose?: string;
+  },
+  actor: "agent" | "user" = "agent",
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -125,6 +136,13 @@ function startWithMissingWorktree(
   const projection = {
     thread: {
       id: threadId,
+      ...(agentOpus
+        ? {
+            createdBy: actor,
+            interactionMode: intent?.interactionMode ?? "default",
+            ...(intent === undefined ? {} : { agentExecutionIntent: intent }),
+          }
+        : {}),
       projectId: ProjectId.make("project_provider_turn_start_projection_failure"),
       branch: "feature/restore",
       worktreePath,
@@ -133,6 +151,16 @@ function startWithMissingWorktree(
     runs: [
       {
         id: runId,
+        ...(agentOpus
+          ? {
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                model: "claude-opus-5-5",
+                options: [{ id: "effort", value: "medium" }],
+              },
+              providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            }
+          : {}),
         status: "starting",
         rootNodeId,
         activeAttemptId: attemptId,
@@ -151,7 +179,7 @@ function startWithMissingWorktree(
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
   let projectionReadCount = 0;
-  const writeIfRunCurrent = vi.fn(() =>
+  const writeIfRunCurrent = vi.fn((_input: unknown) =>
     Effect.succeed({ committed: true, storedEvents: [] } as never),
   );
   const startRootRun = vi.fn(() => Effect.void);
@@ -161,6 +189,29 @@ function startWithMissingWorktree(
   const layer = ProviderTurnStart.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Layer.succeed(ProviderTurnStart.ProviderTurnStartModels, {
+          getProviders: Effect.succeed([
+            {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              models: [
+                {
+                  slug: "claude-opus-5-5",
+                  name: "Opus",
+                  capabilities: {
+                    optionDescriptors: [
+                      {
+                        id: "effort",
+                        type: "select",
+                        label: "Effort",
+                        options: [{ id: "medium", label: "Medium" }],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ] as never),
+        }),
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
         Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
         IdAllocator.layer,
@@ -242,6 +293,88 @@ function startWithMissingWorktree(
     projectionReads: () => projectionReadCount,
   };
 }
+
+it("blocks an agent-created Opus execution before provider start on resume", async () => {
+  const fixture = startWithMissingWorktree("/tmp/project", undefined, true);
+  await expect(fixture.start).rejects.toBeUndefined();
+  expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn-item.updated",
+          payload: expect.objectContaining({ title: "Agent model selection blocked" }),
+        }),
+      ]),
+    }),
+  );
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
+
+it("rejects a resumed agent turn when the run selection differs from recorded intent", async () => {
+  const fixture = startWithMissingWorktree("/tmp/project", undefined, true, {
+    modelSelection: {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "high" }],
+    },
+    interactionMode: "plan",
+    planningPurpose: "Design the bounded retry policy",
+  });
+  await expect(fixture.start).rejects.toBeUndefined();
+  expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn-item.updated",
+          payload: expect.objectContaining({ title: "Agent model selection blocked" }),
+        }),
+      ]),
+    }),
+  );
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
+
+it("rejects resumed Opus plan mode without a recorded bounded purpose", async () => {
+  const fixture = startWithMissingWorktree("/tmp/project", undefined, true, {
+    modelSelection: {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "medium" }],
+    },
+    interactionMode: "plan",
+  });
+  await expect(fixture.start).rejects.toBeUndefined();
+  expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn-item.updated",
+          payload: expect.objectContaining({ title: "Agent model selection blocked" }),
+        }),
+      ]),
+    }),
+  );
+});
+
+it("does not apply the agent policy to a human-created Opus thread", async () => {
+  const fixture = startWithMissingWorktree("/tmp/project", undefined, true, undefined, "user");
+  await expect(fixture.start).resolves.toBeDefined();
+  expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+});
+
+it("accepts explicit bounded Opus planning provenance before workspace recovery", async () => {
+  const fixture = startWithMissingWorktree("/tmp/project", undefined, true, {
+    modelSelection: {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "medium" }],
+    },
+    interactionMode: "plan",
+    planningPurpose: "Design the bounded retry policy",
+  });
+  await expect(fixture.start).resolves.toBeDefined();
+  expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+});
 
 it.each([
   {

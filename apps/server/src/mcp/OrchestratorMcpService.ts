@@ -1,3 +1,4 @@
+import { agentModelPolicy } from "../orchestration-v2/AgentModelPolicy.ts";
 import {
   CommandId,
   type RunId,
@@ -66,7 +67,11 @@ import {
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
 } from "@t3tools/contracts";
-import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
+import {
+  getProviderOptionCurrentValue,
+  modelSelectionsEqual,
+  withLegacyUltracodeEffort,
+} from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -161,6 +166,7 @@ const THREAD_PULL_REQUEST_PREVIEW_LIMIT = 5;
 const THREAD_READ_RESULT_MAX_BYTES = 30_000;
 
 interface ResolvedTarget {
+  readonly provider: ServerProvider;
   readonly modelSelection: ModelSelection;
   readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined;
 }
@@ -1589,6 +1595,19 @@ const make = Effect.gen(function* () {
     }
     instanceId ??= input.parent.thread.modelSelection.instanceId;
 
+    if (
+      requestedInstanceId !== undefined &&
+      input.skipProjectEnablementFilter !== true &&
+      !(yield* threadManagement.isProviderInstanceEnabledForProject({
+        projectId: input.parent.thread.projectId,
+        instanceId,
+      }))
+    ) {
+      return yield* failure(
+        "provider_unavailable",
+        `Provider instance ${instanceId} is not enabled for this project.`,
+      );
+    }
     const provider = input.providers.find((candidate) => candidate.instanceId === instanceId);
     if (provider === undefined) {
       return yield* failure(
@@ -1641,6 +1660,7 @@ const make = Effect.gen(function* () {
     }
 
     const inheritsOptions =
+      requestedModel === undefined &&
       instanceId === inheritedSelection.instanceId &&
       (advertised?.slug ?? model) ===
         (advertisedModel(provider, inheritedSelection.model)?.slug ?? inheritedSelection.model);
@@ -1664,6 +1684,7 @@ const make = Effect.gen(function* () {
     }
     return {
       modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
+      provider,
       supportedRuntimeModes: provider.supportedRuntimeModes,
     };
   });
@@ -2631,6 +2652,7 @@ const make = Effect.gen(function* () {
           threadManagement: true,
           incrementalThreadRead: true,
           scheduledTasks: true,
+          agentModelPolicyVersion: 1,
           maxBatchThreads: 20,
         },
       };
@@ -2643,6 +2665,15 @@ const make = Effect.gen(function* () {
       if (input.target !== undefined && environmentId !== undefined) {
         yield* requireCapability(callerScope);
         const scope = yield* requireThreadScope(callerScope, "delegate_task");
+        if (
+          !input.target?.providerInstanceId ||
+          !input.target.model ||
+          !input.target.options?.length
+        )
+          return yield* failure(
+            "invalid_request",
+            "Agent-created work requires an explicit provider, model and effort.",
+          );
         // The task's child runs as an ordinary thread there; this thread keeps the task.
         const { taskId } = yield* remoteDelegation.delegate(scope, {
           ...input,
@@ -2675,6 +2706,11 @@ const make = Effect.gen(function* () {
           "Delegated tasks require an active run owned by this MCP provider session.",
         );
       }
+      if (!input.target?.providerInstanceId || !input.target.model || !input.target.options?.length)
+        return yield* failure(
+          "invalid_request",
+          "Agent-created work requires an explicit provider, model and effort.",
+        );
       const providers = yield* loadProviders;
       const key = yield* requestKey(input.clientRequestId);
       const commandId = stableCommandId({
@@ -2689,6 +2725,24 @@ const make = Effect.gen(function* () {
         providers,
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
+      const requestedSelection: ModelSelection = {
+        instanceId: input.target.providerInstanceId,
+        model: input.target.model,
+        options: input.target.options,
+      };
+      if (!modelSelectionsEqual(requestedSelection, target.modelSelection))
+        return yield* failure(
+          "invalid_request",
+          "The provider changed the requested model or options.",
+        );
+      const modelPolicyError = agentModelPolicy({
+        selection: requestedSelection,
+        provider: target.provider,
+        interactionMode: input.interactionMode === "plan" ? "plan" : "default",
+        explicitPlan: input.interactionMode === "plan",
+        planningPurpose: input.planningPurpose,
+      });
+      if (modelPolicyError !== null) return yield* failure("invalid_request", modelPolicyError);
       const runtimeMode = yield* resolveRuntimeMode(
         parent.thread.runtimeMode,
         input.runtimeMode,
@@ -2743,6 +2797,13 @@ const make = Effect.gen(function* () {
           task: taskPrompt(input),
           ...(input.title === undefined ? {} : { title: input.title }),
           modelSelection: target.modelSelection,
+          agentExecutionIntent: {
+            modelSelection: requestedSelection,
+            ...(input.interactionMode === "plan" ? { interactionMode: "plan" as const } : {}),
+            ...(input.planningPurpose === undefined
+              ? {}
+              : { planningPurpose: input.planningPurpose }),
+          },
           runtimeMode,
           interactionMode,
           ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
@@ -3027,7 +3088,34 @@ const make = Effect.gen(function* () {
           );
         }
         const parentNodeId = parentRun.rootNodeId;
+        for (const request of input.threads) {
+          if (
+            !request.target?.providerInstanceId ||
+            !request.target.model ||
+            !request.target.options?.length
+          )
+            return yield* failure(
+              "invalid_request",
+              "Agent-created work requires an explicit provider, model and effort.",
+            );
+        }
         const providers = yield* loadProviders;
+        for (const request of input.threads) {
+          const modelPolicyError = agentModelPolicy({
+            selection: {
+              instanceId: request.target?.providerInstanceId,
+              model: request.target?.model,
+              options: request.target?.options,
+            },
+            provider: providers.find(
+              (candidate) => candidate.instanceId === request.target?.providerInstanceId,
+            ),
+            interactionMode: request.interactionMode === "plan" ? "plan" : "default",
+            explicitPlan: request.interactionMode === "plan",
+            planningPurpose: request.planningPurpose,
+          });
+          if (modelPolicyError !== null) return yield* failure("invalid_request", modelPolicyError);
+        }
         const key = yield* requestKey(input.clientRequestId);
         const created = yield* Effect.forEach(
           input.threads,
@@ -3062,6 +3150,16 @@ const make = Effect.gen(function* () {
                 providers,
                 skipProjectEnablementFilter: isRetryOfAcceptedCreation,
               });
+              const requestedSelection: ModelSelection = {
+                instanceId: request.target!.providerInstanceId!,
+                model: request.target!.model!,
+                options: request.target!.options!,
+              };
+              if (!modelSelectionsEqual(requestedSelection, target.modelSelection))
+                return yield* failure(
+                  "invalid_request",
+                  "The provider changed the requested model or options.",
+                );
               const runtimeMode = yield* resolveRuntimeMode(
                 parent.thread.runtimeMode,
                 request.runtimeMode,
@@ -3101,6 +3199,15 @@ const make = Effect.gen(function* () {
                   projectId: parent.thread.projectId,
                   title,
                   modelSelection: target.modelSelection,
+                  agentExecutionIntent: {
+                    modelSelection: requestedSelection,
+                    ...(request.interactionMode === "plan"
+                      ? { interactionMode: "plan" as const }
+                      : {}),
+                    ...(request.planningPurpose === undefined
+                      ? {}
+                      : { planningPurpose: request.planningPurpose }),
+                  },
                   runtimeMode,
                   interactionMode,
                   branch: parent.thread.branch,

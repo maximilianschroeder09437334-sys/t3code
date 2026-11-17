@@ -49,6 +49,39 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
+const fixtureSelection = {
+  instanceId: ProviderInstanceId.make("codex"),
+  model: "gpt-6.1-terra",
+  options: [{ id: "reasoningEffort", value: "medium" }],
+};
+const fixtureProvider = {
+  instanceId: fixtureSelection.instanceId,
+  driver: ProviderDriverKind.make("codex"),
+  enabled: true,
+  installed: true,
+  status: "ready",
+  version: null,
+  auth: { status: "authenticated" },
+  checkedAt: "2026-01-01T00:00:00Z",
+  models: ["gpt-6.1-terra", "gpt-settings"].map((slug) => ({
+    slug,
+    name: slug,
+    isCustom: false,
+    capabilities: {
+      optionDescriptors: [
+        {
+          id: "reasoningEffort",
+          label: "Effort",
+          type: "select",
+          options: [{ id: "medium", label: "Medium" }],
+        },
+      ],
+    },
+  })),
+  slashCommands: [],
+  skills: [],
+} as unknown as ServerProvider;
+
 const clientLaunchHarness = (input: {
   readonly runtimeModeCeiling: RuntimeMode;
   readonly defaultRuntimeMode?: RuntimeMode;
@@ -65,17 +98,14 @@ const clientLaunchHarness = (input: {
   readonly refusedByCeiling?: true;
 }) => {
   const projectId = ProjectId.make("project:client-target");
-  const modelSelection = {
-    instanceId: ProviderInstanceId.make("claudeAgent"),
-    model: "claude-opus",
-  };
+  const modelSelection = fixtureSelection;
   // The project's own default model, which a test can clear between launches.
   const projectDefaults: { model: ModelSelection | null } = {
     model: input.overrideModel === undefined ? modelSelection : null,
   };
   const layerDependencies = Layer.mergeAll(
     Layer.mock(ProviderRegistry.ProviderRegistry)({
-      getProviders: Effect.succeed(input.providers ?? []),
+      getProviders: Effect.succeed(input.providers ?? [fixtureProvider]),
     }),
     ServerSettings.layerTest({
       fallbackModelSelection: input.fallbackModel ?? null,
@@ -225,7 +255,12 @@ it.effect(
           ),
         );
         const result = yield* toolkit
-          .handle("t3_thread_launch", targeted === false ? input : { ...input, projectId })
+          .handle(
+            "t3_thread_launch",
+            targeted === false
+              ? { modelSelection: overrideModel ?? modelSelection, ...input }
+              : { modelSelection: overrideModel ?? modelSelection, ...input, projectId },
+          )
           .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
         return { result: result.at(-1)?.result, launched, projectId, modelSelection };
       });
@@ -273,6 +308,7 @@ it.effect(
       const overrideModel = {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-settings",
+        options: [{ id: "reasoningEffort", value: "medium" }],
       };
       const fromSettings = yield* launchWith("full-access", "full-access", {
         title: "Fix",
@@ -311,7 +347,23 @@ it.effect("a launch steps an inherited mode down to the provider's, and refuses 
             version: null,
             auth: { status: "authenticated" },
             checkedAt: "2026-01-01T00:00:00Z",
-            models: [],
+            models: [
+              {
+                slug: "pi-model",
+                name: "Pi",
+                isCustom: false,
+                capabilities: {
+                  optionDescriptors: [
+                    {
+                      id: "effort",
+                      label: "Effort",
+                      type: "select",
+                      options: [{ id: "medium", label: "Medium" }],
+                    },
+                  ],
+                },
+              },
+            ],
             slashCommands: [],
             skills: [],
             supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
@@ -329,7 +381,11 @@ it.effect("a launch steps an inherited mode down to the provider's, and refuses 
         .handle("t3_thread_launch", {
           projectId,
           title: "Fix",
-          modelSelection: { instanceId: pi, model: "pi-model" },
+          modelSelection: {
+            instanceId: pi,
+            model: "pi-model",
+            options: [{ id: "effort", value: "medium" }],
+          },
           ...(runtimeMode === undefined ? {} : { runtimeMode }),
         })
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
@@ -367,7 +423,16 @@ it.effect("a launch with a model its provider does not advertise creates no thre
               name: "Opus",
               aliases: ["opus"],
               isCustom: false,
-              capabilities: null,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "effort",
+                    label: "Effort",
+                    type: "select",
+                    options: [{ id: "medium", label: "Medium" }],
+                  },
+                ],
+              },
             }
           : { slug: "gpt-5.4", name: "GPT", isCustom: false, capabilities: null },
       ],
@@ -389,7 +454,14 @@ it.effect("a launch with a model its provider does not advertise creates no thre
         .handle("t3_thread_launch", {
           title: "Fix",
           projectId,
-          modelSelection: { instanceId: ProviderInstanceId.make(instanceId), model },
+          modelSelection: {
+            instanceId: ProviderInstanceId.make(instanceId),
+            model,
+            options: [{ id: "effort", value: "medium" }],
+          },
+          ...(instanceId === "claudeAgent" && model.toLowerCase() === "opus"
+            ? { interactionMode: "plan" as const, planningPurpose: "Design a bounded plan" }
+            : {}),
         })
         .pipe(
           Stream.unwrap,
@@ -412,7 +484,11 @@ it.effect("a launch with a model its provider does not advertise creates no thre
     expect(launched).toHaveLength(0);
 
     expect(yield* launchWith("claudeAgent", "Opus")).toMatchObject({
-      modelSelection: { instanceId: "claudeAgent", model: "Opus" },
+      modelSelection: {
+        instanceId: "claudeAgent",
+        model: "Opus",
+        options: [{ id: "effort", value: "medium" }],
+      },
     });
     expect(launched).toHaveLength(1);
   }),
@@ -433,6 +509,7 @@ it.effect("a launch retried with the same clientRequestId replays the first one"
     const launch = (clientRequestId: string | undefined) =>
       toolkit
         .handle("t3_thread_launch", {
+          modelSelection: fixtureSelection,
           title: "Fix",
           projectId,
           message: "Fix the bug",
@@ -699,7 +776,12 @@ it.effect("a launch key of any length or content gives a short id and never a de
     );
     const launch = (clientRequestId: string) =>
       toolkit
-        .handle("t3_thread_launch", { title: "Fix", projectId, clientRequestId })
+        .handle("t3_thread_launch", {
+          modelSelection: fixtureSelection,
+          title: "Fix",
+          projectId,
+          clientRequestId,
+        })
         .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
 
     // Percent-encoding would grow this six times; scratch folders are named from the id.
@@ -727,7 +809,12 @@ it.effect("a retried launch replays after the project loses its default model", 
       ),
     );
     const launch = toolkit
-      .handle("t3_thread_launch", { title: "Fix", projectId, clientRequestId: "fix-1" })
+      .handle("t3_thread_launch", {
+        modelSelection: fixtureSelection,
+        title: "Fix",
+        projectId,
+        clientRequestId: "fix-1",
+      })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
 
     yield* launch;
@@ -774,6 +861,7 @@ it.effect("a launch binds only an existing checkout that is one of the project's
     const launchInto = (worktreePath: string) =>
       toolkit
         .handle("t3_thread_launch", {
+          modelSelection: fixtureSelection,
           title: "Fix",
           projectId,
           workspaceStrategy: { type: "existing_worktree", worktreePath },
@@ -826,6 +914,7 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     const launchFrom = (baseRef: string) =>
       toolkit
         .handle("t3_thread_launch", {
+          modelSelection: fixtureSelection,
           title: "Fix",
           projectId,
           workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: false },
@@ -872,6 +961,7 @@ it.effect("a worktree launch that omits startFromOrigin follows the new-worktree
       );
       yield* toolkit
         .handle("t3_thread_launch", {
+          modelSelection: fixtureSelection,
           title: "Fix",
           projectId,
           workspaceStrategy: {
@@ -912,6 +1002,7 @@ it.effect("a launch into a new worktree creates nothing when its branch collides
     );
     const refused = (yield* toolkit
       .handle("t3_thread_launch", {
+        modelSelection: fixtureSelection,
         title: "Fix",
         projectId,
         workspaceStrategy: { type: "worktree", baseRef: "main", branch: "werkstatt/baseline" },
@@ -987,6 +1078,7 @@ it.effect("a retried worktree launch replays after its base ref is gone", () =>
     );
     const launch = toolkit
       .handle("t3_thread_launch", {
+        modelSelection: fixtureSelection,
         title: "Fix",
         projectId,
         clientRequestId: "fix-worktree",
@@ -1007,7 +1099,11 @@ it.effect("a retried worktree launch replays after its base ref is gone", () =>
 it.effect("a client launches with the fallback for an exhausted default", () =>
   Effect.gen(function* () {
     const launched: ThreadLaunch.ThreadLaunchInput[] = [];
-    const fallbackModel = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" };
+    const fallbackModel = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6.1-sol",
+      options: [{ id: "reasoningEffort", value: "medium" }],
+    };
     const providers: ServerProvider[] = ["claudeAgent", "codex"].map((driver) => ({
       instanceId: ProviderInstanceId.make(driver),
       driver: ProviderDriverKind.make(driver),
@@ -1017,7 +1113,26 @@ it.effect("a client launches with the fallback for an exhausted default", () =>
       version: null,
       auth: { status: "authenticated" },
       checkedAt: "2026-01-01T00:00:00Z",
-      models: [],
+      models:
+        driver === "codex"
+          ? [
+              {
+                slug: "gpt-6.1-sol",
+                name: "Sol",
+                isCustom: false,
+                capabilities: {
+                  optionDescriptors: [
+                    {
+                      id: "reasoningEffort",
+                      label: "Effort",
+                      type: "select",
+                      options: [{ id: "medium", label: "Medium" }],
+                    },
+                  ],
+                },
+              },
+            ]
+          : [],
       slashCommands: [],
       skills: [],
       ...(driver === "claudeAgent"
@@ -1044,6 +1159,7 @@ it.effect("a client launches with the fallback for an exhausted default", () =>
       .handle("t3_thread_launch", {
         projectId,
         title: "Fallback",
+        modelSelection: fallbackModel,
       })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(result.at(-1)?.result).toMatchObject({
@@ -1229,5 +1345,208 @@ it.effect("an update the project refuses tells the agent why", () =>
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
 
     expect(refused.at(-1)?.result).toMatchObject({ code: "invalid_request", message: detail });
+  }),
+);
+
+it.effect("blocks an agent launch with inherited or execution Opus selection", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "full-access",
+      launched,
+      providers: [
+        {
+          instanceId: ProviderInstanceId.make("codex"),
+          models: [
+            {
+              slug: "gpt-6.1-terra",
+              name: "Terra",
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "reasoningEffort",
+                    label: "Effort",
+                    type: "select",
+                    options: [{ id: "medium" }],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          models: [
+            {
+              slug: "claude-opus-5-5",
+              name: "Opus",
+              aliases: ["planning-alias"],
+              capabilities: {
+                optionDescriptors: [
+                  { id: "effort", label: "Effort", type: "select", options: [{ id: "medium" }] },
+                ],
+              },
+            },
+          ],
+        },
+      ] as unknown as ServerProvider[],
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    for (const modelSelection of [
+      undefined,
+      {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "medium" }],
+      },
+    ]) {
+      const result = yield* toolkit
+        .handle("t3_thread_launch", {
+          title: "Worker",
+          projectId,
+          ...(modelSelection === undefined ? {} : { modelSelection }),
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      expect(result.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+      expect(launched).toHaveLength(0);
+    }
+    const allowed = yield* toolkit
+      .handle("t3_thread_launch", {
+        title: "Worker",
+        projectId,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-6.1-terra",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(allowed.at(-1)?.result).toMatchObject({ projectId });
+    expect(launched).toHaveLength(1);
+    const missingPurpose = yield* toolkit
+      .handle("t3_thread_launch", {
+        title: "Plan",
+        projectId,
+        interactionMode: "plan",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "planning-alias",
+          options: [{ id: "effort", value: "medium" }],
+        },
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(missingPurpose.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    const badEffort = yield* toolkit
+      .handle("t3_thread_launch", {
+        title: "Worker",
+        projectId,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-6.1-terra",
+          options: [{ id: "reasoningEffort", value: "invalid" }],
+        },
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(badEffort.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    expect(launched).toHaveLength(1);
+    const planning = yield* toolkit
+      .handle("t3_thread_launch", {
+        title: "Plan",
+        projectId,
+        interactionMode: "plan",
+        planningPurpose: "Design the bounded retry policy",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "medium" }],
+        },
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(planning.at(-1)?.result).toMatchObject({ projectId });
+    expect(launched[1]?.interactionMode).toBe("plan");
+    expect(launched[1]?.agentExecutionIntent).toMatchObject({
+      interactionMode: "plan",
+      planningPurpose: "Design the bounded retry policy",
+      modelSelection: { model: "claude-opus-5-5", options: [{ id: "effort", value: "medium" }] },
+    });
+  }),
+);
+
+it.effect.each([
+  { name: "omitted selection", selection: undefined, interactionMode: undefined },
+  {
+    name: "unsupported effort",
+    selection: {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6.1-terra",
+      options: [{ id: "reasoningEffort", value: "unsupported" }],
+    },
+    interactionMode: undefined,
+  },
+  {
+    name: "Opus execution",
+    selection: {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "research-model",
+      options: [{ id: "effort", value: "medium" }],
+    },
+    interactionMode: undefined,
+  },
+  {
+    name: "Opus plan without purpose",
+    selection: {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "research-model",
+      options: [{ id: "effort", value: "medium" }],
+    },
+    interactionMode: "plan" as const,
+  },
+])("rejects $name before launching", ({ selection, interactionMode }) =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const opus = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      models: [
+        {
+          slug: "claude-opus-5-5",
+          name: "Opus",
+          aliases: ["research-model"],
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Reasoning",
+                type: "select",
+                options: [{ id: "medium", label: "Medium" }],
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ServerProvider;
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "full-access",
+      launched,
+      providers: [fixtureProvider, opus],
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const result = yield* toolkit
+      .handle("t3_thread_launch", {
+        title: "Worker",
+        projectId,
+        ...(selection === undefined ? {} : { modelSelection: selection }),
+        ...(interactionMode === undefined ? {} : { interactionMode }),
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(result.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    expect(launched).toHaveLength(0);
   }),
 );

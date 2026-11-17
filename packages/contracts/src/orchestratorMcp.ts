@@ -110,13 +110,13 @@ export const OrchestratorMcpTarget = Schema.Struct({
   options: Schema.optional(
     OrchestratorMcpTargetOptions.annotate({
       description:
-        "Options from `orchestrator_capabilities`, such as {effort:'max'}. Given values override inherited. [] or {} clears.",
+        "Explicit options from `orchestrator_capabilities`, including the reasoning effort; all options must be advertised.",
     }),
   ),
   environmentId: Schema.optional(
     EnvironmentId.annotate({
       description:
-        "Linked environment to run in. Provider and model default to yours; others come from `orchestrator_capabilities` with this `environmentId`.",
+        "Linked environment to run in. Select its provider, model and effort from `orchestrator_capabilities` with this `environmentId`.",
     }),
   ),
   projectId: Schema.optional(
@@ -169,6 +169,7 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
+  planningPurpose: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1000))),
   task: OrchestratorMcpPrompt,
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
@@ -273,6 +274,7 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
+  planningPurpose: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1000))),
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),
   target: Schema.optional(OrchestratorMcpTarget),
@@ -703,6 +705,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     threadManagement: Schema.Boolean,
     incrementalThreadRead: Schema.Boolean,
     scheduledTasks: Schema.Boolean,
+    agentModelPolicyVersion: Schema.optional(Schema.Literal(1)),
     maxBatchThreads: Schema.Number,
   }),
 });

@@ -1,3 +1,4 @@
+import { agentModelPolicy } from "./AgentModelPolicy.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -37,6 +38,7 @@ import { withTurnStartReservation, withWorkspaceLease } from "../workspace/works
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as HookRegistry from "../hooks/HookRegistry.ts";
 import * as HookStagingManager from "../hooks/HookStagingManager.ts";
@@ -184,6 +186,20 @@ export const layerProviderTurnStartHooks = Layer.effect(
   }),
 );
 
+export class ProviderTurnStartModels extends Context.Reference<
+  Pick<ProviderRegistry.ProviderRegistry["Service"], "getProviders">
+>("t3/orchestration-v2/ProviderTurnStartService/ProviderTurnStartModels", {
+  defaultValue: () => ({ getProviders: Effect.succeed([]) }),
+}) {}
+
+export const layerProviderTurnStartModels = Layer.effect(
+  ProviderTurnStartModels,
+  Effect.gen(function* () {
+    const providers = yield* ProviderRegistry.ProviderRegistry;
+    return ProviderTurnStartModels.of({ getProviders: providers.getProviders });
+  }),
+);
+
 export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   never,
@@ -213,6 +229,7 @@ export const layer: Layer.Layer<
     const path = yield* Path.Path;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
+    const providerRegistry = yield* ProviderTurnStartModels;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
@@ -574,6 +591,34 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (
+        projection.thread.createdBy === "agent" ||
+        projection.thread.delegatedFrom !== undefined ||
+        projection.thread.lineage.relationshipToParent === "subagent"
+      ) {
+        const intent = projection.thread.agentExecutionIntent;
+        const providers = yield* providerRegistry.getProviders;
+        const modelPolicyError =
+          intent === undefined || !modelSelectionsEqual(intent.modelSelection, run.modelSelection)
+            ? "Agent selection provenance is missing or does not match this run."
+            : agentModelPolicy({
+                selection: intent.modelSelection,
+                provider: providers.find(
+                  (candidate) => candidate.instanceId === intent.modelSelection.instanceId,
+                ),
+                interactionMode: projection.thread.interactionMode,
+                explicitPlan: intent.interactionMode === "plan",
+                planningPurpose: intent.planningPurpose,
+              });
+        if (modelPolicyError !== null) {
+          yield* settleStartFailure({
+            signal: "agent-model-policy",
+            title: "Agent model selection blocked",
+            error: new Error(modelPolicyError),
+          });
+          return;
+        }
+      }
       if (
         providerMessage.attachments.length === 0 &&
         providerMessage.text.trimStart().startsWith("/")

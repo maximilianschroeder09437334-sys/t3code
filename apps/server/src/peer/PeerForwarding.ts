@@ -54,6 +54,14 @@ export class PeerForwarding extends Context.Service<
       environmentId: EnvironmentId,
       params: Tool.Parameters<T>,
     ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
+    readonly checkLaunch: (
+      scope: Scope,
+      environmentId: EnvironmentId,
+      input: {
+        readonly runtimeMode?: unknown;
+        readonly attachments?: ReadonlyArray<unknown> | undefined;
+      },
+    ) => Effect.Effect<void, OrchestratorMcpFailure>;
     /** `t3_thread_read` there. */
     readonly readThread: (
       scope: Scope,
@@ -145,6 +153,23 @@ const make = Effect.gen(function* () {
       code: "runtime_mode_escalation_denied",
       message: `Linked environment "${label}" was linked with ${access} access, so work there cannot run in ${requested}. Omit runtimeMode to run it at a mode up to ${access}, or link it again with broader access.`,
     });
+  });
+
+  const checkLaunch = Effect.fn("PeerForwarding.checkLaunch")(function* (
+    scope: Scope,
+    environmentId: EnvironmentId,
+    input: {
+      readonly runtimeMode?: unknown;
+      readonly attachments?: ReadonlyArray<unknown> | undefined;
+    },
+  ) {
+    yield* forwardingCaller(scope);
+    yield* assertWithinLinkAccess(environmentId, input.runtimeMode);
+    if (input.attachments?.length)
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: "A launch in a linked environment cannot carry attachments yet.",
+      });
   });
 
   /** Tool and contract schemas are plain data: they encode and decode without services. */
@@ -280,6 +305,7 @@ const make = Effect.gen(function* () {
 
   return PeerForwarding.of({
     call,
+    checkLaunch,
     readThread,
     interruptThread,
     waitForThread,

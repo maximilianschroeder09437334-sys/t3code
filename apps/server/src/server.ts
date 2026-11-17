@@ -609,6 +609,7 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
   Layer.provideMerge(ProviderTurnStartService.layerProviderTurnStartHooks),
+  Layer.provideMerge(ProviderTurnStartService.layerProviderTurnStartModels),
   Layer.provideMerge(ProviderEventIngestor.layerProviderTurnEndHooks),
   Layer.provide(UsageLimitSources.layerResetFallback),
   Layer.provide(layerScheduledTaskWebhookOrigin),

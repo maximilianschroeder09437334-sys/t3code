@@ -10,6 +10,7 @@ import {
   type SourceControlCloneRepositoryInput,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -39,6 +40,10 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as RemoteDelegation from "./RemoteDelegation.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as ThreadMetadataMcpService from "../mcp/ThreadMetadataMcpService.ts";
+import * as OrchestratorHandlers from "../mcp/toolkits/orchestrator/handlers.ts";
+import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
@@ -216,11 +221,38 @@ const boxProjects = (seen: Ref.Ref<Seen>) =>
  * OAuth. `linkSession` is filled in once A links, so B's fixture thread reads
  * as one that link started.
  */
-const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
+const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>, legacy = false) =>
   servePeer(
     box,
     Layer.mergeAll(
-      McpHttpServer.layerOrchestratorToolkit,
+      legacy
+        ? McpHttpServer.toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer).pipe(
+            Layer.provide(
+              Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+                capabilities: () =>
+                  Effect.succeed({
+                    parentThreadId: null,
+                    inheritedProviderInstanceId: null,
+                    inheritedModel: null,
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    providers: [],
+                    features: {
+                      appOwnedSubagents: true,
+                      asyncPolling: true,
+                      cancellation: true,
+                      batchThreadCreation: true,
+                      threadManagement: true,
+                      incrementalThreadRead: true,
+                      scheduledTasks: true,
+                      maxBatchThreads: 20,
+                    },
+                  }),
+              }),
+            ),
+            Layer.provide(ThreadMetadataMcpService.layer),
+          )
+        : McpHttpServer.layerOrchestratorToolkit,
       McpHttpServer.layerProjectRegistration,
       McpHttpServer.layerThreadToolkit,
     ).pipe(
@@ -241,9 +273,45 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
       ),
       Layer.provide(NodeServices.layer),
       Layer.provide(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([
+            {
+              instanceId: ProviderInstanceId.make("codex"),
+              driver: ProviderDriverKind.make("codex"),
+              enabled: true,
+              installed: true,
+              status: "ready",
+              version: "test",
+              auth: { status: "authenticated" },
+              checkedAt: "2026-01-01T00:00:00Z",
+              slashCommands: [],
+              skills: [],
+              models: [
+                {
+                  slug: "gpt-5",
+                  name: "GPT",
+                  isCustom: false,
+                  capabilities: {
+                    optionDescriptors: [
+                      {
+                        id: "reasoningEffort",
+                        label: "Reasoning",
+                        type: "select",
+                        options: [{ id: "medium", label: "Medium" }],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ] as never),
+        }),
       ),
-      Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+      Layer.provide(
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([ProviderInstanceId.make("codex")]),
+        }),
+      ),
       Layer.provide(
         Layer.merge(
           Layer.mock(HookAutomation.HookAutomation)({
@@ -512,6 +580,35 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("refuses a linked launch when the peer cannot attest model policy", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const linkSession = yield* Ref.make("");
+      const b = yield* serveBox(seen, linkSession, true);
+      const a = yield* makeLaptop;
+      yield* linkTo(a.links, b, "full-access");
+      yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
+      const result = yield* a.call("thread:laptop-full", "t3_thread_launch", {
+        environmentId: box.environmentId,
+        projectId: boxProject,
+        title: "Worker",
+        message: "Work",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+      });
+      expect(failureOf(result)).toMatchObject({
+        code: "invalid_request",
+        message: expect.stringContaining("cannot verify agent model policy"),
+      });
+      expect((yield* Ref.get(seen)).launches).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("launches in a linked environment with the caller's modes, retry-safe", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -521,7 +618,11 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
       const a = yield* makeLaptop;
       yield* linkTo(a.links, b, "full-access");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
-      const codex = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+      const codex = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5",
+        options: [{ id: "reasoningEffort", value: "medium" }],
+      };
       const launch = (caller: string, args: Record<string, unknown> = {}) =>
         a.call(caller, "t3_thread_launch", {
           environmentId: box.environmentId,
@@ -534,7 +635,7 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
         });
 
       const first = yield* launch("thread:laptop-plan");
-      expect(first.isError).toBe(false);
+      expect(first.isError, JSON.stringify(first.content)).toBe(false);
       expect(first.structuredContent).toMatchObject({
         projectId: boxProject,
         modelSelection: codex,

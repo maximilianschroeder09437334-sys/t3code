@@ -41,6 +41,10 @@ import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as ThreadMetadataMcpService from "../mcp/ThreadMetadataMcpService.ts";
+import * as OrchestratorHandlers from "../mcp/toolkits/orchestrator/handlers.ts";
+import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -216,8 +220,8 @@ const boxProjects: ReadonlyArray<Project> = [
   },
 ];
 
-const serveBox = (thread: BoxThread) => {
-  return servePeer(box, boxToolkitLayer(thread));
+const serveBox = (thread: BoxThread, legacy = false) => {
+  return servePeer(box, boxToolkitLayer(thread, legacy));
 };
 
 const boxRunId = RunId.make("run:box");
@@ -225,7 +229,7 @@ const boxLaterRunId = RunId.make("run:box-later");
 const boxQueuedRunId = RunId.make("run:box-queued");
 const continuationOf = (runId: RunId) => RunId.make(`${runId}:restarted`);
 
-const boxToolkitLayer = (thread: BoxThread) => {
+const boxToolkitLayer = (thread: BoxThread, legacy = false) => {
   const runId = boxRunId;
   const interrupts = new Set<string>();
   const shellOf = (threadId: ThreadId) =>
@@ -544,7 +548,34 @@ const boxToolkitLayer = (thread: BoxThread) => {
       ),
   });
   return Layer.merge(
-    McpHttpServer.layerOrchestratorToolkit,
+    legacy
+      ? McpHttpServer.toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer).pipe(
+          Layer.provide(
+            Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+              capabilities: () =>
+                Effect.succeed({
+                  parentThreadId: null,
+                  inheritedProviderInstanceId: null,
+                  inheritedModel: null,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  providers: [],
+                  features: {
+                    appOwnedSubagents: true,
+                    asyncPolling: true,
+                    cancellation: true,
+                    batchThreadCreation: true,
+                    threadManagement: true,
+                    incrementalThreadRead: true,
+                    scheduledTasks: true,
+                    maxBatchThreads: 20,
+                  },
+                }),
+            }),
+          ),
+          Layer.provide(ThreadMetadataMcpService.layer),
+        )
+      : McpHttpServer.layerOrchestratorToolkit,
     McpHttpServer.layerProjectRegistration,
   ).pipe(
     Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
@@ -567,7 +598,7 @@ const boxToolkitLayer = (thread: BoxThread) => {
     ),
     Layer.provide(
       Layer.mock(ProviderRegistry.ProviderRegistry)({
-        getProviders: Effect.succeed([boxClaude]),
+        getProviders: Effect.succeed([boxClaude, boxCodex]),
       }),
     ),
     Layer.provide(
@@ -615,6 +646,45 @@ const mcpClient = McpSchema.McpServerClient.of({
   getClient: Effect.die("unused"),
 });
 
+const boxCodex: ServerProvider = {
+  instanceId,
+  driver,
+  enabled: true,
+  installed: true,
+  version: "test",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-09-13T00:00:00.000Z",
+  slashCommands: [],
+  skills: [],
+  models: [
+    {
+      slug: "gpt-5.4",
+      name: "GPT",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            label: "Reasoning",
+            type: "select",
+            options: [
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+            ],
+          },
+          {
+            id: "cyberAccessProgram",
+            label: "Access",
+            type: "select",
+            options: [{ id: "standard", label: "Standard" }],
+          },
+        ],
+      },
+    },
+  ],
+};
+
 /** The box's only provider: a Claude instance, under its own id. */
 const boxClaude: ServerProvider = {
   instanceId: ProviderInstanceId.make("claude-box"),
@@ -626,7 +696,21 @@ const boxClaude: ServerProvider = {
   auth: { status: "authenticated" },
   checkedAt: "2026-09-13T00:00:00.000Z",
   models: [
-    { slug: "claude-sonnet-4-6", name: "Claude Sonnet", isCustom: false, capabilities: null },
+    {
+      slug: "claude-sonnet-4-6",
+      name: "Claude Sonnet",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Reasoning",
+            type: "select",
+            options: [{ id: "medium", label: "Medium" }],
+          },
+        ],
+      },
+    },
   ],
   slashCommands: [],
   skills: [],
@@ -891,6 +975,7 @@ const delegateToBox = (laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>)
         environmentId: box.environmentId,
         providerInstanceId: instanceId,
         model: "gpt-5.4",
+        options: [{ id: "reasoningEffort", value: "medium" }],
       },
       mode: "async",
       clientRequestId: "suite-on-box",
@@ -930,6 +1015,34 @@ const taskResult = (laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>, ta
           : undefined,
       ),
     );
+
+it.effect("refuses remote delegation when the peer cannot attest model policy", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread, true);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+      const result = yield* a.call("delegate_task", {
+        task: "Work",
+        target: {
+          environmentId: box.environmentId,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain("cannot verify agent model policy");
+      expect(yield* Ref.get(thread.launched)).toBeNull();
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
 
 it.effect("a task delegated to the box wakes the laptop's parent when it ends there", () =>
   Effect.scoped(
@@ -1201,6 +1314,7 @@ it.effect(
             environmentId: box.environmentId,
             providerInstanceId: instanceId,
             model: "gpt-5.4",
+            options: [{ id: "reasoningEffort", value: "medium" }],
           },
           mode: "async",
           clientRequestId: "lint-on-box",
@@ -1224,7 +1338,7 @@ it.effect(
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("a task named only by environment inherits the parent's model, within the link", () =>
+it.effect("a task uses its explicit model and options within the link", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const thread = yield* makeBoxThread;
@@ -1248,7 +1362,12 @@ it.effect("a task named only by environment inherits the parent's model, within 
 
       const result = yield* a.call("delegate_task", {
         task: "Run the suite on the box.",
-        target: { environmentId: box.environmentId },
+        target: {
+          environmentId: box.environmentId,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+          options: parentModelSelection.options,
+        },
       });
       expect(result.isError, JSON.stringify(result.content)).toBe(false);
       // The parent's model and options, and the link's modes rather than the parent's.
@@ -1261,7 +1380,12 @@ it.effect("a task named only by environment inherits the parent's model, within 
       // Asking for more than the link allows is still refused there.
       const broader = yield* a.call("delegate_task", {
         task: "Run the suite on the box.",
-        target: { environmentId: box.environmentId },
+        target: {
+          environmentId: box.environmentId,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+          options: parentModelSelection.options,
+        },
         runtimeMode: "full-access",
         clientRequestId: "broader",
       });
@@ -1287,8 +1411,10 @@ it.effect("a task naming another driver there never runs its model on the parent
         task: "Run the suite on the box.",
         target: {
           environmentId: box.environmentId,
+          providerInstanceId: boxClaude.instanceId,
           driverKind: "claudeAgent",
           model: "claude-sonnet-4-6",
+          options: [{ id: "effort", value: "medium" }],
         },
       });
       expect(result.isError).toBe(false);
@@ -1314,7 +1440,12 @@ it.effect("refuses worktree isolation for a task there before launching anything
 
       const result = yield* a.call("delegate_task", {
         task: "Run the suite on the box.",
-        target: { environmentId: box.environmentId },
+        target: {
+          environmentId: box.environmentId,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
         isolation: "worktree",
       });
       expect(result.isError).toBe(true);
@@ -1402,6 +1533,7 @@ it.effect("fails the task when the box revokes the link, and cancel interrupts i
             environmentId: box.environmentId,
             providerInstanceId: instanceId,
             model: "gpt-5.4",
+            options: [{ id: "reasoningEffort", value: "medium" }],
           },
           clientRequestId: "second",
         })
@@ -1434,7 +1566,12 @@ it.effect("a task's result is its own run's whole last reply, not a later run's"
       const result = yield* a.call("delegate_task", {
         task: "Review the diff.",
         role: "review",
-        target: { environmentId: box.environmentId },
+        target: {
+          environmentId: box.environmentId,
+          providerInstanceId: instanceId,
+          model: "gpt-5.4",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
         clientRequestId: "review-on-box",
       });
       expect(result.isError, JSON.stringify(result.content)).toBe(false);
@@ -1529,7 +1666,12 @@ it.effect("the same key from another provider session is another task", () =>
         "delegate_task",
         {
           task: "Run the full suite on the box.",
-          target: { environmentId: box.environmentId },
+          target: {
+            environmentId: box.environmentId,
+            providerInstanceId: instanceId,
+            model: "gpt-5.4",
+            options: [{ id: "reasoningEffort", value: "medium" }],
+          },
           clientRequestId: "suite-on-box",
         },
         { ...parentScope, requestNamespace: "provider-session:laptop-parent-2" },
@@ -1667,7 +1809,12 @@ it.effect("fails the task when its thread there is gone, or the link here is", (
       const forgotten = yield* a
         .call("delegate_task", {
           task: "Another one.",
-          target: { environmentId: box.environmentId },
+          target: {
+            environmentId: box.environmentId,
+            providerInstanceId: instanceId,
+            model: "gpt-5.4",
+            options: [{ id: "reasoningEffort", value: "medium" }],
+          },
           clientRequestId: "forgotten",
         })
         .pipe(Effect.map((result) => result.structuredContent as { taskId: NodeId }));

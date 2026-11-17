@@ -102,6 +102,13 @@ export type OrchestrationV2CreationSource = typeof OrchestrationV2CreationSource
 export const OrchestrationV2ThreadHistoryOrigin = Schema.Literals(["native", "v1_import"]);
 export type OrchestrationV2ThreadHistoryOrigin = typeof OrchestrationV2ThreadHistoryOrigin.Type;
 
+export const AgentExecutionIntent = Schema.Struct({
+  modelSelection: ModelSelection,
+  interactionMode: Schema.optional(ProviderInteractionMode),
+  planningPurpose: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1000))),
+});
+export type AgentExecutionIntent = typeof AgentExecutionIntent.Type;
+
 const OrchestrationV2CreationFields = {
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
@@ -472,6 +479,7 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
 
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
+  agentExecutionIntent: Schema.optional(AgentExecutionIntent),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -3108,6 +3116,7 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
     ...OrchestrationV2CreationFields,
+    agentExecutionIntent: Schema.optional(AgentExecutionIntent),
     commandId: CommandId,
     threadId: ThreadId,
     projectId: ProjectId,
@@ -3551,6 +3560,7 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("delegated_task.request"),
     ...OrchestrationV2CreationFields,
+    agentExecutionIntent: Schema.optional(AgentExecutionIntent),
     commandId: CommandId,
     parentThreadId: ThreadId,
     parentRunId: RunId,
