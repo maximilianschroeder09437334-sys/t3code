@@ -3,6 +3,8 @@ import * as WebPushTransport from "./notifications/WebPushTransport.ts";
 import * as WebPushAuthSessions from "./persistence/AuthSessions.ts";
 import * as HookAutomation from "./hooks/HookAutomation.ts";
 import * as ActivityLedger from "./activity/ActivityLedger.ts";
+import * as NotionOutbox from "./activity/NotionOutbox.ts";
+import * as NotionSyncReactor from "./activity/NotionSyncReactor.ts";
 import * as ActivityLedgerReactor from "./activity/ActivityLedgerReactor.ts";
 import * as HookScheduler from "./scheduling/Scheduler.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
@@ -869,6 +871,7 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
   ActivityLedgerReactor.layer,
+  NotionSyncReactor.layer.pipe(Layer.provide(SecretResolver.layer)),
   // Follows delegated tasks running in linked environments, including after a restart.
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
@@ -897,6 +900,7 @@ const layerMakeRoutes = Layer.mergeAll(
         Layer.provide(WebPushAuthSessions.layer),
       ),
       ActivityLedger.layer,
+      NotionOutbox.layer,
     ).pipe(Layer.provide(HookScheduler.layer)),
   ),
   Layer.provide(PreviewBrowser.layer),

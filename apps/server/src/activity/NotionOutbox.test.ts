@@ -1,7 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as NotionOutbox from "./NotionOutbox.ts";
@@ -35,7 +37,8 @@ it.layer(layer)("NotionOutbox", (it) => {
         [...first, ...second, ...last].map((r) => r.event_sequence),
         Array.from({ length: 1051 }, (_, i) => i + 1),
       );
-      yield* outbox.fail(1, 429, 100);
+      yield* TestClock.adjust(100);
+      yield* outbox.fail(1, 429, yield* Clock.currentTimeMillis);
       assert.strictEqual(
         (yield* outbox.due(1099, 1051)).some((r) => r.event_sequence === 1),
         false,
@@ -44,7 +47,8 @@ it.layer(layer)("NotionOutbox", (it) => {
         (yield* outbox.due(1100, 1051)).some((r) => r.event_sequence === 1),
         true,
       );
-      yield* outbox.fail(1, 403, 1100);
+      yield* TestClock.adjust(1000);
+      yield* outbox.fail(1, 403, yield* Clock.currentTimeMillis);
       assert.strictEqual((yield* outbox.fallback(10))[0]?.event_sequence, 1);
       assert.isTrue(yield* outbox.ack(1, "notion-page"));
       assert.isFalse(yield* outbox.ack(1, "another-page"));
@@ -71,6 +75,17 @@ it.layer(layer)("NotionOutbox", (it) => {
         (yield* outbox.fallback(10)).map((row) => row.event_sequence),
         [2, 4],
       );
+      assert.strictEqual((yield* outbox.fallbackForProject("other", 10)).length, 0);
+      assert.isFalse(yield* outbox.ackForProject("other", 2, "target", "page-2", "block-2"));
+      assert.isTrue(yield* outbox.ackForProject("project", 2, "target", "page-2", "block-2"));
+      assert.isFalse(yield* outbox.ackForProject("project", 2, "target", "page-2", "block-2"));
+      assert.isTrue(yield* outbox.begin(5, "creating"));
+      yield* outbox.rejected(5, 429, 1000, 3000);
+      assert.isFalse((yield* outbox.due(3999, 1051)).some((row) => row.event_sequence === 5));
+      assert.isTrue((yield* outbox.due(4000, 1051)).some((row) => row.event_sequence === 5));
+      assert.isTrue(yield* outbox.begin(5, "creating"));
+      yield* outbox.rejected(5, null, 4000, 0);
+      assert.isTrue((yield* outbox.fallback(10)).some((row) => row.event_sequence === 5));
     }),
   );
   it("backs off and sends access failures or repeated errors to fallback", () => {

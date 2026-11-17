@@ -36,6 +36,17 @@ export class NotionOutbox extends Context.Service<
     readonly fallback: (
       limit: number,
     ) => Effect.Effect<ReadonlyArray<OutboxRow>, SqlError.SqlError>;
+    readonly fallbackForProject: (
+      project: string,
+      limit: number,
+    ) => Effect.Effect<ReadonlyArray<OutboxRow>, SqlError.SqlError>;
+    readonly ackForProject: (
+      project: string,
+      sequence: number,
+      target: string,
+      pageId: string,
+      blockId: string,
+    ) => Effect.Effect<boolean, SqlError.SqlError>;
     readonly fail: (
       sequence: number,
       httpStatus: number | null,
@@ -56,6 +67,16 @@ export class NotionOutbox extends Context.Service<
       phase: "creating" | "appending",
     ) => Effect.Effect<boolean, SqlError.SqlError>;
     readonly recover: () => Effect.Effect<void, SqlError.SqlError>;
+    readonly attachPage: (
+      sequence: number,
+      pageId: string,
+    ) => Effect.Effect<void, SqlError.SqlError>;
+    readonly rejected: (
+      sequence: number,
+      status: number | null,
+      now: number,
+      retryAfterMs: number,
+    ) => Effect.Effect<void, SqlError.SqlError>;
     readonly created: (
       sequence: number,
       target: string,
@@ -94,6 +115,12 @@ const make = Effect.gen(function* () {
   });
   const fallback = Effect.fn("NotionOutbox.fallback")(function* (limit: number) {
     return yield* sql<OutboxRow>`SELECT * FROM notion_outbox WHERE status = 'fallback' ORDER BY event_sequence LIMIT ${limit}`;
+  });
+  const fallbackForProject = Effect.fn("NotionOutbox.fallbackForProject")(function* (
+    project: string,
+    limit: number,
+  ) {
+    return yield* sql<OutboxRow>`SELECT o.* FROM notion_outbox o JOIN activity_events e ON e.sequence = o.event_sequence WHERE o.status = 'fallback' AND e.project_id = ${project} ORDER BY o.event_sequence LIMIT ${limit}`;
   });
   const fail = Effect.fn("NotionOutbox.fail")(function* (
     sequence: number,
@@ -142,6 +169,31 @@ const make = Effect.gen(function* () {
   const recover = Effect.fn("NotionOutbox.recover")(function* () {
     yield* sql`UPDATE notion_outbox SET status = 'fallback', last_error = 'uncertain remote write' WHERE status IN ('creating', 'appending')`;
   });
+  const attachPage = Effect.fn("NotionOutbox.attachPage")(function* (
+    sequence: number,
+    pageId: string,
+  ) {
+    yield* sql`UPDATE notion_outbox SET page_id = ${pageId} WHERE event_sequence = ${sequence} AND status = 'pending'`;
+  });
+  const rejected = Effect.fn("NotionOutbox.rejected")(function* (
+    sequence: number,
+    status: number | null,
+    now: number,
+    retryAfterMs: number,
+  ) {
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const [row] =
+          yield* sql<OutboxRow>`SELECT * FROM notion_outbox WHERE event_sequence = ${sequence} AND status IN ('pending', 'creating', 'appending')`;
+        if (row === undefined) return;
+        const ambiguous = row.status !== "pending" && (status === null || status >= 500);
+        const decision = retryDecision(row.attempts, status, now);
+        const nextStatus = ambiguous ? "fallback" : decision.status;
+        const nextAt = nextStatus === "pending" ? Math.max(decision.nextAt, now + retryAfterMs) : 0;
+        yield* sql`UPDATE notion_outbox SET status = ${nextStatus}, attempts = ${decision.attempts}, next_at = ${nextAt}, last_error = ${ambiguous ? "uncertain remote write" : String(status ?? "network")} WHERE event_sequence = ${sequence}`;
+      }),
+    );
+  });
   const created = Effect.fn("NotionOutbox.created")(function* (
     sequence: number,
     target: string,
@@ -167,18 +219,48 @@ const make = Effect.gen(function* () {
       yield* sql<OutboxRow>`UPDATE notion_outbox SET status = 'done', block_id = ${blockId} WHERE event_sequence = ${sequence} AND status = 'appending' RETURNING *`;
     return rows.length > 0;
   });
+  const ackForProject = Effect.fn("NotionOutbox.ackForProject")(function* (
+    project: string,
+    sequence: number,
+    target: string,
+    pageId: string,
+    blockId: string,
+  ) {
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const [event] = yield* sql<{
+          readonly id: string;
+          readonly feature_key: string | null;
+        }>`SELECT e.id, e.feature_key FROM activity_events e JOIN notion_outbox o ON o.event_sequence = e.sequence WHERE e.project_id = ${project} AND e.sequence = ${sequence} AND o.status = 'fallback'`;
+        if (event === undefined) return false;
+        const key =
+          event.feature_key === null
+            ? `event:${event.id}`
+            : `feature:${project}:${event.feature_key}`;
+        const stored = yield* rememberPage(target, key, pageId);
+        if (stored !== pageId) return false;
+        const rows =
+          yield* sql<OutboxRow>`UPDATE notion_outbox SET status = 'done', page_id = ${pageId}, block_id = ${blockId} WHERE event_sequence = ${sequence} AND status = 'fallback' RETURNING *`;
+        return rows.length > 0;
+      }),
+    );
+  });
   return NotionOutbox.of({
     capture,
     due,
     fallback,
+    fallbackForProject,
     fail,
     ack,
     getPage,
     rememberPage,
     begin,
     recover,
+    attachPage,
+    rejected,
     created,
     completed,
+    ackForProject,
   });
 });
 export const layer = Layer.effect(NotionOutbox, make);

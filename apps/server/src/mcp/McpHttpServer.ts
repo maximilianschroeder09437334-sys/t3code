@@ -69,6 +69,8 @@ import * as ActivityHandlers from "./toolkits/activity/handlers.ts";
 import { HandoffToolkit } from "./toolkits/handoff/tools.ts";
 import * as HandoffHandlers from "./toolkits/handoff/handlers.ts";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import { NotionOutboxToolkit } from "./toolkits/notion/tools.ts";
+import * as NotionOutboxHandlers from "./toolkits/notion/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -1280,6 +1282,10 @@ export const layerHandoffToolkit = toolkitRegistration(HandoffToolkit, HandoffHa
 );
 
 export const layerActivityToolkit = toolkitRegistration(ActivityToolkit, ActivityHandlers.layer);
+const layerNotionOutboxToolkit = toolkitRegistration(
+  NotionOutboxToolkit,
+  NotionOutboxHandlers.layer,
+);
 
 const layerMessageToolkit = toolkitRegistration(MessageToolkit, MessageHandlers.layer);
 
@@ -1370,6 +1376,7 @@ export const layerTools = Layer.mergeAll(
   layerThreadNotesToolkit,
   layerActivityToolkit,
   layerHandoffToolkit,
+  layerNotionOutboxToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,
