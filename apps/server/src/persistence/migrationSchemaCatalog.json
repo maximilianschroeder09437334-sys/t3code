@@ -1577,6 +1577,30 @@
       "name": "orchestration_v2_message_search_update",
       "tbl_name": "orchestration_v2_projection_messages",
       "sql": "CREATE TRIGGER orchestration_v2_message_search_update\n      AFTER UPDATE OF payload_json, streaming, role ON orchestration_v2_projection_messages\n      WHEN (old.streaming = 0 OR new.streaming = 0)\n        AND (\n          old.streaming IS NOT new.streaming\n          OR old.role IS NOT new.role\n          OR json_extract(old.payload_json, '$.text') IS NOT json_extract(new.payload_json, '$.text')\n          OR json_extract(old.payload_json, '$.createdBy')\n            IS NOT json_extract(new.payload_json, '$.createdBy')\n        )\n      BEGIN\n        DELETE FROM orchestration_v2_message_search WHERE rowid = old.rowid AND old.streaming = 0;\n        INSERT INTO orchestration_v2_message_search (rowid, text)\n        SELECT new.rowid, replace(replace(json_extract(new.payload_json, '$.text'), '’', ''''), '‘', '''')\n        WHERE \n  \n  new.streaming = 0\n  AND (\n    new.role = 'assistant'\n    OR (\n      new.role = 'user'\n      AND COALESCE(json_extract(new.payload_json, '$.createdBy'), 'user') = 'user'\n    )\n  )\n  AND NOT EXISTS (\n    SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads\n    WHERE subagent_threads.thread_id = new.thread_id\n      AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'\n  )\n\n  AND \n  CASE\n    WHEN substr(json_extract(new.payload_json, '$.text'), 1, 11) = 'Ultrathink:' COLLATE NOCASE\n      THEN ltrim(substr(json_extract(new.payload_json, '$.text'), 12), '\t\n\u000b\f\r                  　﻿')\n    ELSE json_extract(new.payload_json, '$.text')\n  END COLLATE BINARY <> '[User attached one or more files without additional text. Respond using the conversation context and the attached files.]'\n\n\n          AND json_extract(new.payload_json, '$.text') IS NOT NULL;\n      END"
+    },
+    {
+      "type": "table",
+      "name": "notion_outbox",
+      "tbl_name": "notion_outbox",
+      "sql": "CREATE TABLE notion_outbox (event_sequence INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0, page_id TEXT, block_id TEXT, last_error TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "notion_sync_cursor",
+      "tbl_name": "notion_sync_cursor",
+      "sql": "CREATE TABLE notion_sync_cursor (name TEXT PRIMARY KEY NOT NULL, sequence INTEGER NOT NULL)"
+    },
+    {
+      "type": "index",
+      "name": "notion_outbox_due",
+      "tbl_name": "notion_outbox",
+      "sql": "CREATE INDEX notion_outbox_due ON notion_outbox(status, next_at, event_sequence)"
+    },
+    {
+      "type": "table",
+      "name": "notion_sync_pages",
+      "tbl_name": "notion_sync_pages",
+      "sql": "CREATE TABLE notion_sync_pages (target TEXT NOT NULL, page_key TEXT NOT NULL, page_id TEXT NOT NULL, PRIMARY KEY (target, page_key))"
     }
   ],
   "histories": {
@@ -2584,7 +2608,8 @@
       187, 209, 190, 63, 72, 185, 153, 154, 155, 156, 157, 158, 199, 200, 201, 202, 203, 159, 160,
       161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 213, 175, 176, 177, 178, 208,
       214, 81, 80, 56, 84, 54, 83, 188, 181, 195, 184, 196, 217, 204, 205, 262
-    ]
+    ],
+    "custom85": [263, 264, 265, 266]
   },
   "repairSources": {
     "repair26-provider": {

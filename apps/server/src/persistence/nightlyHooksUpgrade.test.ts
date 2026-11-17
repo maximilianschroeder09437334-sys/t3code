@@ -287,6 +287,7 @@ describe("custom-through-83 histories", () => {
               [82, "HookAutomation"],
               [83, "WebPushNotifications"],
               [84, "ActivityLedger"],
+              [85, "NotionOutbox"],
             ]
               .filter(([id]) => (id as number) > 79 + count)
               .map(([id, name]) => [id, name, "executed"]),
@@ -448,6 +449,7 @@ describe("official histories", () => {
           [82, "HookAutomation", "executed"],
           [83, "WebPushNotifications", "executed"],
           [84, "ActivityLedger", "executed"],
+          [85, "NotionOutbox", "executed"],
         ],
       );
       yield* expectCurrent;
@@ -474,6 +476,7 @@ describe("official histories", () => {
           [82, "executed"],
           [83, "executed"],
           [84, "executed"],
+          [85, "executed"],
         ],
       );
       yield* expectCurrent;
@@ -493,6 +496,9 @@ describe("official histories", () => {
         "web_push_thread_state",
         "web_push_deliveries",
         "activity_events",
+        "notion_outbox",
+        "notion_sync_cursor",
+        "notion_sync_pages",
         "activity_check_ins",
         "t3_custom_migrations",
         "t3_custom_migration_legacy_ledger",
@@ -532,6 +538,9 @@ const withoutCustomTables = Effect.gen(function* () {
     "web_push_thread_state",
     "web_push_deliveries",
     "activity_events",
+    "notion_outbox",
+    "notion_sync_cursor",
+    "notion_sync_pages",
     "activity_check_ins",
     "t3_custom_migrations",
     "t3_custom_migration_legacy_ledger",
@@ -563,7 +572,7 @@ describe("custom ledger runner", () => {
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(
         (yield* customLedger).map((row) => row.migration_id),
-        [80, 82, 83, 84],
+        [80, 82, 83, 84, 85],
       );
       assert.isFalse(yield* hasPendingMigrations());
       yield* expectCurrent;
@@ -857,7 +866,7 @@ describe("repair round 2 supported no-FTS history", () => {
       yield* expectPreserved(rows);
       assert.deepStrictEqual(
         (yield* customLedger).map((row) => row.migration_id),
-        [80, 82, 83, 84],
+        [80, 82, 83, 84, 85],
       );
       const before = yield* dump;
       assert.deepStrictEqual(yield* runMigrations(), []);
