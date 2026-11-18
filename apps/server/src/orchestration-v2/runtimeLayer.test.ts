@@ -1,3 +1,4 @@
+import { contextRolloverNoticeId, contextRolloverFollowupId } from "./ContextRollover.ts";
 import { OrchestrationV2Run as OrchestrationV2RunSchema } from "@t3tools/contracts";
 import * as HandoffIds from "@t3tools/provider-core/server/IdAllocator";
 import * as TransferAdmission from "./HandoffTransferAdmission.ts";
@@ -13914,6 +13915,42 @@ const setupGuardedHandoff = Effect.fn("test.setupGuardedHandoff")(function* (
     branch: "feature",
     worktreePath: cwd,
   });
+  if (key === "positive-fork") {
+    const parentId = ThreadId.make("ui-fork-parent");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("ui-fork-parent-create"),
+      threadId: parentId,
+      projectId,
+      title: "Fork parent",
+      modelSelection: selection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "feature",
+      worktreePath: cwd,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const thread = (yield* orchestrator.getThreadProjection(sourceId)).thread;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("fork-lineage"),
+          type: "thread.metadata-updated",
+          threadId: sourceId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            lineage: {
+              parentThreadId: parentId,
+              rootThreadId: parentId,
+              relationshipToParent: "fork",
+            },
+          },
+        },
+      ],
+    });
+  }
   const sourceProvider = yield* decodeHandoffFixtureProvider({
     id: `guarded-${key}-provider`,
     driver: "codex",
@@ -16115,8 +16152,310 @@ it.layer(Layer.empty)(
     );
 
     it.effect(
-      "guarded handoff transfers one explicit tuple and recovers duplicate workers without duplicate work",
+      "guarded handoff lets a capped successor hand off once after its predecessor started",
       () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("chain");
+          yield* f.worker.drain();
+          const threadId = f.submitted.successorThreadId;
+          const before = yield* f.orchestrator.getThreadProjection(threadId);
+          const run = before.runs[0]!;
+          const attempt = before.attempts[0]!;
+          const provider = {
+            ...before.providerThreads[0]!,
+            status: "idle" as const,
+            nativeThreadRef: { driver, nativeId: "chain-own-native", strength: "strong" as const },
+          };
+          const now = yield* DateTime.now;
+          const turnId = ProviderTurnId.make("chain-own-turn");
+          yield* f.sink.commitCommand({
+            commandId: CommandId.make("command:runtime-reconcile:chain-own"),
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: now,
+            effects: [],
+            events: [
+              {
+                id: EventId.make("chain-own-provider"),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: now,
+                payload: provider,
+              },
+              {
+                id: EventId.make("chain-own-attempt"),
+                type: "run-attempt.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: {
+                  ...attempt,
+                  nativeThreadId: "chain-own-native",
+                  providerTurnId: turnId,
+                  status: "completed",
+                  completedAt: now,
+                },
+              },
+              {
+                id: EventId.make("chain-own-turn"),
+                type: "provider-turn.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: {
+                  id: turnId,
+                  providerThreadId: provider.id,
+                  nodeId: attempt.rootNodeId,
+                  runAttemptId: attempt.id,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status: "completed",
+                  startedAt: now,
+                  completedAt: now,
+                  tokenUsage: { usedTokens: 250_000, updatedAt: DateTime.formatIso(now) },
+                },
+              },
+              ...before.nodes.map((node) => ({
+                id: EventId.make("chain-own-node-" + node.id),
+                type: "node.updated" as const,
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: { ...node, status: "completed" as const, completedAt: now },
+              })),
+              {
+                id: EventId.make("chain-own-run"),
+                type: "run.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: { ...run, status: "completed", completedAt: now },
+              },
+            ],
+          });
+          const observeSession = vi
+            .mocked(f.sessions.observeHandoffSession)
+            .getMockImplementation()!;
+          yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              vi
+                .spyOn(f.sessions, "observeHandoffSession")
+                .mockImplementation((id) =>
+                  observeSession(id).pipe(
+                    Effect.map(Option.map((entry) => ({ ...entry, busyTurns: [] }))),
+                  ),
+                ),
+            ),
+            (spy) => Effect.sync(() => spy.mockRestore()),
+          );
+          const submitted = yield* CoreHandoff.submitHandoff(threadId, f.request.handoff);
+          const snapshot = yield* queryHandoffReadiness(threadId);
+          assert.equal(
+            snapshot.classification,
+            "manual_review",
+            snapshot.after.blockers.join(" | "),
+          );
+          const review = yield* requestHandoffApproval(threadId, snapshot.generation);
+          yield* withAuthenticatedHandoffResponse(
+            f.session,
+            f.orchestrator.dispatch({
+              type: "runtime-request.respond",
+              commandId: CommandId.make("chain-accept"),
+              threadId,
+              requestId: review.requestId,
+              decision: "accept",
+              handoffGeneration: review.generation,
+            }),
+          );
+          yield* f.worker.drain();
+          const source = (yield* f.orchestrator.getThreadProjection(threadId)).thread;
+          assert.equal(source.handoffTransfer?.state, "started");
+          const successor = yield* f.orchestrator.getThreadProjection(submitted.successorThreadId);
+          assert.isNull(successor.thread.lineage.parentThreadId);
+          assert.equal(successor.thread.handoffSourceThreadId, threadId);
+          assert.lengthOf(successor.runs, 1);
+          const refused = yield* f.orchestrator
+            .dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("chain-fenced-source"),
+              threadId,
+              messageId: MessageId.make("chain-fenced-source"),
+              text: "Do not start",
+              attachments: [],
+              modelSelection: f.selection,
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            })
+            .pipe(Effect.flip);
+          assert.equal(refused._tag, "OrchestratorDispatchError");
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+
+    it.effect("Relay forces one follow-up per native session and durably dedupes it", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const fs = yield* FileSystem.FileSystem;
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "relay-followup-" });
+        const key = "forced-followup";
+        const { now, availability } = yield* configureGuardedHandoffOwners(
+          key,
+          cwd,
+          modelSelection,
+        );
+        availability.completeAppOwnedCoverage = true;
+        const threadId = ThreadId.make(key);
+        const projectId = ProjectId.make(key);
+        yield* seedProject({
+          projectId,
+          title: key,
+          workspaceRoot: cwd,
+          defaultModelSelection: modelSelection,
+          createdAt: DateTime.formatIso(now),
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(key + "-create"),
+          threadId,
+          projectId,
+          title: key,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "feature",
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(key + "-initial"),
+          threadId,
+          messageId: MessageId.make(key + "-initial"),
+          text: "Work",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const run = before.runs[0]!;
+        const attempt = before.attempts[0]!;
+        const provider = {
+          ...before.providerThreads[0]!,
+          status: "idle" as const,
+          nativeThreadRef: { driver, nativeId: key, strength: "strong" as const },
+        };
+        const capId = contextRolloverNoticeId(provider, 250_000)!;
+        const itemId = contextRolloverFollowupId(provider)!;
+        const delivered = yield* sink
+          .stream({ afterSequence: yield* sink.latestSequence(), eventType: "run.created" })
+          .pipe(
+            Stream.filter(
+              (stored) => stored.event.threadId === threadId && stored.commandId === String(itemId),
+            ),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+        yield* sink.commitCommand({
+          commandId: CommandId.make(key + "-completion"),
+          threadId,
+          commandType: "provider-runtime.reconcile",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make(key + "-provider"),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: provider,
+            },
+            {
+              id: EventId.make(key + "-attempt"),
+              type: "run-attempt.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...attempt, status: "completed", completedAt: now },
+            },
+            ...before.nodes.map((node) => ({
+              id: EventId.make(key + "-node-" + node.id),
+              type: "node.updated" as const,
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...node, status: "completed" as const, completedAt: now },
+            })),
+            {
+              id: EventId.make(key + "-cap"),
+              type: "turn-item.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: {
+                id: capId,
+                threadId,
+                runId: run.id,
+                nodeId: run.rootNodeId,
+                providerThreadId: provider.id,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 50,
+                type: "system_notice",
+                title: "Context cap",
+                message: "250,000",
+                level: "warning",
+                status: "completed",
+                startedAt: now,
+                updatedAt: now,
+                completedAt: now,
+              },
+            },
+            {
+              id: EventId.make(key + "-run"),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "completed", completedAt: now },
+            },
+          ],
+        });
+        yield* Fiber.join(delivered);
+        const command = {
+          type: "message.dispatch" as const,
+          commandId: CommandId.make(key + "-force"),
+          threadId,
+          messageId: MessageId.make(String(itemId)),
+          text: "Submit the Relay handoff now.",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" as const },
+          createdBy: "agent" as const,
+          creationSource: "server" as const,
+        };
+        yield* orchestrator.dispatch(command);
+        yield* orchestrator.dispatch({ ...command, commandId: CommandId.make(key + "-duplicate") });
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(after.runs, 2);
+        assert.lengthOf(
+          after.turnItems.filter((item) => item.id === itemId),
+          1,
+        );
+        assert.lengthOf(
+          after.messages.filter((message) => message.id === command.messageId),
+          1,
+        );
+      }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+
+    it.effect.each(["root", "fork"] as const)(
+      "guarded handoff transfers a %s source once and recovers duplicate workers without duplicate work",
+      (kind) =>
         Effect.gen(function* () {
           const {
             orchestrator,
@@ -16129,10 +16468,12 @@ it.layer(Layer.empty)(
             selection,
             cwd,
             ledger,
-          } = yield* setupGuardedHandoff("positive");
+          } = yield* setupGuardedHandoff(kind === "fork" ? "positive-fork" : "positive");
           yield* worker.drain();
           const source = (yield* orchestrator.getThreadProjection(sourceId)).thread;
           const successor = yield* orchestrator.getThreadProjection(submitted.successorThreadId);
+          assert.isNull(successor.thread.lineage.parentThreadId);
+          assert.equal(successor.thread.handoffSourceThreadId, sourceId);
           const providerEffect = yield* (yield* EffectOutbox.EffectOutboxV2).get(
             `effect:handoff-transfer:${review.requestId}:release:provider-turn.start:${source.handoffTransfer?.runId}`,
           );

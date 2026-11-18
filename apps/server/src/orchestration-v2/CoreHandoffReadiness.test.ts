@@ -213,6 +213,12 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
   );
 
   it.effect.each([
+    "fork",
+    "subagent",
+    "side-chat",
+    "successor",
+    "chain-ready",
+    "chain-pending",
     "contradictory",
     "non-context-handoff",
     "cap-run-missing",
@@ -277,6 +283,22 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
             },
           ],
         });
+      if (["fork", "subagent", "side-chat", "successor"].includes(scenario)) {
+        records = {
+          ...records,
+          thread: {
+            ...records.thread,
+            ...(scenario === "successor" ? { handoffSourceThreadId: sourceId } : {}),
+            lineage: {
+              ...records.thread.lineage,
+              parentThreadId: scenario === "successor" ? null : sourceId,
+              relationshipToParent:
+                scenario === "subagent" ? "subagent" : scenario === "successor" ? null : "fork",
+              ...(scenario === "side-chat" ? { sideChat: true } : {}),
+            },
+          },
+        };
+      }
       if (scenario === "metadata")
         records = { ...records, thread: { ...records.thread, branch: "thread-metadata" } };
       if (scenario === "dirty" || scenario === "checkpoint")
@@ -323,6 +345,47 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           ...records,
           runs: [{ ...run, id: capRunId, status: "completed", startedAt: now, completedAt: now }],
         };
+      if (scenario === "chain-ready" || scenario === "chain-pending") {
+        records = decodeRecords({
+          ...records,
+          thread: { ...records.thread, handoffSourceThreadId: sourceId },
+          providerThreads: records.providerThreads.map((provider) => ({
+            ...provider,
+            nativeThreadRef: { driver: "codex", nativeId: "own-native", strength: "strong" },
+          })),
+          runs: [{ ...run, id: capRunId, status: "completed", startedAt: now, completedAt: now }],
+          attempts: [
+            {
+              id: "own-attempt",
+              nativeThreadId: "own-native",
+              runId: capRunId,
+              attemptOrdinal: 1,
+              rootNodeId: "own-node",
+              providerInstanceId: "codex",
+              providerThreadId: "provider-thread",
+              providerTurnId: "own-turn",
+              reason: "initial",
+              status: "completed",
+              startedAt: now,
+              completedAt: now,
+            },
+          ],
+          providerTurns: [
+            {
+              id: "own-turn",
+              providerThreadId: "provider-thread",
+              nodeId: "own-node",
+              runAttemptId: "own-attempt",
+              nativeTurnRef: null,
+              ordinal: 1,
+              status: "completed",
+              startedAt: now,
+              completedAt: now,
+              tokenUsage: { usedTokens: 250_000, updatedAt: DateTime.formatIso(now) },
+            },
+          ],
+        });
+      }
       if (scenario === "queued" || scenario === "contradictory")
         records = { ...records, runs: [run] };
       if (scenario === "approval")
@@ -381,6 +444,21 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       const readRecords: Threads.ThreadManagementService["Service"]["readHandoffRecords"] = (id) =>
         Effect.sync(() => {
           reads++;
+          if (id === sourceId && (scenario === "chain-ready" || scenario === "chain-pending"))
+            return decodeRecords({
+              ...recordsFor(fixture.cwd),
+              thread: {
+                ...recordsFor(fixture.cwd).thread,
+                handoffTransfer: {
+                  requestId: "predecessor-request",
+                  generation: "generation",
+                  sourceThreadId: sourceId,
+                  successorThreadId: threadId,
+                  runId: capRunId,
+                  state: scenario === "chain-ready" ? "started" : "released",
+                },
+              },
+            }) as never;
           if (scenario === "read-error") throw new Error("fixture read failure");
           if (id === childId)
             return {
@@ -481,6 +559,10 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         assert.equal(result.before.workspace?.head, fixture.head);
       if (
         [
+          "subagent",
+          "side-chat",
+          "successor",
+          "chain-pending",
           "contradictory",
           "cap-missing-proof",
           "metadata",

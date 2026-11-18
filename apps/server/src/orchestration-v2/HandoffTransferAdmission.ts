@@ -117,6 +117,7 @@ export interface AcceptedHandoff {
 export class HandoffTransferAdmission extends Context.Service<
   HandoffTransferAdmission,
   {
+    readonly canForceFollowup: (threadId: ThreadId) => Effect.Effect<boolean, HandoffTransferError>;
     readonly inspect: (
       sourceId: ThreadId,
       requestId: RuntimeRequestId,
@@ -187,7 +188,6 @@ export const assertHandoffDispatch = Effect.fn("HandoffTransferAdmission.assertD
         commandType !== "prepared-run.release"
       )
         return yield* failed(source.id, "successor-not-released");
-      return;
     }
     for (let depth = 0; depth < 32; depth++) {
       if (current.handoffTransfer && current.handoffTransfer.state !== "cancelled") {
@@ -746,6 +746,33 @@ const make = Effect.gen(function* () {
     ),
   );
   return HandoffTransferAdmission.of({
+    canForceFollowup: Effect.fn("HandoffTransferAdmission.canForceFollowup")(function* (sourceId) {
+      if (Option.isNone(git) || Option.isNone(terminals)) return false;
+      const snapshot = yield* queryHandoffReadinessWithReaders(sourceId, undefined, {
+        readHandoffRecords: projections.getThreadRecords,
+        readHandoffChildIds: (id) => projections.listAppOwnedChildThreadIds(id, true),
+        getThreadEventSequence: (id) => events.latestSequence({ threadId: id }),
+      }).pipe(
+        Effect.provideService(Digest.Digest, digest),
+        Effect.provideService(Outbox.EffectOutboxV2, outbox),
+        Effect.provideService(Projects.ProjectStoreV2, projects),
+        Effect.provideService(Sessions.ProviderSessionManagerV2, sessions),
+        Effect.provideService(Git.GitManager, git.value),
+        Effect.provideService(Terminals.TerminalManager, terminals.value),
+        Effect.mapError(() => failed(sourceId, "forced-followup-observation")),
+      );
+      return (
+        snapshot.stable &&
+        snapshot.after.blockers.every(
+          (reason) =>
+            reason ===
+            "Confirm foreground, background and detached work and include its saved results for the context-limit run.",
+        ) &&
+        snapshot.after.unknowns.every((reason) => reason === "No durable handoff request") &&
+        snapshot.after.providers.every((provider) => provider.completeAppOwnedCoverage) &&
+        snapshot.after.parkedRequest === null
+      );
+    }),
     inspect,
     inspectRecovery: Effect.fn("HandoffTransferAdmission.inspectRecovery")(
       (sourceId, requestId, generation, lostReplacement) =>

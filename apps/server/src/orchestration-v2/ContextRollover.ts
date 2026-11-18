@@ -28,3 +28,8 @@ export const contextRolloverLimitMessage =
 
 export const contextHandoffNudgeMessage =
   "This native session reached 150,000 context tokens. Do not compact. Consider moving to a new thread at a safe handoff.";
+
+export function contextRolloverFollowupId(provider: OrchestrationV2ProviderThread) {
+  const notice = contextRolloverNoticeId(provider, CONTEXT_ROLLOVER_LIMIT);
+  return notice === undefined ? undefined : TurnItemId.make(`relay-forced-followup:${notice}`);
+}

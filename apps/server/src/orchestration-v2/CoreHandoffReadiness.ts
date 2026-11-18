@@ -1,3 +1,5 @@
+import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffBudget";
+import { CONTEXT_ROLLOVER_LIMIT } from "./ContextRollover.ts";
 import * as Digest from "effect/crypto/Digest";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import {
@@ -177,10 +179,27 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       blockers.push("Source already has a reserved or terminal handoff pair");
     if (
       sourceRecords !== null &&
-      (sourceRecords.thread.handoffSourceThreadId !== undefined ||
-        sourceRecords.thread.lineage.parentThreadId !== null)
+      (sourceRecords.thread.lineage.relationshipToParent === "subagent" ||
+        sourceRecords.thread.lineage.sideChat === true)
     )
       blockers.push("This source's inherited ownership is not supported by guarded transfer");
+    if (sourceRecords?.thread.handoffSourceThreadId !== undefined) {
+      const provider = sourceRecords.providerThreads.find(
+        (value) => value.id === sourceRecords.thread.activeProviderThreadId,
+      );
+      if (
+        provider === undefined ||
+        (latestNativeContextUsage(sourceRecords, provider)?.usage.usedTokens ?? 0) <
+          CONTEXT_ROLLOVER_LIMIT
+      )
+        blockers.push("Successor must reach the cap on its own native session");
+      const predecessor = yield* readRecords(sourceRecords.thread.handoffSourceThreadId);
+      if (
+        predecessor?.thread.handoffTransfer?.state !== "started" ||
+        predecessor.thread.handoffTransfer.successorThreadId !== sourceThreadId
+      )
+        blockers.push("Predecessor transfer has not completed");
+    }
     const parkedRequest =
       row !== null && Option.isSome(row) && row.value.request.type === "thread.handoff"
         ? row.value.request

@@ -212,6 +212,7 @@ import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffB
 import {
   CONTEXT_ROLLOVER_LIMIT,
   contextRolloverLimitMessage,
+  contextRolloverFollowupId,
   contextRolloverNoticeId,
 } from "./ContextRollover.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -6863,6 +6864,78 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         return;
       }
+    }
+    const currentProvider = projection.providerThreads.find(
+      (provider) => provider.id === projection.thread.activeProviderThreadId,
+    );
+    const forcedItemId =
+      currentProvider === undefined ? undefined : contextRolloverFollowupId(currentProvider);
+    if (forcedItemId !== undefined && command.messageId === String(forcedItemId)) {
+      const parkFollowup = () =>
+        emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: projection.thread.updatedAt,
+          payload: projection.thread,
+        });
+      if (command.createdBy !== "agent" || command.creationSource !== "server")
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Relay follow-up requires server authority.",
+        });
+      const capId = contextRolloverNoticeId(currentProvider!, CONTEXT_ROLLOVER_LIMIT);
+      const marker = yield* projectionStore
+        .getTurnItem({ threadId: command.threadId, itemId: forcedItemId })
+        .pipe(mapDispatchError(command));
+      const cap =
+        capId === undefined
+          ? undefined
+          : yield* projectionStore
+              .getTurnItem({ threadId: command.threadId, itemId: capId })
+              .pipe(mapDispatchError(command));
+      if (
+        marker !== null ||
+        cap == null ||
+        cap.type !== "system_notice" ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null ||
+        projection.thread.settledOverride === "settled"
+      ) {
+        yield* parkFollowup();
+        return;
+      }
+      if (
+        Option.isNone(handoffAdmission) ||
+        !(yield* handoffAdmission.value
+          .canForceFollowup(command.threadId)
+          .pipe(mapDispatchError(command)))
+      ) {
+        yield* parkFollowup();
+        return;
+      }
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        ...(cap.runId === null ? {} : { runId: cap.runId }),
+        occurredAt: now,
+        payload: {
+          ...cap,
+          id: forcedItemId,
+          ordinal: yield* nextTurnItemOrdinal(projection),
+          title: "Relay handoff required",
+          message:
+            "One automatic Relay follow-up was issued for this native session. Submit the handoff now; if no handoff is submitted, this source remains parked for manual follow-up.",
+          updatedAt: now,
+        },
+      });
     }
     const hookSource =
       command.hookContinuationOfRunId === undefined
@@ -15608,14 +15681,45 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         expectedThreadSequences = accepted.expectedSequences;
         if (
           source.handoffTransfer !== undefined ||
-          source.handoffSourceThreadId !== undefined ||
-          source.lineage.parentThreadId !== null
+          source.lineage.relationshipToParent === "subagent" ||
+          source.lineage.sideChat === true
         )
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: "Transfer requires an unreserved root source and explicit model effort.",
+            cause: "Transfer requires an unreserved sidebar source and explicit model effort.",
           });
+        if (source.handoffSourceThreadId !== undefined) {
+          const own = yield* projectionStore
+            .getThreadRecords(source.id, ["providerThreads", "providerTurns", "runs", "attempts"])
+            .pipe(mapDispatchError(command));
+          const provider = own.providerThreads.find(
+            (value) => value.id === source.activeProviderThreadId,
+          );
+          if (
+            provider === undefined ||
+            (latestNativeContextUsage(own, provider)?.usage.usedTokens ?? 0) <
+              CONTEXT_ROLLOVER_LIMIT
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Successor must reach the cap on its own native session.",
+            });
+
+          const predecessor = yield* projectionStore
+            .getThread(source.handoffSourceThreadId)
+            .pipe(mapDispatchError(command));
+          if (
+            predecessor.handoffTransfer?.state !== "started" ||
+            predecessor.handoffTransfer.successorThreadId !== source.id
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Predecessor transfer has not completed.",
+            });
+        }
         const create: Extract<OrchestrationV2Command, { type: "thread.create" }> = {
           type: "thread.create",
           commandId: command.commandId,
@@ -16762,6 +16866,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               Effect.logWarning("Failed to start the next queued V2 run", { threadId, cause }),
             ),
           );
+      }
+      if (run.status === "completed") {
+        const current = yield* projectionStore.getThreadRecords(threadId, ["providerThreads"]);
+        const provider = current.providerThreads.find(
+          (value) => value.id === current.thread.activeProviderThreadId,
+        );
+        const itemId = provider === undefined ? undefined : contextRolloverFollowupId(provider);
+        const capId =
+          provider === undefined
+            ? undefined
+            : contextRolloverNoticeId(provider, CONTEXT_ROLLOVER_LIMIT);
+        if (
+          itemId !== undefined &&
+          capId !== undefined &&
+          (yield* projectionStore.getTurnItem({ threadId, itemId: capId })) !== null &&
+          (yield* projectionStore.getTurnItem({ threadId, itemId })) === null
+        )
+          yield* dispatchWithReceipt({
+            type: "message.dispatch",
+            commandId: CommandId.make(String(itemId)),
+            threadId,
+            messageId: MessageId.make(String(itemId)),
+            createdBy: "agent",
+            creationSource: "server",
+            text: "Submit the Relay handoff now. This native session reached 250,000 context tokens and tracked work has finished. Save the results in the handoff; do not resume implementation or start delegates.",
+            attachments: [],
+            modelSelection: run.modelSelection,
+            dispatchMode: { type: "start_immediately" },
+          });
       }
       const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
       if (parentThreadId !== undefined) {
