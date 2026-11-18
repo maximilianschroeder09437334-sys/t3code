@@ -1,5 +1,6 @@
 import {
   FULL_ACCESS_OVERRIDE_QUESTION,
+  canRespondToApproval,
   fullAccessOverrideExplanation,
 } from "@t3tools/client-runtime/state/thread-requests";
 import { ShieldIcon } from "lucide-react";
@@ -38,7 +39,7 @@ export const TimelinePendingApprovalRow = memo(function TimelinePendingApprovalR
 }) {
   const { respondingRequestIds, canOperateThread, onRespondToApproval } = use(TimelineRowCtx);
   const presentation = APPROVAL_PRESENTATION[approval.requestKind];
-  const canRespond = approval.responseCapability === "live";
+  const canRespond = canRespondToApproval(approval, "accept");
   return (
     <WorkLogRow
       role="group"

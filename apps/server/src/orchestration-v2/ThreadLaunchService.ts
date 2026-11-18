@@ -154,6 +154,8 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
   },
 ) {
   override get message(): string {
+    if (typeof this.cause === "string" && this.cause.startsWith("Restricted tool"))
+      return this.cause;
     return `Thread launch ${this.commandId} failed during ${this.operation}.`;
   }
 }
@@ -203,6 +205,7 @@ export class ThreadLaunchNotRepositoryError extends Schema.TaggedError<ThreadLau
 export class ThreadLaunchService extends Context.Service<
   ThreadLaunchService,
   {
+    readonly lookupCommandReceipt: CommandReceiptStore.CommandReceiptStoreV2Shape["getByCommandId"];
     readonly launch: (
       input: ThreadLaunchInput,
     ) => Effect.Effect<
@@ -331,6 +334,13 @@ const make = Effect.gen(function* () {
     const projection = yield* threads
       .getThreadRecords(threadId, ["runs"])
       .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+    if (projection.thread.agentExecutionIntent?.restrictedTools !== undefined) {
+      return yield* mapError(
+        input,
+        "update-thread",
+        threadId,
+      )("Restricted tools are unsupported by all providers.");
+    }
     if (
       projection.thread.projectId !== input.projectId ||
       projection.thread.archivedAt !== null ||
@@ -1162,6 +1172,22 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (request) {
+      const restricted = request.agentExecutionIntent?.restrictedTools;
+      if (restricted !== undefined) {
+        if (
+          restricted.projectId !== request.projectId ||
+          restricted.taskId !== request.initialMessage?.scheduledTaskId
+        ) {
+          return yield* mapError(
+            request,
+            "resolve-project",
+          )("Restricted tool binding does not match the launch.");
+        }
+        return yield* mapError(
+          request,
+          "resolve-project",
+        )("Restricted tools are unsupported by all providers.");
+      }
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
       const input: ThreadLaunchInput =
@@ -1212,6 +1238,16 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(mapError(input, "create-thread"))));
 
         if (reusableLaunchReceipt !== undefined) {
+          const existing = yield* threads
+            .getThreadRecords(candidateThreadId, [])
+            .pipe(Effect.mapError(mapError(input, "update-thread", candidateThreadId)));
+          if (existing.thread.agentExecutionIntent?.restrictedTools !== undefined) {
+            return yield* mapError(
+              input,
+              "update-thread",
+              candidateThreadId,
+            )("Restricted tools are unsupported by all providers.");
+          }
           const shell = yield* threads
             .getThreadShell(candidateThreadId)
             .pipe(Effect.mapError(mapError(input, "create-thread", candidateThreadId)));
@@ -1437,6 +1473,7 @@ const make = Effect.gen(function* () {
       const { thread, runs } = yield* threads.getThreadRecords(input.threadId, ["runs"], {
         runIds: [input.runId],
       });
+      if (thread.handoffSourceThreadId !== undefined) return;
       const run = runs.find((candidate) => candidate.id === input.runId);
       const workspacePreparation = run?.workspacePreparation;
       if (run?.status !== "preparing" || workspacePreparation === undefined) return;
@@ -1508,6 +1545,7 @@ const make = Effect.gen(function* () {
   });
 
   return ThreadLaunchService.of({
+    lookupCommandReceipt: receipts.getByCommandId,
     launch,
     checkWorktreeBase,
     isNonGitProject,

@@ -1,3 +1,6 @@
+import * as HandoffAdmission from "./HandoffTransferAdmission.ts";
+import { hasHandoffResponseAuthority } from "../auth/HandoffResponseAuthority.ts";
+import * as HandoffEvents from "./EventStore.ts";
 import type {
   OrchestrationV2ThreadLinkMetadata,
   GuestShareId,
@@ -30,8 +33,9 @@ import {
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   MessageId,
-  type NodeId,
+  NodeId,
   type ModelSelection,
+  HandoffInput,
   OrchestrationV2Command,
   type OrchestrationV2InternalCommand,
   type OrchestrationV2LimitRecoveryUpdate,
@@ -140,7 +144,7 @@ import {
   isBufferedProviderNotification,
   isUndeliveredMailboxSteer,
 } from "./NotificationMailbox.ts";
-import { EventSinkV2 } from "./EventSink.ts";
+import { type HandoffCommitExpectation, EventSinkV2 } from "./EventSink.ts";
 import {
   decideGuestMessageSend,
   guestShareAfterCancelledSend,
@@ -202,7 +206,10 @@ import {
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffBudget";
 import * as ServerSettings from "../serverSettings.ts";
+
+const encodeCoreHandoff = Schema.encodeEffect(Schema.fromJsonString(HandoffInput));
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -457,6 +464,7 @@ export interface OrchestratorV2Shape {
   ) => Effect.Effect<ProjectionRecords<K>, OrchestratorV2Error>;
   readonly listAppOwnedChildThreadIds: (
     threadId: ThreadId,
+    includeHandoffLineage?: boolean,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, OrchestratorV2Error>;
   readonly getThreadProjection: (
     threadId: ThreadId,
@@ -668,6 +676,11 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "queued-run.reorder":
     case "queued-run.cancel":
     case "queued-run.edit":
+    case "handoff.transfer.recover":
+    case "handoff.transfer.reverse":
+    case "handoff.transfer.prepare":
+    case "handoff.transfer.cancel":
+    case "handoff.approval.record":
     case "runtime-request.respond":
     case "runtime-request.delivery.fail":
     case "thread.user-input.dismiss":
@@ -1551,6 +1564,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const commandPolicy = yield* CommandPolicyV2;
   const contextHandoffService = yield* ContextHandoffServiceV2;
   const eventSink = yield* EventSinkV2;
+  const handoffEventStore = yield* HandoffEvents.EventStoreV2;
+  const handoffAdmission = yield* Effect.serviceOption(HandoffAdmission.HandoffTransferAdmission);
   const commandReceipts = yield* CommandReceiptStoreV2;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -2411,6 +2426,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       },
     ) {
       if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
+      if (Option.isSome(handoffAdmission)) {
+        const admitted = yield* handoffAdmission.value
+          .assertDispatch(threadId, "queued-run.start")
+          .pipe(Effect.option);
+        if (Option.isNone(admitted)) return;
+      }
       let projection = yield* readCommandProjection(threadId);
       if (
         projection.thread.archivedAt !== null ||
@@ -3775,6 +3796,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
+    if (
+      command.agentExecutionIntent?.restrictedTools !== undefined &&
+      command.agentExecutionIntent.restrictedTools.projectId !== command.projectId
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Restricted tool project binding does not match the thread project.",
+      });
+    }
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
@@ -5589,6 +5620,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     const thread = projection.thread;
     if (thread.deletedAt !== null) return yield* reject("is deleted.");
+    if (
+      thread.agentExecutionIntent?.restrictedTools !== undefined &&
+      thread.projectId !== command.projectId
+    )
+      return yield* reject("has an immutable restricted tool project binding.");
     if (threadHasUnfinishedWork(projection)) {
       return yield* reject("still has work in progress. Finish or stop it first.");
     }
@@ -5698,6 +5734,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+    if (sourceProjection.thread.agentExecutionIntent?.restrictedTools !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Restricted tool intent cannot be forked.",
+      });
+    }
     // Read under the source's lock; validate the modes copied here, not an earlier read.
     yield* refuseAboveDispatchModeLimit(command, command.sourceThreadId, sourceProjection.thread);
     if (sourceProjection.thread.deletedAt !== null) {
@@ -6783,6 +6826,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         : undefined,
     );
+    if (projection.thread.agentExecutionIntent?.restrictedTools !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Restricted tools are unsupported by all providers.",
+      });
+    }
     if (command.steerFollowUpOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.steerFollowUpOfRunId);
       if (
@@ -6859,6 +6909,64 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: command.threadId,
           occurredAt: now,
           payload: projection.thread,
+        });
+        return;
+      }
+    }
+    if (hookSource?.status === "completed") {
+      const providerThread = projection.providerThreads.find(
+        (provider) =>
+          provider.id === hookSource.providerThreadId &&
+          provider.id === projection.thread.activeProviderThreadId,
+      );
+      const usage =
+        providerThread === undefined
+          ? undefined
+          : latestNativeContextUsage(
+              {
+                ...projection,
+                attempts: projection.attempts.filter(
+                  (attempt) => attempt.id === hookSource.activeAttemptId,
+                ),
+              },
+              providerThread,
+            )?.usage;
+      const atContextLimit = usage !== undefined && usage.usedTokens >= 250_000;
+      if (atContextLimit || command.hookStageWorkspaceRoot === undefined) {
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "turn-item.updated",
+          threadId: command.threadId,
+          runId: hookSource.id,
+          providerInstanceId: hookSource.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: idAllocator.derive.runSignalTurnItem({
+              runId: hookSource.id,
+              signal: "hook-continuation-paused",
+            }),
+            threadId: command.threadId,
+            runId: hookSource.id,
+            nodeId: hookSource.rootNodeId,
+            providerThreadId: hookSource.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: yield* nextTurnItemOrdinal(projection),
+            status: "completed",
+            title: "Automatic continuation paused",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "system_notice",
+            level: "warning",
+            message: atContextLimit
+              ? "This native session reached 250,000 context tokens. Check the saved work and confirm a safe handoff before continuing in a fresh context."
+              : "Review the completed turn's next steps. Continue explicitly or review a Relay handoff before transferring ownership.",
+          },
         });
         return;
       }
@@ -9484,6 +9592,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (cause) => new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
           ),
         );
+      if (
+        parentProjection.thread.agentExecutionIntent?.restrictedTools !== undefined ||
+        command.agentExecutionIntent?.restrictedTools !== undefined
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Restricted tools are unsupported by all providers.",
+        });
+      }
       const parentRun = parentProjection.runs.find(
         (candidate) => candidate.id === command.parentRunId,
       );
@@ -10462,6 +10580,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           ),
         );
+      if (
+        parentProjection.thread.agentExecutionIntent?.restrictedTools !== undefined ||
+        targetProjection.thread.agentExecutionIntent?.restrictedTools !== undefined
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Restricted tools are unsupported by all providers.",
+        });
+      }
       const parentRun = parentProjection.runs.find(
         (candidate) => candidate.id === command.parentRunId,
       );
@@ -10909,6 +11037,93 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause: `Runtime request ${command.requestId} is ${runtimeRequest.status}.`,
         });
+      }
+      if (runtimeRequest.responseCapability.type === "handoff") {
+        const review = runtimeRequest.responseCapability;
+        const authorized = yield* hasHandoffResponseAuthority;
+        const store = handoffEventStore;
+        const later = yield* store
+          .read({ threadId: command.threadId, afterSequence: review.sourceSequence })
+          .pipe(Stream.runCollect, mapDispatchError(command));
+        const childIds = yield* projectionStore
+          .listAppOwnedChildThreadIds(command.threadId, true)
+          .pipe(mapDispatchError(command));
+        const rosterChanged =
+          childIds.length !== review.children.length ||
+          childIds.some((id) => !review.children.some((child) => child.id === id));
+        const childChanged = (yield* Effect.forEach(review.children, (child) =>
+          store.latestSequence({ threadId: child.id }).pipe(
+            Effect.map((sequence) => sequence !== child.sequence),
+            mapDispatchError(command),
+          ),
+        )).some(Boolean);
+        const changed =
+          rosterChanged ||
+          childChanged ||
+          later.some(
+            (row) =>
+              row.event.type !== "runtime-request.updated" ||
+              row.event.payload.id !== review.requestId,
+          );
+        if (
+          !authorized ||
+          review.requestId !== command.requestId ||
+          review.sourceThreadId !== command.threadId ||
+          command.handoffGeneration !== review.generation ||
+          !["accept", "decline", "cancel"].includes(command.decision ?? "") ||
+          command.answers !== undefined ||
+          command.feedback !== undefined ||
+          command.attachmentsByQuestionId !== undefined ||
+          (command.decision === "accept" &&
+            (changed || review.blockers.length > 0 || review.unknowns.length > 0))
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "Handoff response requires authenticated client authority and a current bound one-time review.",
+          });
+        }
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "runtime-request.updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            ...runtimeRequest,
+            status: command.decision === "cancel" ? "cancelled" : "resolved",
+            decision: command.decision,
+            resolvedAt: now,
+          },
+        });
+        if (command.decision === "accept" && review.releaseEvidence !== undefined) {
+          const parked = yield* effectOutbox
+            .get(`core-handoff:${command.threadId}`)
+            .pipe(mapDispatchError(command));
+          if (
+            Option.isNone(parked) ||
+            parked.value.request.type !== "thread.handoff" ||
+            parked.value.request.successorThreadId !== review.successorThreadId
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Missing durable handoff request.",
+            });
+          yield* Ref.update(effects, (rows) => [
+            ...rows,
+            {
+              id: `core-handoff:${command.threadId}:accepted:${review.requestId}`,
+              commandId: command.commandId,
+              threadId: command.threadId,
+              request: parked.value.request,
+            },
+          ]);
+        }
+        return;
       }
       if (runtimeRequest.responseCapability.type === "not_resumable") {
         return yield* new OrchestratorDispatchError({
@@ -15040,7 +15255,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
         readonly reason: string;
       };
+      readonly cancelHandoffStart?: { readonly threadId: ThreadId; readonly runId: RunId };
       readonly updateDelegatedCompletionOnlyRunId?: RunId;
+      readonly expectedHandoff?: HandoffCommitExpectation;
+      readonly expectedThreadSequences?: ReadonlyArray<{
+        readonly threadId: ThreadId;
+        readonly sequence: number;
+      }>;
     },
     OrchestratorV2Error
   > {
@@ -15058,7 +15279,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           readonly reason: string;
         }
       | undefined;
+    let cancelHandoffStart: { readonly threadId: ThreadId; readonly runId: RunId } | undefined;
     let updateDelegatedCompletionOnlyRunId: RunId | undefined;
+    let expectedHandoff: HandoffCommitExpectation | undefined;
+    let expectedThreadSequences:
+      | ReadonlyArray<{ readonly threadId: ThreadId; readonly sequence: number }>
+      | undefined;
     switch (command.type) {
       case "thread.create": {
         yield* dispatchThreadCreate(command, events);
@@ -15241,9 +15467,55 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "notification.delivery.accept":
         updateDelegatedCompletionOnlyRunId = yield* dispatchNotificationAccepted(command, events);
         break;
-      case "prepared-run.release":
+      case "prepared-run.release": {
+        const successor = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        let source: OrchestrationV2AppThread | undefined;
+        if (successor.handoffSourceThreadId !== undefined) {
+          source = yield* projectionStore
+            .getThread(successor.handoffSourceThreadId)
+            .pipe(mapDispatchError(command));
+          const pair = source.handoffTransfer;
+          if (
+            !(yield* HandoffAdmission.hasTransferReleaseAuthority) ||
+            Option.isNone(handoffAdmission) ||
+            !pair ||
+            pair.state !== "reserved" ||
+            pair.runId !== command.runId ||
+            command.commandId !== CommandId.make(`handoff-transfer:${pair.requestId}:release`)
+          )
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Prepared successor is fenced.",
+            });
+          const accepted = yield* handoffAdmission.value
+            .inspect(source.id, pair.requestId, pair.generation)
+            .pipe(mapDispatchError(command));
+          expectedHandoff = { review: accepted.review, request: accepted.request };
+          expectedThreadSequences = accepted.expectedSequences;
+        }
         yield* dispatchPreparedRunRelease(command, events, effects);
+        if (source?.handoffTransfer !== undefined) {
+          const now = yield* DateTime.now;
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "thread.metadata-updated",
+            threadId: source.id,
+            occurredAt: now,
+            payload: {
+              ...source,
+              settledOverride: "settled",
+              settledAt: now,
+              handoffTransfer: { ...source.handoffTransfer, state: "released" },
+            },
+          });
+        }
         break;
+      }
       case "prepared-run.progress":
         yield* dispatchPreparedRunProgress(command, events);
         break;
@@ -15253,6 +15525,355 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "prepared-run.retry":
         yield* dispatchPreparedRunRetry(command, events);
         break;
+      case "handoff.transfer.prepare": {
+        if (Option.isNone(handoffAdmission)) return yield* dispatchUnsupported(command);
+        const accepted = yield* handoffAdmission.value
+          .inspect(command.threadId, command.requestId, command.generation)
+          .pipe(mapDispatchError(command));
+        const { source, request, review } = accepted;
+        expectedHandoff = { review: accepted.review, request: accepted.request };
+        expectedThreadSequences = accepted.expectedSequences;
+        if (
+          source.handoffTransfer !== undefined ||
+          source.handoffSourceThreadId !== undefined ||
+          source.lineage.parentThreadId !== null
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Transfer requires an unreserved root source and explicit model effort.",
+          });
+        const create: Extract<OrchestrationV2Command, { type: "thread.create" }> = {
+          type: "thread.create",
+          commandId: command.commandId,
+          threadId: request.successorThreadId,
+          projectId: request.projectId,
+          title: source.title,
+          modelSelection: request.modelSelection,
+          runtimeMode: request.runtimeMode,
+          interactionMode: request.interactionMode,
+          branch: request.branch,
+          worktreePath: request.worktreePath,
+          createdBy: "agent",
+          creationSource: "mcp",
+          agentExecutionIntent: {
+            ...source.agentExecutionIntent,
+            modelSelection: request.modelSelection,
+            interactionMode: request.interactionMode,
+          },
+          initialMessage: {
+            messageId: MessageId.make(`core-handoff:${command.threadId}:message`),
+            text: yield* encodeCoreHandoff(request.handoff).pipe(mapDispatchError(command)),
+            attachments: [],
+            workspaceStrategy:
+              request.worktreePath === null
+                ? { type: "root", branch: request.branch }
+                : {
+                    type: "existing_worktree",
+                    worktreePath: request.worktreePath,
+                    branch: request.branch,
+                  },
+          },
+        };
+        yield* dispatchThreadCreate(create, events);
+        yield* Ref.update(events, (rows) =>
+          rows.map((event) =>
+            event.type === "thread.created" && event.threadId === request.successorThreadId
+              ? { ...event, payload: { ...event.payload, handoffSourceThreadId: command.threadId } }
+              : event,
+          ),
+        );
+        const initial = threadCreateInitialMessage(create)!;
+        yield* dispatchMessage(withoutGuestAttribution(initial), events, effects);
+        const runEvent = (yield* Ref.get(events)).find(
+          (event) => event.type === "run.created" && event.threadId === request.successorThreadId,
+        );
+        if (
+          runEvent?.type !== "run.created" ||
+          !modelSelectionsEqual(runEvent.payload.modelSelection, request.modelSelection)
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Successor selection changed during planning.",
+          });
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            ...source,
+            handoffTransfer: {
+              requestId: review.requestId,
+              generation: review.generation,
+              sourceThreadId: source.id,
+              successorThreadId: request.successorThreadId,
+              runId: runEvent.payload.id,
+              state: "reserved",
+              previousSettledOverride: source.settledOverride,
+            },
+          },
+        });
+        break;
+      }
+      case "handoff.transfer.recover": {
+        if (Option.isNone(handoffAdmission)) return yield* dispatchUnsupported(command);
+        const source = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        const pair = source.handoffTransfer;
+        if (
+          pair?.state !== "released" ||
+          pair.sourceThreadId !== command.threadId ||
+          pair.requestId !== command.requestId ||
+          pair.generation !== command.generation ||
+          pair.parkedRecovery !== undefined ||
+          (pair.recoveryCount ?? 0) >= 2
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "No recoverable unstarted handoff release.",
+          });
+        const count = pair.recoveryCount ?? 0;
+        const park =
+          count === 1 && command.commandId === HandoffAdmission.handoffParkRecoveryCommand(pair);
+        const prior = yield* effectOutbox
+          .get(HandoffAdmission.handoffStartEffectId(pair))
+          .pipe(mapDispatchError(command));
+        if (
+          Option.isNone(prior) ||
+          prior.value.status !== "cancelled" ||
+          prior.value.lastError !== EffectOutbox.HANDOFF_PROCESS_LOSS_REASON ||
+          prior.value.request.type !== "provider-turn.start" ||
+          prior.value.request.runId !== pair.runId ||
+          prior.value.threadId !== pair.successorThreadId ||
+          prior.value.commandId !==
+            (count === 0
+              ? CommandId.make(`handoff-transfer:${pair.requestId}:release`)
+              : HandoffAdmission.handoffRecoveryCommand(pair, count)) ||
+          prior.value.completedAt === null ||
+          (park && prior.value.attemptCount === 0) ||
+          (!park && command.commandId !== HandoffAdmission.handoffRecoveryCommand(pair, count + 1))
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Recovery requires the exact process-loss cancellation receipt.",
+          });
+        const accepted = yield* handoffAdmission.value
+          .inspectRecovery(
+            command.threadId,
+            command.requestId,
+            command.generation,
+            park ? { completedAt: prior.value.completedAt } : undefined,
+          )
+          .pipe(mapDispatchError(command));
+        const run = yield* projectionStore
+          .getRun(pair.successorThreadId, pair.runId)
+          .pipe(mapDispatchError(command));
+        if (run?.status !== "starting")
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Recovery cannot restart a stopped or ended successor.",
+          });
+        expectedHandoff = { review: accepted.review, request: accepted.request };
+        expectedThreadSequences = accepted.expectedSequences;
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            ...accepted.source,
+            handoffTransfer:
+              accepted.parkedBootstrapEventId === undefined
+                ? { ...pair, recoveryCount: count + 1 }
+                : {
+                    ...pair,
+                    parkedRecovery: {
+                      reason: "replacement-lost-after-bootstrap",
+                      bootstrapEventId: accepted.parkedBootstrapEventId,
+                      effectId: prior.value.id,
+                    },
+                  },
+          },
+        });
+        if (park) {
+          cancelHandoffStart = { threadId: pair.successorThreadId, runId: pair.runId };
+          break;
+        }
+        yield* Ref.update(effects, (rows) => [
+          ...rows,
+          {
+            id: `effect:${command.commandId}:provider-turn.start:${pair.runId}`,
+            commandId: command.commandId,
+            threadId: pair.successorThreadId,
+            request: { type: "provider-turn.start", runId: pair.runId },
+          } satisfies PendingOrchestrationEffectV2,
+        ]);
+        break;
+      }
+      case "handoff.transfer.reverse":
+      case "handoff.transfer.cancel": {
+        const sourceSequence = yield* handoffEventStore
+          .latestSequence({ threadId: command.threadId })
+          .pipe(mapDispatchError(command));
+        const source = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        const pair = source.handoffTransfer;
+        if (
+          !pair ||
+          pair.sourceThreadId !== source.id ||
+          pair.requestId !== command.requestId ||
+          pair.generation !== command.generation ||
+          pair.state === "started"
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "No reversible unstarted transfer.",
+          });
+        // Stop or an earlier reversal has already restored this exact pair.
+        if (pair.state === "cancelled") break;
+        const { parkedRecovery: _parkedRecovery, ...restoredPair } = pair;
+        cancelHandoffStart = { threadId: pair.successorThreadId, runId: pair.runId };
+        expectedThreadSequences = [
+          {
+            threadId: source.id,
+            sequence: sourceSequence,
+          },
+          {
+            threadId: pair.successorThreadId,
+            sequence: yield* handoffEventStore
+              .latestSequence({ threadId: pair.successorThreadId })
+              .pipe(mapDispatchError(command)),
+          },
+        ];
+        const successor = yield* projectionStore
+          .getThreadRecords(pair.successorThreadId, ["runs", "attempts", "nodes"])
+          .pipe(mapDispatchError(command));
+        if (successor.thread.handoffSourceThreadId !== source.id)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Successor ownership is uncertain.",
+          });
+        const now = yield* DateTime.now;
+        for (const run of successor.runs) {
+          if (run.id !== pair.runId)
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: "Successor ownership is uncertain.",
+            });
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "run.updated",
+            threadId: pair.successorThreadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "cancelled", completedAt: now },
+          });
+        }
+        for (const node of successor.nodes)
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "node.updated",
+            threadId: pair.successorThreadId,
+            occurredAt: now,
+            payload: { ...node, status: "cancelled", completedAt: now, updatedAt: now },
+          });
+        for (const attempt of successor.attempts)
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "run-attempt.updated",
+            threadId: pair.successorThreadId,
+            occurredAt: now,
+            payload: { ...attempt, status: "cancelled", completedAt: now },
+          });
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            ...source,
+            settledOverride: pair.previousSettledOverride ?? null,
+            settledAt: null,
+            handoffTransfer: { ...restoredPair, state: "cancelled" },
+          },
+        });
+        break;
+      }
+      case "handoff.approval.record": {
+        const review = command.review;
+        const outbox = effectOutbox;
+        const parked = yield* outbox
+          .get(`core-handoff:${command.threadId}`)
+          .pipe(mapDispatchError(command));
+        const store = handoffEventStore;
+        const sequence = yield* store
+          .latestSequence({ threadId: command.threadId })
+          .pipe(mapDispatchError(command));
+        const existing = yield* projectionStore
+          .getRuntimeRequest(command.threadId, review.requestId)
+          .pipe(mapDispatchError(command));
+        if (
+          existing !== undefined ||
+          review.sourceThreadId !== command.threadId ||
+          review.blockers.length ||
+          review.unknowns.length ||
+          sequence !== review.sourceSequence ||
+          Option.isNone(parked) ||
+          parked.value.request.type !== "thread.handoff" ||
+          parked.value.request.successorThreadId !== review.successorThreadId
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Handoff review is stale, blocked, unknown, or mismatched.",
+          });
+        }
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "runtime-request.updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            id: review.requestId,
+            nodeId: NodeId.make(`handoff-review:${review.requestId}`),
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "permission",
+            status: "pending",
+            responseCapability: review,
+            createdAt: now,
+            resolvedAt: null,
+          },
+        });
+        break;
+      }
       case "runtime-request.respond":
         yield* dispatchRuntimeRequestRespond(command, events, effects);
         break;
@@ -15290,9 +15911,79 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ]);
         }
         break;
-      case "thread.stop":
-        cancelUnsettledEffects = yield* dispatchThreadStop(command, events, effects);
+      case "thread.stop": {
+        const target = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        const source =
+          target.handoffSourceThreadId === undefined
+            ? target
+            : yield* projectionStore
+                .getThread(target.handoffSourceThreadId)
+                .pipe(mapDispatchError(command));
+        const pair = source.handoffTransfer;
+        if (pair && pair.state !== "started" && pair.state !== "cancelled") {
+          const cancellation = yield* dispatchOnce(
+            {
+              type: "handoff.transfer.cancel",
+              commandId: command.commandId,
+              threadId: source.id,
+              requestId: pair.requestId,
+              generation: pair.generation,
+            },
+            [],
+          );
+          cancelUnsettledEffects = yield* dispatchThreadStop(command, events, effects);
+          const pending = yield* getProjectionWithPendingEvents(source.id, events);
+          yield* Ref.update(events, (rows) => [
+            ...rows,
+            ...cancellation.events.map((event) =>
+              event.type === "thread.metadata-updated" && event.threadId === source.id
+                ? {
+                    ...event,
+                    payload: {
+                      ...pending.thread,
+                      settledAt: null,
+                      settledOverride: pair.previousSettledOverride ?? null,
+                      handoffTransfer: event.payload.handoffTransfer,
+                    },
+                  }
+                : event,
+            ),
+          ]);
+          expectedThreadSequences = cancellation.expectedThreadSequences;
+          cancelHandoffStart = cancellation.cancelHandoffStart;
+          cancelUnsettledEffects = {
+            effectTypes: [...(cancelUnsettledEffects?.effectTypes ?? []), "thread.handoff"],
+            reason: "Stopped handoff; ownership restored to source.",
+          };
+        } else cancelUnsettledEffects = yield* dispatchThreadStop(command, events, effects);
+        const parked = yield* effectOutbox
+          .get(`core-handoff:${source.id}`)
+          .pipe(mapDispatchError(command));
+        if (
+          Option.isSome(parked) &&
+          parked.value.request.type === "thread.handoff" &&
+          pair?.state !== "started"
+        ) {
+          const stoppedSource = yield* getProjectionWithPendingEvents(source.id, events);
+          const now = yield* DateTime.now;
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "thread.metadata-updated",
+            threadId: source.id,
+            occurredAt: now,
+            payload: { ...stoppedSource.thread, handoffStopCommandId: command.commandId },
+          });
+          cancelUnsettledEffects = {
+            effectTypes: [...(cancelUnsettledEffects?.effectTypes ?? []), "thread.handoff"],
+            reason: "The handoff was explicitly stopped.",
+          };
+        }
         break;
+      }
       case "queued-message.promote-to-steer":
         cancelUnsettledEffects = yield* dispatchQueuedMessagePromoteToSteer(
           command,
@@ -15455,7 +16146,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return {
       events: yield* Ref.get(events),
       effects: yield* Ref.get(effects),
+      ...(expectedHandoff === undefined ? {} : { expectedHandoff }),
+      ...(expectedThreadSequences === undefined ? {} : { expectedThreadSequences }),
       ...(cancelUnsettledEffects === undefined ? {} : { cancelUnsettledEffects }),
+      ...(cancelHandoffStart === undefined ? {} : { cancelHandoffStart }),
       ...(updateDelegatedCompletionOnlyRunId === undefined
         ? {}
         : { updateDelegatedCompletionOnlyRunId }),
@@ -15522,6 +16216,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    if (command.type === "handoff.transfer.reverse" && !(yield* hasHandoffResponseAuthority))
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Authenticated client authority required to reverse a transfer.",
+      });
+
     const existingReceipt = yield* commandReceipts.getByCommandId(command.commandId).pipe(
       Effect.mapError(
         (cause) =>
@@ -15534,9 +16235,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
     if (Option.isSome(existingReceipt)) {
+      if (command.type === "handoff.transfer.reverse") {
+        const source = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        if (
+          existingReceipt.value.commandType !== command.type ||
+          source.handoffTransfer?.requestId !== command.requestId ||
+          source.handoffTransfer.generation !== command.generation
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "No matching handoff reversal receipt.",
+          });
+      }
       return yield* replayCommandReceipt(command, existingReceipt.value);
     }
 
+    if (
+      command.type === "prepared-run.release" &&
+      !(yield* HandoffAdmission.hasTransferReleaseAuthority)
+    ) {
+      const target = yield* projectionStore
+        .getThread(command.threadId)
+        .pipe(mapDispatchError(command));
+      if (target.handoffSourceThreadId !== undefined)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Guarded transfer worker authority required.",
+        });
+    }
+    if (Option.isSome(handoffAdmission))
+      yield* handoffAdmission.value
+        .assertDispatch(commandThreadId(command), command.type)
+        .pipe(mapDispatchError(command));
     // Recheck under the lock; the user may have raised modes since sender preflight.
     const limit = yield* DispatchModeLimit;
     if (limit !== undefined) {
@@ -15575,6 +16309,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.pull-request-watch.checks-reopen" ||
           command.type === "thread.interrupt.unresponsive" ||
           command.type === "thread.stop" ||
+          command.type === "handoff.transfer.reverse" ||
+          command.type === "handoff.transfer.cancel" ||
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close" ||
@@ -15608,6 +16344,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               organization,
             });
           }
+          // A parking observation can fail before its durable proof is readable.
+          if (command.type === "handoff.transfer.recover" && command.commandId.endsWith(":park"))
+            return yield* cause;
           const rejectedAt = yield* DateTime.now;
           const receipt = yield* eventSink
             .commitRejectedCommand({
@@ -15707,9 +16446,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 }).pipe(mapDispatchError(command)),
               ],
         effects: plan.effects,
+        ...(plan.expectedHandoff === undefined ? {} : { expectedHandoff: plan.expectedHandoff }),
+        ...(plan.expectedThreadSequences === undefined
+          ? {}
+          : { expectedThreadSequences: plan.expectedThreadSequences }),
         ...(plan.cancelUnsettledEffects === undefined
           ? {}
           : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),
+        ...(plan.cancelHandoffStart === undefined
+          ? {}
+          : { cancelHandoffStart: plan.cancelHandoffStart }),
         ...(plan.updateDelegatedCompletionOnlyRunId === undefined
           ? {}
           : { updateDelegatedCompletionOnlyRunId: plan.updateDelegatedCompletionOnlyRunId }),
@@ -15793,6 +16539,62 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+    const target = yield* projectionStore
+      .getThreadShell(commandThreadId(command))
+      .pipe(mapDispatchError(command));
+    const fullTarget =
+      target === null
+        ? null
+        : yield* projectionStore
+            .getThread(commandThreadId(command))
+            .pipe(mapDispatchError(command));
+    const pairSourceId =
+      command.type === "handoff.transfer.prepare" ||
+      command.type === "handoff.transfer.cancel" ||
+      command.type === "handoff.transfer.reverse" ||
+      command.type === "handoff.transfer.recover"
+        ? command.threadId
+        : command.type === "prepared-run.release" || command.type === "thread.stop"
+          ? (fullTarget?.handoffSourceThreadId ??
+            (fullTarget?.handoffTransfer !== undefined ? fullTarget.id : undefined))
+          : undefined;
+    if (pairSourceId !== undefined)
+      return yield* threadDispatch.withLock(
+        pairSourceId,
+        Effect.gen(function* () {
+          const source = yield* projectionStore
+            .getThread(pairSourceId)
+            .pipe(mapDispatchError(command));
+          const requestId =
+            command.type === "handoff.transfer.prepare" ||
+            command.type === "handoff.transfer.cancel" ||
+            command.type === "handoff.transfer.reverse" ||
+            command.type === "handoff.transfer.recover"
+              ? command.requestId
+              : source.handoffTransfer?.requestId;
+          const review =
+            requestId === undefined
+              ? undefined
+              : yield* projectionStore
+                  .getRuntimeRequest(pairSourceId, requestId)
+                  .pipe(mapDispatchError(command));
+          const children =
+            review?.responseCapability.type === "handoff"
+              ? review.responseCapability.children.map((child) => child.id).toSorted()
+              : [];
+          const successorId =
+            review?.responseCapability.type === "handoff"
+              ? review.responseCapability.successorThreadId
+              : fullTarget?.id;
+          const ids = [
+            ...new Set([...children, ...(successorId === undefined ? [] : [successorId])]),
+          ].filter((id) => id !== pairSourceId);
+          return yield* ids.reduceRight(
+            (locked, id) => threadDispatch.withLock(id, locked),
+            dispatchWithReceiptEffect(command),
+          );
+        }),
+      );
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),
       dispatchWithReceiptEffect(command),
@@ -16419,9 +17221,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       },
     ),
     listAppOwnedChildThreadIds: Effect.fn("OrchestratorV2.listAppOwnedChildThreadIds")(
-      function (threadId) {
+      function (threadId, includeHandoffLineage) {
         return projectionStore
-          .listAppOwnedChildThreadIds(threadId)
+          .listAppOwnedChildThreadIds(threadId, includeHandoffLineage)
           .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       },
     ),
@@ -16561,6 +17363,7 @@ export const layer: Layer.Layer<
   | ContextHandoffServiceV2
   | EffectOutbox.EffectOutboxV2
   | EventSinkV2
+  | HandoffEvents.EventStoreV2
   | IdAllocator.IdAllocatorV2
   | ProjectStore.ProjectStoreV2
   | ProviderAdapterRegistryV2

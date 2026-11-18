@@ -1,3 +1,7 @@
+import { GitManager } from "../git/GitManager.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
+import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
+import { TerminalManager } from "../terminal/Manager.ts";
 import * as HookAutomation from "../hooks/HookAutomation.ts";
 import * as ActivityLedger from "../activity/ActivityLedger.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -53,6 +57,10 @@ import budget from "./agentContextBudget.json" with { type: "json" };
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Layer.mock(GitManager)({}),
+  Layer.mock(ProviderSessionManagerV2)({}),
+  Layer.mock(ProjectStoreV2)({}),
+  Layer.mock(TerminalManager)({}),
   Layer.mock(AssetSigner)({}),
   Layer.mock(DeviceService)({}),
   Layer.mock(DocumentText)({}),

@@ -3,6 +3,7 @@ import {
   CommandId,
   RuntimeRequestId,
   EnvironmentId,
+  EventId,
   MessageId,
   RunId,
   ORCHESTRATION_V2_WS_METHODS,
@@ -24,7 +25,7 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import {
@@ -35,6 +36,11 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
+import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
+import { EMPTY_ENVIRONMENT_THREAD_STATE } from "./threadState.ts";
+import { deriveParkedHandoffRecovery } from "./threadRequests.ts";
+import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
+import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
@@ -427,6 +433,132 @@ describe("remote thread lifecycle commands", () => {
         expect((yield* Effect.promise(() => result))._tag).toBe("Failure");
         expect(h.registry.get(h.visibleAtom)).toBe(initial);
       }),
+  );
+
+  it.effect("derives the scoped handoff return from thread detail and waits for RPC success", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const successorId = ThreadId.make("replacement");
+      const requestId = RuntimeRequestId.make("persisted-review");
+      const pair = {
+        state: "released" as const,
+        sourceThreadId: THREAD_ID,
+        successorThreadId: successorId,
+        requestId,
+        generation: "persisted-generation",
+        runId: RunId.make("replacement-run"),
+        recoveryCount: 1,
+        parkedRecovery: {
+          reason: "replacement-lost-after-bootstrap" as const,
+          bootstrapEventId: EventId.make("persisted-bootstrap"),
+          effectId: "persisted-replacement",
+        },
+      };
+      const original = { ...v2Projection, thread: { ...v2Projection.thread, id: THREAD_ID } };
+      const replacement = {
+        ...v2Projection,
+        thread: { ...v2Projection.thread, id: successorId, handoffSourceThreadId: THREAD_ID },
+      };
+      const state = Atom.family((threadId: ThreadId) =>
+        Atom.make(
+          AsyncResult.success({
+            ...EMPTY_ENVIRONMENT_THREAD_STATE,
+            data: Option.some(threadId === THREAD_ID ? original : replacement),
+          }),
+        ),
+      );
+      const details = createEnvironmentThreadDetailAtoms((_environmentId, threadId) =>
+        state(threadId),
+      );
+      const originalAtom = details.quietThreadAtom({
+        environmentId: ENVIRONMENT_ID,
+        threadId: THREAD_ID,
+      });
+      const replacementAtom = details.quietThreadAtom({
+        environmentId: ENVIRONMENT_ID,
+        threadId: successorId,
+      });
+      h.registry.mount(originalAtom);
+      h.registry.mount(replacementAtom);
+      const publishOriginal = (thread: typeof original.thread) =>
+        h.registry.set(
+          state(THREAD_ID),
+          AsyncResult.success({
+            ...EMPTY_ENVIRONMENT_THREAD_STATE,
+            data: Option.fromNullishOr(
+              applyOrchestrationV2ProjectionEvent(original, {
+                type: "thread.metadata-updated",
+                threadId: THREAD_ID,
+                occurredAt: NOW,
+                id: EventId.make("handoff-detail"),
+                payload: thread,
+              }),
+            ),
+          }),
+        );
+      const read = (canOperate: boolean) =>
+        deriveParkedHandoffRecovery(
+          h.registry.get(replacementAtom),
+          h.registry.get(originalAtom),
+          canOperate,
+        );
+      expect(read(true)).toBeNull();
+      publishOriginal({ ...original.thread, handoffTransfer: pair });
+      const status = read(false);
+      expect(status?.successorRef.threadId).toBe(successorId);
+      expect(status?.action).toBeNull();
+      expect(
+        deriveParkedHandoffRecovery(
+          h.registry.get(originalAtom),
+          h.registry.get(originalAtom),
+          true,
+        )?.action,
+      ).toBeNull();
+      expect(
+        deriveParkedHandoffRecovery(
+          h.registry.get(replacementAtom),
+          {
+            ...h.registry.get(originalAtom)!,
+            environmentId: EnvironmentId.make("another-environment"),
+          },
+          true,
+        ),
+      ).toBeNull();
+      const action = read(true)?.action;
+      if (!action) throw new Error("Expected a return action on the replacement");
+      let settled = false;
+      const first = h.commands.reverseHandoff.run(h.registry, action).then((result) => {
+        settled = true;
+        return result;
+      });
+      const request = yield* Queue.take(h.requests);
+      expect(request.command).toMatchObject({
+        type: "handoff.transfer.reverse",
+        threadId: THREAD_ID,
+        requestId,
+        generation: pair.generation,
+      });
+      expect(settled).toBe(false);
+      yield* Deferred.fail(request.reply, new Error("stale generation"));
+      expect((yield* Effect.promise(() => first))._tag).toBe("Failure");
+
+      const second = h.commands.reverseHandoff.run(h.registry, action);
+      yield* Deferred.succeed((yield* Queue.take(h.requests)).reply, { sequence: 2 });
+      expect(yield* Effect.promise(() => second)).toMatchObject({
+        _tag: "Success",
+        value: THREAD_ID,
+      });
+      for (const state of ["started", "cancelled"] as const) {
+        publishOriginal({ ...original.thread, handoffTransfer: { ...pair, state } });
+        expect(read(true)).toBeNull();
+      }
+      publishOriginal({
+        ...original.thread,
+        handoffTransfer: pair,
+        handoffStopCommandId: CommandId.make("stop"),
+      });
+      expect(read(true)).toBeNull();
+    }),
   );
 
   it.effect("restamps snoozedAt when re-snoozing to the same wake time", () =>

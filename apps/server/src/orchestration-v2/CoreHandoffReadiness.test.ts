@@ -1,0 +1,512 @@
+import * as SourceControlProviders from "../sourceControl/SourceControlProviderRegistry.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ProjectSetup from "../project/ProjectSetupScriptRunner.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as NodeZlib from "node:zlib";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { assert, it } from "@effect/vitest";
+import {
+  HandoffReadinessRecords,
+  OrchestrationV2Run,
+  OrchestrationV2RuntimeRequest,
+  ThreadId,
+  CommandId,
+  type HandoffRequest,
+} from "@t3tools/contracts";
+import * as Digest from "effect/crypto/Digest";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Git from "../git/GitManager.ts";
+import * as Driver from "../vcs/GitVcsDriver.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as Config from "../config.ts";
+import * as Terminals from "../terminal/Manager.ts";
+import * as Threads from "./ThreadManagementService.ts";
+import * as Sessions from "./ProviderSessionManager.ts";
+import * as Projects from "./ProjectStore.ts";
+import * as Outbox from "./EffectOutbox.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import { queryHandoffReadiness, summarizeHandoffReadiness } from "./CoreHandoffReadiness.ts";
+import { handoffId } from "./CoreHandoff.ts";
+
+const sourceId = ThreadId.make("readiness-source");
+const childId = ThreadId.make("readiness-child");
+const now = DateTime.makeUnsafe("2026-01-01T00:00:00Z");
+const selection = {
+  instanceId: "codex",
+  model: "fake",
+  options: [{ id: "effort", value: "medium" }],
+};
+const decodeRecords = Schema.decodeUnknownSync(HandoffReadinessRecords);
+const decodeRun = Schema.decodeEffect(OrchestrationV2Run);
+const decodeRequest = Schema.decodeEffect(OrchestrationV2RuntimeRequest);
+const recordsFor = (cwd: string, id = sourceId) =>
+  decodeRecords({
+    ...Object.fromEntries(
+      Object.keys(HandoffReadinessRecords.fields)
+        .filter((key) => key !== "thread")
+        .map((key) => [key, []]),
+    ),
+    thread: {
+      id,
+      projectId: "readiness-project",
+      title: "Readiness",
+      providerInstanceId: "codex",
+      modelSelection: selection,
+      createdBy: "user",
+      creationSource: "mcp",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "physical",
+      worktreePath: cwd,
+      activeProviderThreadId: "provider-thread",
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      deletedAt: null,
+    },
+    providerThreads: [
+      {
+        id: "provider-thread",
+        driver: "codex",
+        providerInstanceId: "codex",
+        providerSessionId: "session",
+        appThreadId: id,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        pendingBackgroundTasks: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+  });
+
+// A synthetic on-disk Git fixture: write only fixture bytes, never run init/commit/update-ref/read-tree.
+// The application GitManager helper and actual GitVcsDriver/VcsProcess then run real read-only Git.
+const gitFixture = Effect.fnUntraced(function* () {
+  const fs = yield* FileSystem.FileSystem,
+    path = yield* Path.Path,
+    digest = yield* Digest.Digest;
+  const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "p2-readiness-" });
+  const write = (name: string, bytes: string | Uint8Array) =>
+    Effect.gen(function* () {
+      const file = path.join(cwd, name);
+      yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+      yield* typeof bytes === "string"
+        ? fs.writeFileString(file, bytes)
+        : fs.writeFile(file, bytes);
+    });
+  const sha = (bytes: Uint8Array) =>
+    digest.digest(Digest.sha1, bytes).pipe(Effect.map((value) => Buffer.from(value)));
+  const object = (type: string, bytes: Uint8Array) =>
+    Effect.gen(function* () {
+      const data = Buffer.concat([Buffer.from(`${type} ${bytes.length}\0`), bytes]);
+      const oid = (yield* sha(data)).toString("hex");
+      yield* write(`.git/objects/${oid.slice(0, 2)}/${oid.slice(2)}`, NodeZlib.deflateSync(data));
+      return oid;
+    });
+  const blobA = yield* object("blob", Buffer.from("a\n"));
+  const blobB = yield* object("blob", Buffer.from("b\n"));
+  const tree = (oid: string) =>
+    object("tree", Buffer.concat([Buffer.from("100644 file.txt\0"), Buffer.from(oid, "hex")]));
+  const treeA = yield* tree(blobA),
+    treeB = yield* tree(blobB);
+  const commit = (oid: string) =>
+    object(
+      "commit",
+      Buffer.from(
+        `tree ${oid}\nauthor Fixture <fixture@example.test> 1 +0000\ncommitter Fixture <fixture@example.test> 1 +0000\n\nfixture\n`,
+      ),
+    );
+  const head = yield* commit(treeA),
+    checkpoint = yield* commit(treeB);
+  yield* write(".git/HEAD", "ref: refs/heads/physical\n");
+  yield* write(
+    ".git/config",
+    "[core]\nrepositoryformatversion = 0\nbare = false\nfilemode = false\nautocrlf = false\n",
+  );
+  yield* write(".git/refs/heads/physical", head + "\n");
+  yield* write(".git/refs/checkpoints/fixture", checkpoint + "\n");
+  const entry = Buffer.alloc(72);
+  entry.writeUInt32BE(0o100644, 24);
+  Buffer.from(blobA, "hex").copy(entry, 40);
+  entry.writeUInt16BE(8, 60);
+  entry.write("file.txt", 62);
+  const header = Buffer.alloc(12);
+  header.write("DIRC");
+  header.writeUInt32BE(2, 4);
+  header.writeUInt32BE(1, 8);
+  const index = Buffer.concat([header, entry]);
+  yield* write(".git/index", Buffer.concat([index, yield* sha(index)]));
+  yield* write("file.txt", "a\n");
+  return { cwd, head, checkpoint, write };
+});
+const layers = Outbox.layer.pipe(
+  Layer.provideMerge(Sqlite.layerMemory),
+  Layer.provideMerge(
+    Driver.layer.pipe(
+      Layer.provide(VcsProcess.layer),
+      Layer.provide(Config.layerTest(process.cwd(), { prefix: "p2-readiness-test-" })),
+      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    ),
+  ),
+  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+);
+
+it.layer(layers)("CoreHandoff readiness", (it) => {
+  it.effect(
+    "retains physical Git identity and verifies the exact dirty checkpoint without any Git writes",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* gitFixture();
+        const manager = yield* Git.make.pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              Layer.mock(SourceControlProviders.SourceControlProviderRegistry)({
+                resolveLink: () => undefined,
+              }),
+              Layer.mock(TextGeneration.TextGeneration)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(ProjectSetup.ProjectSetupScriptRunner)({}),
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+              Layer.mock(Projects.ProjectStoreV2)({}),
+              Layer.mock(ServerSettings.ServerSettingsService)({ streamChanges: Stream.empty }),
+            ),
+          ),
+        );
+        const clean = yield* manager.observeHandoffWorkspace(fixture.cwd, null);
+        assert.equal(clean.branch, "physical");
+        assert.equal(clean.head, fixture.head);
+        assert.equal(clean.status, "");
+        yield* fixture.write("file.txt", "b\n");
+        const dirty = yield* manager.observeHandoffWorkspace(fixture.cwd, null);
+        assert.notEqual(dirty.status, "");
+        assert.isNull(dirty.checkpointMatches);
+        const captured = yield* manager.observeHandoffWorkspace(
+          fixture.cwd,
+          "refs/checkpoints/fixture",
+        );
+        assert.equal(captured.checkpointCommit, fixture.checkpoint);
+        assert.isTrue(captured.checkpointMatches);
+        assert.notEqual(captured.worktreeDiff, "");
+        assert.equal(captured.indexDiff, "");
+      }),
+  );
+
+  it.effect.each([
+    "contradictory",
+    "eligible",
+    "manual",
+    "metadata",
+    "dirty",
+    "checkpoint",
+    "head-change",
+    "run-change",
+    "child-change",
+    "active-child",
+    "jobs",
+    "approval",
+    "queued",
+    "provider-missing",
+    "probe-missing",
+    "probe-error",
+    "terminal-array-missing",
+    "child-array-missing",
+    "terminal-missing",
+    "read-error",
+    "missing-array",
+    "index-error",
+  ])("observes %s without creating or resuming a successor", (scenario) =>
+    Effect.gen(function* () {
+      const fixture = yield* gitFixture();
+      const driver = yield* Driver.GitVcsDriver;
+      let records = recordsFor(fixture.cwd),
+        reads = 0,
+        sequences = 0,
+        indexReads = 0;
+      if (scenario === "metadata")
+        records = { ...records, thread: { ...records.thread, branch: "thread-metadata" } };
+      if (scenario === "dirty" || scenario === "checkpoint")
+        yield* fixture.write("file.txt", "b\n");
+      if (scenario === "checkpoint")
+        records = {
+          ...records,
+          checkpoints: [
+            {
+              id: "cp",
+              threadId: sourceId,
+              scopeId: "scope",
+              runId: null,
+              nodeId: "node",
+              parentCheckpointId: null,
+              ordinalWithinScope: 1,
+              appRunOrdinal: null,
+              ref: "refs/checkpoints/fixture",
+              status: "ready",
+              files: [],
+              capturedAt: now,
+            } as never,
+          ],
+        };
+      const run = yield* decodeRun({
+        id: "queued-run",
+        threadId: sourceId,
+        ordinal: 1,
+        providerInstanceId: "codex",
+        modelSelection: selection,
+        providerThreadId: null,
+        userMessageId: "message",
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "queued",
+        requestedAt: now,
+        startedAt: null,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      });
+      if (scenario === "queued" || scenario === "contradictory")
+        records = { ...records, runs: [run] };
+      if (scenario === "approval")
+        records = {
+          ...records,
+          runtimeRequests: [
+            yield* decodeRequest({
+              id: "approval",
+              nodeId: "node",
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "command",
+              status: "pending",
+              responseCapability: { type: "message" },
+              createdAt: now,
+              resolvedAt: null,
+            }),
+          ],
+        };
+      const outbox = yield* Outbox.EffectOutboxV2;
+      const request = {
+        type: "thread.handoff",
+        handoff: {
+          goal: "Finish",
+          decisions: [],
+          state: { branch: "physical", commits: [], verified: [] },
+          deadEnds: [],
+          next: "Review",
+          pointers: [],
+        },
+        projectId: records.thread.projectId,
+        sourceThreadId: sourceId,
+        successorThreadId: ThreadId.make("reserved-only"),
+        modelSelection: records.thread.modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        worktreePath: fixture.cwd,
+        branch: "physical",
+      } satisfies HandoffRequest;
+      yield* outbox.enqueue([
+        {
+          id: handoffId(sourceId),
+          commandId: CommandId.make(handoffId(sourceId)),
+          threadId: sourceId,
+          request,
+        },
+      ]);
+      const beforeRow = yield* outbox.get(handoffId(sourceId));
+      const sql = yield* SqlClient.SqlClient;
+      const successorCount =
+        yield* sql`SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads`;
+
+      const readRecords: Threads.ThreadManagementService["Service"]["readHandoffRecords"] = (id) =>
+        Effect.sync(() => {
+          reads++;
+          if (scenario === "read-error") throw new Error("fixture read failure");
+          if (id === childId)
+            return {
+              ...recordsFor(fixture.cwd, childId),
+              runs: scenario === "active-child" ? [run] : [],
+            } as never;
+          if (scenario === "missing-array") return { ...records, runs: undefined } as never;
+          return scenario === "run-change" && reads > 1
+            ? ({ ...records, runs: [run] } as never)
+            : (records as never);
+        });
+      let observedSequence = 1;
+      const observe = (expected = "older-generation") =>
+        queryHandoffReadiness(sourceId, expected).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              Layer.mock(Threads.ThreadManagementService)({
+                readHandoffRecords: readRecords,
+                getThreadEventSequence: () =>
+                  Effect.sync(
+                    () => ++sequences && (scenario === "run-change" ? sequences : observedSequence),
+                  ),
+                readHandoffChildIds: () =>
+                  Effect.sync(() => {
+                    indexReads++;
+                    if (scenario === "index-error") throw new Error("index unavailable");
+                    if (scenario === "child-array-missing") return undefined as never;
+                    return scenario === "active-child" ||
+                      (scenario === "child-change" && indexReads > 1)
+                      ? [childId]
+                      : [];
+                  }),
+              }),
+              Layer.mock(Projects.ProjectStoreV2)({}),
+              Layer.mock(Git.GitManager)({
+                observeHandoffWorkspace: Effect.fnUntraced(function* (cwd, ref) {
+                  const result = yield* Git.observeHandoffWorkspace(driver, cwd, ref);
+                  if (scenario === "head-change" && reads === 1)
+                    yield* fixture
+                      .write(".git/refs/heads/physical", fixture.checkpoint + "\n")
+                      .pipe(Effect.orDie);
+                  return result;
+                }),
+              }),
+              Layer.mock(Sessions.ProviderSessionManagerV2)({
+                observeHandoffSession: () =>
+                  scenario === "provider-missing"
+                    ? Effect.succeedNone
+                    : Effect.succeedSome({
+                        idleGeneration: 7,
+                        busyTurns: [],
+                        runtime: {
+                          providerSessionId: "session",
+                          instanceId: selection.instanceId,
+                          driver: "codex",
+                          handoffReadinessCoverage:
+                            scenario === "eligible"
+                              ? {
+                                  scope: "all-app-owned-work",
+                                  nativeSubagents: true,
+                                  detachedTasks: true,
+                                }
+                              : undefined,
+                          hasPendingBackgroundWork:
+                            scenario === "probe-missing" || scenario === "contradictory"
+                              ? undefined
+                              : scenario === "probe-error"
+                                ? Effect.die("fixture probe failure")
+                                : Effect.succeed(scenario === "jobs"),
+                          hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+                        } as never,
+                      }),
+              }),
+              Layer.mock(Terminals.TerminalManager)({
+                observeHandoff: () =>
+                  scenario === "terminal-array-missing"
+                    ? Effect.succeed(undefined as never)
+                    : scenario === "terminal-missing"
+                      ? Effect.die("fixture terminal failure")
+                      : Effect.succeed([]),
+              }),
+            ),
+          ),
+        );
+      const result = yield* observe();
+      assert.isFalse(result.expectedGenerationMatches);
+      assert.isFalse(result.transferAuthorized);
+      assert.isTrue(result.observationalOnly);
+      assert.isTrue(Object.isFrozen(result.before.children));
+      assert.deepEqual(yield* outbox.get(handoffId(sourceId)), beforeRow);
+      assert.deepEqual(
+        yield* sql`SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads`,
+        successorCount,
+      );
+      if (result.before.sourceRecords !== null)
+        assert.equal(result.before.workspace?.head, fixture.head);
+      if (
+        [
+          "contradictory",
+          "metadata",
+          "dirty",
+          "active-child",
+          "jobs",
+          "approval",
+          "queued",
+          "run-change",
+          "head-change",
+        ].includes(scenario)
+      )
+        assert.equal(result.classification, "known_blocked");
+      else if (
+        [
+          "provider-missing",
+          "probe-missing",
+          "probe-error",
+          "terminal-array-missing",
+          "child-array-missing",
+          "terminal-missing",
+          "read-error",
+          "missing-array",
+          "index-error",
+          "head-change",
+          "child-change",
+        ].includes(scenario)
+      )
+        assert.equal(result.classification, "unknown");
+      else
+        assert.equal(
+          result.classification,
+          scenario === "eligible" ? "automatically_eligible" : "manual_review",
+        );
+      if (["head-change", "run-change", "child-change"].includes(scenario))
+        assert.isFalse(result.stable);
+      if (scenario === "checkpoint") {
+        assert.isTrue(result.before.workspace?.checkpointMatches);
+        assert.equal(result.before.workspace?.checkpointCommit, fixture.checkpoint);
+      }
+      if (scenario === "contradictory") {
+        assert.isNotEmpty(result.before.blockers);
+        assert.isNotEmpty(result.before.unknowns);
+      }
+      assert.match(result.generation, /^[a-f0-9]{64}$/);
+      const large = {
+        ...result,
+        before: {
+          ...result.before,
+          request: "PRIVATE_HISTORY".repeat(100_000),
+          blockers: Array.from({ length: 1000 }, (_, index) => `${index}:` + "\u0000".repeat(200)),
+          workspace: result.before.workspace && {
+            ...result.before.workspace,
+            indexDiff: "BINARY_DIFF".repeat(100_000),
+          },
+        },
+      };
+      const summary = summarizeHandoffReadiness(large);
+      assert.isBelow(Buffer.byteLength(JSON.stringify(summary), "utf8"), 8192);
+      assert.notInclude(JSON.stringify(summary), "PRIVATE_HISTORY");
+      assert.notInclude(JSON.stringify(summary), "BINARY_DIFF");
+      if (scenario === "eligible") {
+        const repeated = yield* observe(result.generation);
+        assert.equal(repeated.generation, result.generation);
+        assert.isTrue(repeated.expectedGenerationMatches);
+        observedSequence++;
+        const changed = yield* observe(result.generation);
+        assert.notEqual(changed.generation, result.generation);
+        assert.isFalse(changed.expectedGenerationMatches);
+        assert.isFalse((yield* observe("different-material-generation")).expectedGenerationMatches);
+      }
+
+      // No launch/settle/send service is provided: query cannot create executable work.
+    }),
+  );
+});

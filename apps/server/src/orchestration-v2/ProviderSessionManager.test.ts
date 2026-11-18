@@ -1080,6 +1080,11 @@ it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", ()
         Fiber.join(firstFiber),
         Fiber.join(secondFiber),
       ]);
+      const firstObservation = yield* manager.observeHandoffSession(firstProviderSessionId);
+      const repeatedObservation = yield* manager.observeHandoffSession(firstProviderSessionId);
+      assert.isTrue(Option.isSome(firstObservation));
+      assert.deepEqual(firstObservation, repeatedObservation);
+      assert.isTrue(Option.isNone(yield* manager.observeHandoffSession("missing" as never)));
       assert.notStrictEqual(firstRuntime, secondRuntime);
       assert.equal((yield* Ref.get(state)).openCount, 2);
     });

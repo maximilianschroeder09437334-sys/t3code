@@ -1,3 +1,5 @@
+import * as HandoffApprovalProducer from "./HandoffApprovalProducer.ts";
+import * as HandoffTransferAdmission from "./HandoffTransferAdmission.ts";
 import * as WorktreeBranchSync from "./WorktreeBranchSync.ts";
 import * as GuestShareService from "../guest/GuestShareService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
@@ -27,6 +29,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
+import * as ActivityLedger from "../activity/ActivityLedger.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -166,10 +169,22 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
   ),
 );
 
+const layerHandoffTransferAdmissionProvided = HandoffTransferAdmission.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerStores,
+      layerEventSink,
+      ThreadCommandExecutor.layer,
+      layerProviderSessionManagerProvided,
+    ),
+  ),
+);
+
 const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       layerContextHandoffServiceProvided,
+      layerHandoffTransferAdmissionProvided,
       layerEventSink,
       IdAllocator.layer,
       ProjectionStore.layer,
@@ -222,6 +237,7 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       layerCheckpointServiceProvided,
+      layerHandoffTransferAdmissionProvided,
       CommandPolicy.layer,
       layerStores,
       layerEventSink,
@@ -332,10 +348,20 @@ const layerThreadTitleRegenerationProvided = ThreadTitleRegenerationService.laye
     ),
   ),
 );
+const layerHandoffApprovalProducerProvided = HandoffApprovalProducer.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(layerThreadManagementProvided, layerProviderSessionManagerProvided, layerStores),
+  ),
+);
+
 const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   Layer.provide(
     Layer.mergeAll(
       layerRunFinalizationServiceProvided,
+      layerHandoffApprovalProducerProvided,
+      layerCommandReceiptStoreProvided,
+      ActivityLedger.layer,
+      EffectOutbox.layer,
       layerCheckpointRollbackServiceProvided,
       layerProviderSessionManagerProvided,
       layerProviderTurnControlServiceProvided,
@@ -354,6 +380,7 @@ const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.laye
   Layer.provide(
     Layer.mergeAll(
       layerEffectWorkerProvided,
+      layerThreadManagementProvided,
       layerStores,
       layerEventSink,
       IdAllocator.layer,
@@ -374,6 +401,8 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 );
 
 export const layer = Layer.mergeAll(
+  layerEffectExecutorProvided,
+  layerHandoffTransferAdmissionProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,
@@ -413,6 +442,8 @@ export const layerProduction = Layer.mergeAll(
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(
+  Layer.provide(layerThreadLaunchProvided),
+  Layer.provide(ActivityLedger.layer),
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
   Layer.provideMerge(layerProjectService),
   Layer.provide(Scheduler.layer),

@@ -1,3 +1,5 @@
+import { hasHandoffResponseAuthority } from "./auth/HandoffResponseAuthority.ts";
+import { RuntimeRequestId, CommandId, ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
 import * as WebPushNotifications from "./notifications/WebPushNotifications.ts";
 import * as ActivityLedger from "./activity/ActivityLedger.ts";
 import * as HookAutomation from "./hooks/HookAutomation.ts";
@@ -2917,5 +2919,85 @@ it.effect("direct project writes give hooks the same path field as staged writes
       ),
     ),
     Effect.scoped,
+  ),
+);
+
+it.effect("handoff RPC binds only the authenticated non-MCP operate client context", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("handoff-rpc-source");
+    const requestId = RuntimeRequestId.make("handoff-rpc-pending");
+    const responses: boolean[] = [];
+    for (const subject of ["paired-client", "mcp-client"]) {
+      const services = Layer.mergeAll(
+        layerUnusedConfigRpcServices,
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          dispatch: (command) =>
+            Effect.gen(function* () {
+              assert.equal(command.type, "runtime-request.respond");
+              if (command.type !== "runtime-request.respond") throw new Error("Wrong command");
+              assert.equal(command.requestId, requestId);
+              assert.equal(command.threadId, threadId);
+              assert.equal(command.handoffGeneration, "bound-generation");
+              responses.push(yield* hasHandoffResponseAuthority);
+              return { sequence: 1, storedEvents: [] };
+            }),
+        }),
+      );
+      const rpcLayer = layerWsRpc(
+        {
+          sessionId: AuthSessionId.make(`handoff-${subject}`),
+          subject,
+          method: "browser-session-cookie",
+          scopes: [AuthOrchestrationOperateScope],
+        },
+        {},
+        yield* ServerBrowser.ServerBrowser,
+        () => Effect.void,
+        { secretReferences: false },
+      ).pipe(Layer.provide(services));
+      const handler = yield* WsRpcGroup.accessHandler(
+        ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+      ).pipe(Effect.provide(rpcLayer));
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (
+            tag,
+          ): tag is Exclude<
+            keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
+            typeof ORCHESTRATION_V2_WS_METHODS.dispatchCommand
+          > => tag !== ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+        ),
+      );
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(
+            group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, (payload, context) =>
+              handler(payload, context),
+            ),
+            RpcAuthorization.layer([AuthOrchestrationOperateScope]),
+          ),
+        ),
+      );
+      yield* client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+        type: "runtime-request.respond",
+        commandId: CommandId.make(`handoff-rpc-${subject}`),
+        threadId,
+        requestId,
+        decision: "accept",
+        handoffGeneration: "bound-generation",
+      });
+    }
+    assert.deepEqual(responses, [true, false]);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
   ),
 );

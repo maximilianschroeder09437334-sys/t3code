@@ -106,6 +106,14 @@ export const AgentExecutionIntent = Schema.Struct({
   modelSelection: ModelSelection,
   interactionMode: Schema.optional(ProviderInteractionMode),
   planningPurpose: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1000))),
+  restrictedTools: Schema.optional(
+    Schema.Struct({
+      profile: Schema.Literal("notion-outbox-v1"),
+      projectId: ProjectId,
+      taskId: ScheduledTaskId,
+      batchId: TrimmedNonEmptyString,
+    }),
+  ),
 });
 export type AgentExecutionIntent = typeof AgentExecutionIntent.Type;
 
@@ -477,7 +485,29 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   completedAt: Schema.DateTimeUtc,
 });
 
+export const HandoffTransfer = Schema.Struct({
+  previousSettledOverride: Schema.optional(Schema.NullOr(Schema.Literals(["active", "settled"]))),
+  recoveryCount: Schema.optional(Schema.Number),
+  parkedRecovery: Schema.optional(
+    Schema.Struct({
+      reason: Schema.Literal("replacement-lost-after-bootstrap"),
+      bootstrapEventId: EventId,
+      effectId: Schema.String,
+    }),
+  ),
+  requestId: RuntimeRequestId,
+  generation: Schema.String,
+  sourceThreadId: ThreadId,
+  successorThreadId: ThreadId,
+  runId: RunId,
+  state: Schema.Literals(["reserved", "released", "started", "cancelled"]),
+});
+export type HandoffTransfer = typeof HandoffTransfer.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
+  handoffStopCommandId: Schema.optional(CommandId),
+  handoffTransfer: Schema.optional(HandoffTransfer),
+  handoffSourceThreadId: Schema.optional(ThreadId),
   ...OrchestrationV2CreationFields,
   agentExecutionIntent: Schema.optional(AgentExecutionIntent),
   id: ThreadId,
@@ -1293,6 +1323,25 @@ export function isQueuedProviderThreadPlaceholder(
   );
 }
 
+export const HandoffApprovalCapability = Schema.Struct({
+  releaseEvidence: Schema.optional(Schema.String),
+  type: Schema.Literal("handoff"),
+  requestId: RuntimeRequestId,
+  sourceThreadId: ThreadId,
+  successorThreadId: ThreadId,
+  generation: TrimmedNonEmptyString,
+  declaration: Schema.Literals([
+    "I reviewed native and detached work manually. This decision records review only; transfer remains parked.",
+    "I reviewed native and detached work manually. This supplies only manual coverage; guarded transfer must still revalidate all app-owned work.",
+  ]),
+  blockers: Schema.Array(Schema.String),
+  unknowns: Schema.Array(Schema.String),
+  manualReview: Schema.Array(Schema.String),
+  sourceSequence: Schema.Number,
+  children: Schema.Array(Schema.Struct({ id: ThreadId, sequence: Schema.Number })),
+});
+export type HandoffApprovalCapability = typeof HandoffApprovalCapability.Type;
+
 export const OrchestrationV2RuntimeRequest = Schema.Struct({
   id: RuntimeRequestId,
   nodeId: NodeId,
@@ -1304,6 +1353,7 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   ]),
   status: Schema.Literals(["pending", "resolved", "expired", "cancelled"]),
   responseCapability: Schema.Union([
+    HandoffApprovalCapability,
     Schema.Struct({
       type: Schema.Literal("live"),
       providerSessionId: ProviderSessionId,
@@ -2082,6 +2132,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literals(["provider-session.attached", "provider-session.updated"]),
     payload: OrchestrationV2ProviderSession,
+    handoffStartupBefore: Schema.optional(OrchestrationV2ProviderSession),
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -3032,6 +3083,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literals(["provider-session.attached", "provider-session.updated"]),
     payload: OrchestrationV2ProviderSessionJson,
+    handoffStartupBefore: Schema.optional(OrchestrationV2ProviderSessionJson),
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -3102,6 +3154,13 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
 export type OrchestrationV2DomainEventJson = typeof OrchestrationV2DomainEventJson.Type;
 
 export const OrchestrationV2Command = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("handoff.transfer.reverse"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+    generation: Schema.String,
+  }),
   Schema.Struct({
     type: Schema.Literal("thread.stop"),
     commandId: CommandId,
@@ -3522,6 +3581,7 @@ export const OrchestrationV2Command = Schema.Union([
     feedback: Schema.optional(Schema.String),
     answers: Schema.optional(ProviderUserInputAnswers),
     attachmentsByQuestionId: Schema.optional(UserInputAttachments),
+    handoffGeneration: Schema.optional(Schema.String),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.user-input.dismiss"),
@@ -3616,6 +3676,23 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literals([
+      "handoff.transfer.prepare",
+      "handoff.transfer.cancel",
+      "handoff.transfer.recover",
+    ]),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+    generation: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("handoff.approval.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    review: HandoffApprovalCapability,
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),

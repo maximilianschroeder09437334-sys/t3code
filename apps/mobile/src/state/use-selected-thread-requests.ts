@@ -1,3 +1,4 @@
+import { canRespondToApproval } from "@t3tools/client-runtime/state/thread-requests";
 import * as Dialog from "../components/ui/Dialog";
 import { useServerConfigs } from "./entities";
 import {
@@ -299,12 +300,8 @@ export function useSelectedThreadRequests() {
     ) {
       return;
     }
-    if (
-      activePendingApprovals.find((approval) => approval.requestId === requestId)
-        ?.responseCapability !== "live"
-    ) {
-      return;
-    }
+    const approval = activePendingApprovals.find((item) => item.requestId === requestId);
+    if (!canRespondToApproval(approval, decision)) return;
 
     setRespondingApprovalId(requestId);
     const result = await respondToApproval({
@@ -313,6 +310,9 @@ export function useSelectedThreadRequests() {
         threadId: selectedThreadShell.id,
         requestId,
         decision,
+        ...(approval?.handoffReview
+          ? { handoffGeneration: approval.handoffReview.generation }
+          : {}),
         ...(feedback === undefined ? {} : { feedback }),
       },
     });

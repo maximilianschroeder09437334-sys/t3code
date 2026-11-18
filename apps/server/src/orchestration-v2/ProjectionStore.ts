@@ -1,3 +1,4 @@
+import type { ProviderSessionId } from "@t3tools/contracts";
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
 import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
@@ -539,7 +540,26 @@ export interface ProjectionStoreV2Shape {
   /** Child threads of the thread's app-owned tasks, in task order, without decoding the tasks. */
   readonly listAppOwnedChildThreadIds: (
     threadId: ThreadId,
+    includeHandoffLineage?: boolean,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  readonly listHandoffSessionWrites: (
+    threadId: ThreadId,
+    sessionId: ProviderSessionId,
+    afterSequence: number,
+  ) => Effect.Effect<
+    ReadonlyArray<{
+      readonly sequence: number;
+      readonly eventId: string;
+      readonly threadId: string;
+      readonly commandId: string | null;
+      readonly type: string;
+    }>,
+    ProjectionStoreV2Error
+  >;
+  readonly hasForeignHandoffCheckoutOwner: (
+    threadId: ThreadId,
+    paths: ReadonlyArray<string>,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasPendingDelegatedCompletion: (
     childThreadId: ThreadId,
   ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
@@ -6295,13 +6315,60 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.count ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+    const listHandoffSessionWrites: ProjectionStoreV2Shape["listHandoffSessionWrites"] = Effect.fn(
+      "ProjectionStoreV2.listHandoffSessionWrites",
+    )((threadId, sessionId, afterSequence) =>
+      sql<{
+        readonly sequence: number;
+        readonly eventId: string;
+        readonly threadId: string;
+        readonly commandId: string | null;
+        readonly type: string;
+      }>`
+          SELECT sequence, event_id AS eventId, stream_id AS threadId, command_id AS commandId, event_type AS type
+          FROM orchestration_events
+          WHERE sequence > ${afterSequence} AND aggregate_kind = 'thread' AND application_event_version = 2
+            AND event_type IN ('provider-session.attached', 'provider-session.updated')
+            AND json_extract(payload_json, '$.id') = ${sessionId}
+          ORDER BY sequence
+          LIMIT 3
+        `.pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause }))),
+    );
+
+    const hasForeignHandoffCheckoutOwner: ProjectionStoreV2Shape["hasForeignHandoffCheckoutOwner"] =
+      Effect.fn("ProjectionStoreV2.hasForeignHandoffCheckoutOwner")(function* (threadId, paths) {
+        const rows = yield* sql<{ readonly claimed: number }>`
+          SELECT 1 AS claimed
+          FROM orchestration_v2_projection_threads t
+          LEFT JOIN projection_projects p ON p.project_id = t.project_id
+          WHERE json_extract(t.payload_json, '$.handoffTransfer.state') = 'started'
+            AND json_extract(t.payload_json, '$.handoffTransfer.successorThreadId') <> ${threadId}
+            AND COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root)
+              IN (SELECT value FROM json_each(${encodeIdList(paths)}))
+          LIMIT 1
+        `.pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
+        return rows.length > 0;
+      });
     const listAppOwnedChildThreadIds: ProjectionStoreV2Shape["listAppOwnedChildThreadIds"] = (
       threadId,
+      includeHandoffLineage = false,
     ) =>
-      sql<{ readonly child_thread_id: string }>`SELECT child_thread_id
+      (includeHandoffLineage
+        ? sql<{ readonly child_thread_id: string }>`SELECT child_thread_id FROM (
+          SELECT child_thread_id, COALESCE(started_at, '') AS created_at, subagent_id AS id, 0 AS kind
+          FROM orchestration_v2_projection_subagents
+          WHERE thread_id = ${threadId} AND origin = 'app_owned' AND child_thread_id IS NOT NULL
+          UNION ALL
+          SELECT thread_id AS child_thread_id, created_at, thread_id AS id, 1 AS kind
+          FROM orchestration_v2_projection_threads
+          WHERE json_extract(payload_json, '$.lineage.parentThreadId') = ${threadId}
+            AND json_extract(payload_json, '$.lineage.relationshipToParent') = 'subagent'
+        ) ORDER BY kind, created_at, id ASC`
+        : sql<{ readonly child_thread_id: string }>`SELECT child_thread_id
         FROM orchestration_v2_projection_subagents
         WHERE thread_id = ${threadId} AND origin = 'app_owned' AND child_thread_id IS NOT NULL
-        ORDER BY COALESCE(started_at, ''), subagent_id ASC`.pipe(
+        ORDER BY COALESCE(started_at, ''), subagent_id ASC`
+      ).pipe(
         Effect.map((rows) => [...new Set(rows.map((row) => ThreadId.make(row.child_thread_id)))]),
         Effect.mapError(controlReadError(threadId)),
       );
@@ -9380,6 +9447,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getTranscriptByteFloor: readOnReader(getTranscriptByteFloor),
       getSubagentCount: readOnReader(getSubagentCount),
       listAppOwnedChildThreadIds: readOnReader(listAppOwnedChildThreadIds),
+      listHandoffSessionWrites: readOnReader(listHandoffSessionWrites),
+      hasForeignHandoffCheckoutOwner: readOnReader(hasForeignHandoffCheckoutOwner),
       hasPendingDelegatedCompletion: readOnReader(hasPendingDelegatedCompletion),
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
       getTurnItem: readOnReader(getTurnItem),

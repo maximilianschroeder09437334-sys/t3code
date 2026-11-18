@@ -2,6 +2,7 @@ import {
   CheckpointId,
   CheckpointScopeId,
   CommandId,
+  HandoffRequest,
   MessageId,
   ModelSelection,
   NodeId,
@@ -33,6 +34,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { forkParked } from "../serverActivation.ts";
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
+  HandoffRequest,
   Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
@@ -149,6 +151,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "thread.handoff",
   "provider-runtime.continue",
   "hook.continue",
   "provider-session.detach",
@@ -182,6 +185,9 @@ export const OrchestrationEffectStatusV2 = Schema.Literals([
 export type OrchestrationEffectStatusV2 = typeof OrchestrationEffectStatusV2.Type;
 
 /** Receipts deduplicate retries, and restart re-enqueues need far less than a week. Retain failed rows to keep deleted-thread worktrees. */
+export const HANDOFF_PROCESS_LOSS_REASON =
+  "Cancelled because the server process ended before the effect completed.";
+
 export const SETTLED_EFFECT_RETENTION = Duration.days(7);
 const PRUNE_BATCH_SIZE = 500;
 
@@ -238,6 +244,7 @@ export interface EffectOutboxV2Shape {
   ) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
   readonly cancelUnsettled: (input: {
     readonly threadId: ThreadId;
+    readonly runId?: RunId;
     readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
     readonly reason: string;
   }) => Effect.Effect<ReadonlyArray<string>, EffectOutboxError>;
@@ -359,6 +366,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           SELECT 1
           FROM orchestration_v2_effect_outbox AS active
           WHERE active.thread_id = candidate.thread_id
+            AND ((active.effect_type = 'thread.handoff') = (candidate.effect_type = 'thread.handoff'))
             AND (
               active.status = 'running'
               OR (
@@ -483,7 +491,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           ),
         ),
       cancelUnsettled: Effect.fn("EffectOutbox.cancelUnsettled")(
-        function* ({ threadId, effectTypes, reason }) {
+        function* ({ threadId, runId, effectTypes, reason }) {
           if (effectTypes.length === 0) return [];
           const now = DateTime.formatIso(yield* DateTime.now);
           const rows = yield* sql<{ readonly effect_id: string }>`
@@ -495,6 +503,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               updated_at = ${now},
               last_error = ${reason}
             WHERE thread_id = ${threadId}
+              ${runId === undefined ? sql`` : sql`AND json_extract(payload_json, '$.runId') = ${runId}`}
               AND status IN ('pending', 'running')
               AND effect_type IN ${sql.in(effectTypes)}
             RETURNING effect_id
@@ -539,7 +548,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             lease_owner = NULL,
             completed_at = ${now},
             updated_at = ${now},
-            last_error = 'Cancelled because the server process ended before the effect completed.'
+            last_error = ${HANDOFF_PROCESS_LOSS_REASON}
           WHERE status IN ('pending', 'running')
             AND effect_type IN ${sql.in(PROCESS_BOUND_EFFECT_TYPES)}
           RETURNING effect_id
@@ -748,6 +757,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             SELECT rowid
             FROM orchestration_v2_effect_outbox
             WHERE status IN ('succeeded', 'cancelled')
+              AND effect_type != 'thread.handoff'
               AND completed_at < ${cutoff}
               AND NOT (
                 effect_type = 'provider-runtime.continue'

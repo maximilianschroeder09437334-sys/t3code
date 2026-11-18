@@ -1428,6 +1428,8 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
+import { withAuthenticatedHandoffResponse } from "./auth/HandoffResponseAuthority.ts";
+
 export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
@@ -2006,7 +2008,9 @@ export const layerWsRpc = (
                             "creationSource" in command ? command.creationSource : "web",
                         }),
                       )
-                  ).pipe(Effect.provide(intakeContext)),
+                  ).pipe(Effect.provide(intakeContext), (effect) =>
+                    withAuthenticatedHandoffResponse(currentSession, effect),
+                  ),
                 )
                 .pipe(
                   Effect.tap((result) =>

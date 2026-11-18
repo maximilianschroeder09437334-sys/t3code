@@ -66,6 +66,9 @@ import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as ThreadNotesHandlers from "./toolkits/thread/notesHandlers.ts";
 import { ActivityToolkit } from "./toolkits/activity/tools.ts";
 import * as ActivityHandlers from "./toolkits/activity/handlers.ts";
+import { HandoffToolkit } from "./toolkits/handoff/tools.ts";
+import * as HandoffHandlers from "./toolkits/handoff/handlers.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -1272,6 +1275,10 @@ export const layerThreadNotesToolkit = toolkitRegistration(
   ThreadNotesHandlers.layer,
 );
 
+export const layerHandoffToolkit = toolkitRegistration(HandoffToolkit, HandoffHandlers.layer).pipe(
+  Layer.provideMerge(EffectOutbox.layer),
+);
+
 export const layerActivityToolkit = toolkitRegistration(ActivityToolkit, ActivityHandlers.layer);
 
 const layerMessageToolkit = toolkitRegistration(MessageToolkit, MessageHandlers.layer);
@@ -1362,6 +1369,7 @@ export const layerTools = Layer.mergeAll(
   layerThreadToolkit,
   layerThreadNotesToolkit,
   layerActivityToolkit,
+  layerHandoffToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,

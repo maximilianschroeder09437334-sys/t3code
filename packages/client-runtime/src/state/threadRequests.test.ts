@@ -1,3 +1,4 @@
+import { canRespondToApproval } from "./threadRequests.ts";
 import { presentThreadShell } from "./models.ts";
 import { threadKey } from "./entities.ts";
 import {
@@ -641,4 +642,69 @@ it("loads only child approvals and retains their destination across environments
   expect(readDetails).not.toHaveBeenCalled();
   unmount();
   registry.dispose();
+});
+
+it("maps only bound handoff reviews and permits only one-time controls on both clients", () => {
+  const id = RuntimeRequestId.make("handoff-review");
+  const review = {
+    type: "handoff" as const,
+    requestId: id,
+    sourceThreadId: ThreadId.make("source"),
+    successorThreadId: ThreadId.make("successor"),
+    generation: "opaque-generation",
+    declaration:
+      "I reviewed native and detached work manually. This decision records review only; transfer remains parked." as const,
+    blockers: [],
+    unknowns: [],
+    children: [],
+    manualReview: ["detached work"],
+    sourceSequence: 1,
+  };
+  const request = {
+    id,
+    nodeId,
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "permission" as const,
+    status: "pending" as const,
+    responseCapability: review,
+    createdAt: v2Now,
+    resolvedAt: null,
+  };
+  const mapped = derivePendingThreadRequests({ runtimeRequests: [request], turnItems: [] })
+    .approvals[0]!;
+  expect(mapped.handoffReview).toEqual(review);
+  expect(mapped.options?.map((item) => item.decision)).toEqual(["accept", "decline", "cancel"]);
+  for (const decision of ["accept", "decline", "cancel"] as const)
+    expect(canRespondToApproval(mapped, decision)).toBe(true);
+  expect(canRespondToApproval(mapped, "acceptForSession")).toBe(false);
+  expect(
+    canRespondToApproval({ ...mapped, handoffReview: { ...review, blockers: ["busy"] } }, "accept"),
+  ).toBe(false);
+  expect(
+    canRespondToApproval(
+      { ...mapped, handoffReview: { ...review, unknowns: ["failed read"] } },
+      "accept",
+    ),
+  ).toBe(false);
+  expect(
+    derivePendingThreadRequests({
+      runtimeRequests: [
+        {
+          ...request,
+          responseCapability: { ...review, requestId: RuntimeRequestId.make("other") },
+        },
+      ],
+      turnItems: [],
+    }).approvals,
+  ).toEqual([]);
+  expect(
+    derivePendingThreadRequests({
+      runtimeRequests: [{ ...request, status: "resolved" }],
+      turnItems: [],
+    }).approvals,
+  ).toEqual([]);
+  expect(canRespondToApproval({ ...mapped, responseCapability: "not_resumable" }, "accept")).toBe(
+    false,
+  );
 });

@@ -116,6 +116,12 @@ function startWithMissingWorktree(
     };
     readonly interactionMode?: "plan";
     readonly planningPurpose?: string;
+    readonly restrictedTools?: {
+      readonly profile: "notion-outbox-v1";
+      readonly projectId: string;
+      readonly taskId: string;
+      readonly batchId: string;
+    };
   },
   actor: "agent" | "user" = "agent",
 ) {
@@ -294,6 +300,39 @@ function startWithMissingWorktree(
   };
 }
 
+it("rejects a restricted intent before provider start for every actor", async () => {
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    {
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "medium" }],
+      },
+      restrictedTools: {
+        profile: "notion-outbox-v1",
+        projectId: "project_provider_turn_start_projection_failure",
+        taskId: "task",
+        batchId: "batch",
+      },
+    },
+    "user",
+  );
+  await expect(fixture.start).rejects.toBeUndefined();
+  expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn-item.updated",
+          payload: expect.objectContaining({ title: "Restricted tools unsupported" }),
+        }),
+      ]),
+    }),
+  );
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
 it("blocks an agent-created Opus execution before provider start on resume", async () => {
   const fixture = startWithMissingWorktree("/tmp/project", undefined, true);
   await expect(fixture.start).rejects.toBeUndefined();

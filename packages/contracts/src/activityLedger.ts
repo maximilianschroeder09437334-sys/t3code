@@ -39,6 +39,8 @@ export const ActivityCommits = Schema.Array(
 ).check(Schema.isMaxLength(20));
 
 export const ActivityLinks = Schema.Struct({
+  sourceThreadId: Schema.optional(ThreadId),
+  successorThreadId: Schema.optional(ThreadId),
   commits: Schema.optional(ActivityCommits),
   prUrl: Schema.optional(ActivityUrl),
   notionUrl: Schema.optional(ActivityUrl),

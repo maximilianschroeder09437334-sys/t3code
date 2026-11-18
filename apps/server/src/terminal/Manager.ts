@@ -14,6 +14,7 @@ import {
   TerminalCwdNotFoundError,
   TerminalCwdStatError,
   TerminalError,
+  TerminalHandoffFencedError,
   TerminalHistoryError,
   TerminalNotRunningError,
   TerminalProviderInstanceNotFoundError,
@@ -21,6 +22,7 @@ import {
   TerminalResizeError,
   TerminalSessionLookupError,
   TerminalWriteError,
+  ThreadId,
   type TerminalAttachInput,
   type TerminalAttachStreamEvent,
   type TerminalClearInput,
@@ -79,6 +81,9 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
+import { assertHandoffDispatch } from "../orchestration-v2/HandoffTransferAdmission.ts";
+import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
+import { ThreadCommandExecutor } from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
 export {
@@ -181,6 +186,10 @@ export class TerminalManager extends Context.Service<
       input: TerminalOpenInput,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
+    readonly observeHandoff: (
+      threadIds: ReadonlyArray<string>,
+      cwd: string,
+    ) => Effect.Effect<ReadonlyArray<import("@t3tools/contracts").HandoffTerminalObservation>>;
     readonly getShell: (input: TerminalObserveInput) => Effect.Effect<string, TerminalError>;
 
     /**
@@ -1736,6 +1745,8 @@ export const make = Effect.fn("TerminalManager.make")(function* (
 ) {
   const { terminalLogsDir, providerStatusCacheDir, baseDir } = yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
+  const projections = yield* ProjectionStoreV2;
+  const threadCommands = yield* ThreadCommandExecutor;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -1764,7 +1775,10 @@ export const make = Effect.fn("TerminalManager.make")(function* (
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
-  });
+  }).pipe(
+    Effect.provideService(ProjectionStoreV2, projections),
+    Effect.provideService(ThreadCommandExecutor, threadCommands),
+  );
 });
 
 export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(function* (
@@ -1775,6 +1789,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const context = yield* Effect.context<never>();
   const runFork = Effect.runForkWith(context);
 
+  const projections = yield* Effect.serviceOption(ProjectionStoreV2);
+  const threadCommands = yield* Effect.serviceOption(ThreadCommandExecutor);
   const logsDir = options.logsDir;
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
   const historyByteLimit = options.historyByteLimit ?? DEFAULT_HISTORY_BYTE_LIMIT;
@@ -3335,9 +3351,56 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       openWithWorkspaceLease(input),
     );
 
+  const withHandoffAdmission = <A, E, R>(
+    input: TerminalObserveInput & {
+      readonly cwd?: string | undefined;
+      readonly worktreePath?: string | null | undefined;
+    },
+    effect: Effect.Effect<A, E, R>,
+    lockManagerThread = true,
+  ): Effect.Effect<A, E | TerminalHandoffFencedError, R> => {
+    const locked = <A, E, R>(work: Effect.Effect<A, E, R>) =>
+      lockManagerThread ? withThreadLock(input.threadId, work) : work;
+    if (Option.isNone(projections) || Option.isNone(threadCommands)) return locked(effect);
+    const store = projections.value;
+    const commands = threadCommands.value;
+    const threadId = ThreadId.make(input.threadId);
+    const denied = () => new TerminalHandoffFencedError({ threadId, terminalId: input.terminalId });
+    return commands.withLock(
+      threadId,
+      locked(
+        Effect.gen(function* () {
+          yield* assertHandoffDispatch(store, threadId, "terminal.input").pipe(
+            Effect.mapError(denied),
+          );
+          const session = Option.getOrUndefined(yield* getSession(threadId, input.terminalId));
+          const paths = [input.cwd, input.worktreePath, session?.cwd, session?.worktreePath].filter(
+            (cwd): cwd is string => cwd != null,
+          );
+          const allowed = yield* commands.withHandoffCheckout(
+            paths,
+            "terminal",
+            Effect.gen(function* () {
+              if (
+                paths.length > 0 &&
+                (yield* store
+                  .hasForeignHandoffCheckoutOwner(threadId, paths)
+                  .pipe(Effect.mapError(denied)))
+              )
+                return yield* denied();
+              return yield* effect;
+            }),
+          );
+          if (Option.isNone(allowed)) return yield* denied();
+          return allowed.value;
+        }),
+      ),
+    );
+  };
+
   const open: TerminalManager["Service"]["open"] = (input) =>
-    withThreadLock(
-      input.threadId,
+    withHandoffAdmission(
+      input,
       resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
     );
 
@@ -3437,6 +3500,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     initial: Effect.Effect<TerminalSessionSnapshot | null, TerminalError>,
     listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
     registerCleanup?: (stop: () => void) => void,
+    interactive?: TerminalAttachInput,
   ) => {
     let unsubscribe: (() => void) | null = null;
     const stop = () => {
@@ -3507,7 +3571,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       deliverLive = true;
       return stop;
     }).pipe(
-      (effect) => withThreadLock(input.threadId, effect),
+      (effect) =>
+        interactive === undefined
+          ? withThreadLock(input.threadId, effect)
+          : withHandoffAdmission(interactive, effect),
       Effect.onError(() => Effect.sync(stop)),
     );
   };
@@ -3525,7 +3592,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       if (!retained) return;
       retained = false;
       if (releaseViewer(sessionKey, viewer)) {
-        runFork(withThreadLock(input.threadId, applySharedGrid(input.threadId, input.terminalId)));
+        runFork(
+          withHandoffAdmission(input, applySharedGrid(input.threadId, input.terminalId)).pipe(
+            Effect.catchTags({ TerminalHandoffFencedError: () => Effect.void }),
+          ),
+        );
       }
     };
   };
@@ -3558,6 +3629,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             stop();
             detach();
           })),
+      input,
     ).pipe(
       Effect.map((stop) => () => {
         stop();
@@ -3615,7 +3687,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             );
     return Stream.unwrap(
       Effect.acquireRelease(
-        Effect.sync(() => retainViewerOnce(input, viewerId, null)),
+        withHandoffAdmission(
+          input,
+          Effect.sync(() => retainViewerOnce(input, viewerId, null)),
+          false,
+        ),
         (release) => Effect.sync(release),
       ).pipe(
         Effect.as(
@@ -3738,6 +3814,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           }),
       });
     },
+    (effect, input) => withHandoffAdmission(input, effect, false),
   );
 
   const resizeLocked = Effect.fn("terminal.resize")(function* (
@@ -3769,11 +3846,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   });
 
   const resize: TerminalManager["Service"]["resize"] = (input, viewerId) =>
-    withThreadLock(input.threadId, resizeLocked(input, viewerId));
+    withHandoffAdmission(input, resizeLocked(input, viewerId));
 
   const clear: TerminalManager["Service"]["clear"] = (input) =>
-    withThreadLock(
-      input.threadId,
+    withHandoffAdmission(
+      input,
       Effect.gen(function* () {
         const terminalId = input.terminalId;
         const session = yield* requireSession(input.threadId, terminalId);
@@ -3879,7 +3956,57 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* closeIdle(input);
   });
 
+  const observeHandoff: TerminalManager["Service"]["observeHandoff"] = Effect.fn(
+    "TerminalManager.observeHandoff",
+  )(function* (threadIds, cwd) {
+    const sessions = [...(yield* readManagerState).sessions.values()].filter(
+      (session) =>
+        threadIds.includes(session.threadId) || session.cwd === cwd || session.worktreePath === cwd,
+    );
+    // Capture before yielding: do not mutate metadata, polling or terminal lifecycle.
+    const captured = sessions.map((session) => ({
+      session,
+      sequence: terminalActivityMark(session),
+    }));
+    const { inspector } = sessions.some((session) => session.status === "running")
+      ? yield* acquireSubprocessInspector(
+          platform === "win32" ? CLOSE_IDLE_QUERY_TIMEOUT.win32 : CLOSE_IDLE_QUERY_TIMEOUT.posix,
+        )
+      : { inspector: Result.fail(new Error("No running sessions")) };
+    return yield* Effect.forEach(captured, ({ session, sequence }) =>
+      Effect.gen(function* () {
+        const observed =
+          session.status !== "running"
+            ? null
+            : session.pid === null || Result.isFailure(inspector)
+              ? null
+              : yield* inspector.success(session.pid, session.shell).pipe(
+                  Effect.asSome,
+                  Effect.catchCause(() => Effect.succeedNone),
+                );
+        const value = observed !== null && Option.isSome(observed) ? observed.value : null;
+        return {
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          cwd: session.cwd,
+          status: session.status,
+          pid: session.pid,
+          sequence,
+          cachedRunning: session.hasRunningSubprocess,
+          running: session.status !== "running" ? false : (value?.hasRunningSubprocess ?? null),
+          processIds: value?.processIds ?? null,
+          error:
+            terminalActivityMark(session) !== sequence
+              ? "Terminal changed during observation"
+              : session.status === "running" && value === null
+                ? "Process observation unavailable"
+                : null,
+        };
+      }),
+    );
+  });
   return TerminalManager.of({
+    observeHandoff,
     open,
     getShell,
     attachStream,

@@ -246,6 +246,8 @@ it.effect(
           getTranscriptByteFloor: () => Effect.die("unused transcript byte floor"),
           hasPendingDelegatedCompletion: () => Effect.die("unused hasPendingDelegatedCompletion"),
           getSubagentCount: () => Effect.die("unused subagent count"),
+          listHandoffSessionWrites: () => Effect.die("unused listHandoffSessionWrites"),
+          hasForeignHandoffCheckoutOwner: () => Effect.die("unused hasForeignHandoffCheckoutOwner"),
           listAppOwnedChildThreadIds: () => Effect.die("unused listAppOwnedChildThreadIds"),
           getNextTurnItemOrdinal: () => Effect.die("unused ordinal read"),
           getTurnItem: () => Effect.die("unused turn item read"),
@@ -289,6 +291,7 @@ it.effect(
         ProviderSessionManager.ProviderSessionManagerV2,
         ProviderSessionManager.ProviderSessionManagerV2.of({
           shutdown: Effect.void,
+          observeHandoffSession: () => Effect.succeedNone,
           open: () => Effect.die("unused open"),
           get: (providerSessionId) =>
             Effect.succeed(

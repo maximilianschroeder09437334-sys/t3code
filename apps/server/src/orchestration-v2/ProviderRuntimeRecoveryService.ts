@@ -6,6 +6,8 @@ import {
   type OrchestrationV2DomainEvent,
   type ProviderThreadId,
   type RunAttemptId,
+  type RunId,
+  type OrchestrationV2AppThread,
   type OrchestrationV2RestartCancelledBackgroundWork,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -20,6 +22,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { recoverReleasedHandoff } from "./CoreHandoff.ts";
+import {
+  handoffStartupStopCommand,
+  sameHandoffSession,
+  stopReadyHandoffSession,
+} from "./HandoffTransferAdmission.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -196,6 +205,16 @@ export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const threads = yield* Effect.serviceOption(ThreadManagement.ThreadManagementService);
+  const getInitialHandoffPair = Effect.fn("ProviderRuntimeRecoveryService.getInitialHandoffPair")(
+    function* (thread: OrchestrationV2AppThread) {
+      if (thread.handoffSourceThreadId === undefined) return;
+      const source = yield* projections.getThread(thread.handoffSourceThreadId);
+      return source.handoffTransfer?.successorThreadId === thread.id
+        ? source.handoffTransfer
+        : undefined;
+    },
+  );
   type RecoverySession = ProjectionStore.ProjectionRuntimeRecoveryState["providerSessions"][number];
   /** Shared sessions stop on their first recovered thread; later threads still decide wakes from pre-recovery liveness. */
   const sessionsLiveAtStart = (
@@ -218,9 +237,10 @@ export const make = Effect.gen(function* () {
    * one of its attempts proves the prompt arrived. Recovery treats the others as never started.
    */
   const rewindUnacceptedRuns = Effect.fn("ProviderRuntimeRecoveryService.rewindUnacceptedRuns")(
-    function* (projection: ProjectionStore.ProjectionRuntimeRecoveryState) {
+    function* (projection: ProjectionStore.ProjectionRuntimeRecoveryState, claimedRunId?: RunId) {
       const runIdByAttempt = new Map(
         projection.runs.flatMap((run) =>
+          run.id !== claimedRunId &&
           (run.status === "running" || (run.status === "starting" && run.startedAt !== null)) &&
           run.activeAttemptId !== null
             ? [[run.activeAttemptId, run.id] as const]
@@ -277,9 +297,14 @@ export const make = Effect.gen(function* () {
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
     ) {
       const now = yield* DateTime.now;
-      const projection = yield* rewindUnacceptedRuns(stored);
+      const pair = yield* getInitialHandoffPair(stored.thread);
+      const projection = yield* rewindUnacceptedRuns(
+        stored,
+        pair?.state === "started" ? pair.runId : undefined,
+      );
       let runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
+        if (pair?.state === "reserved" && pair.runId === run.id) continue;
         if (run.status === "waiting") {
           const checkpointEffects = yield* outbox
             .listByCommandId(CommandId.make(`command:effect:checkpoint.capture:${run.id}`))
@@ -304,7 +329,7 @@ export const make = Effect.gen(function* () {
         runs.push(run);
       }
       const pendingRequests = projection.runtimeRequests.filter(
-        (request) => request.status === "pending",
+        (request) => request.status === "pending" && request.responseCapability.type !== "handoff",
       );
       // The lost provider callback cannot resume; persisted questions can be
       // answered by a new user message in threads that accept messages.
@@ -404,7 +429,14 @@ export const make = Effect.gen(function* () {
               projection.nodes.some((node) => node.id === request.nodeId && node.runId === run.id),
           ),
       );
-      const queuedRuns = projection.runs.filter((run) => run.status === "queued");
+      // Only the released pair may rewind an initial prompt and send it again.
+      const unclaimedHandoffRuns = unstartedRuns.filter(
+        (run) => pair?.state === "released" && run.id === pair.runId,
+      );
+      const ordinaryUnstartedRuns = unstartedRuns.filter((run) => run.id !== pair?.runId);
+      const queuedRuns = projection.runs.filter(
+        (run) => run.status === "queued" && run.id !== pair?.runId,
+      );
       const pendingRuns = [...unstartedRuns, ...queuedRuns];
       const queuedMessages =
         pendingRuns.length === 0
@@ -441,12 +473,12 @@ export const make = Effect.gen(function* () {
           .map((message) => message.id),
       );
       // A saved user message the provider never accepted stays available through the held queue.
-      const retryableRuns = unstartedRuns.filter((run) =>
+      const retryableRuns = ordinaryUnstartedRuns.filter((run) =>
         retryableMessageIds.has(run.userMessageId),
       );
       // Nobody reviews a delegated, agent-sent or scheduled prompt, so it is sent again instead.
       const unattendedRuns = continueAfterRestart
-        ? unstartedRuns.filter((run) =>
+        ? ordinaryUnstartedRuns.filter((run) =>
             queuedMessages.some(
               (message) =>
                 message.id === run.userMessageId &&
@@ -501,7 +533,10 @@ export const make = Effect.gen(function* () {
           request: { type: "provider-turn.start", runId: run.id },
         });
       }
-      for (const run of resentRuns) {
+      const rewoundHandoffRuns = unclaimedHandoffRuns.filter((run) =>
+        stored.runs.some((original) => original.id === run.id && original.startedAt !== null),
+      );
+      for (const run of [...resentRuns, ...rewoundHandoffRuns]) {
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -512,7 +547,7 @@ export const make = Effect.gen(function* () {
           payload: run,
         });
       }
-      const keptRuns = [...retryableRuns, ...resentRuns];
+      const keptRuns = [...retryableRuns, ...resentRuns, ...unclaimedHandoffRuns];
       for (const run of keptRuns) {
         for (const attempt of projection.attempts.filter(
           (candidate) => candidate.id === run.activeAttemptId && candidate.status === "running",
@@ -1024,23 +1059,26 @@ export const make = Effect.gen(function* () {
         if (Option.isSome(previous) && previous.value.request.type === "provider-runtime.continue")
           processLossCount += previous.value.request.processLossCount ?? 0;
       }
-      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
-        ? [
-            {
-              id: `effect:restart-continuation:${continuationRun.id}`,
-              commandId,
-              threadId: projection.thread.id,
-              request: {
-                type: "provider-runtime.continue",
-                sourceRunId: continuationRun.id,
-                processLossCount,
+      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> =
+        continuationRun && continuationRun.id !== pair?.runId
+          ? [
+              {
+                id: `effect:restart-continuation:${continuationRun.id}`,
+                commandId,
+                threadId: projection.thread.id,
+                request: {
+                  type: "provider-runtime.continue",
+                  sourceRunId: continuationRun.id,
+                  processLossCount,
+                },
               },
-            },
-          ]
-        : [];
+            ]
+          : [];
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
+      const cancellationReason =
+        pair?.state === "released" ? EffectOutbox.HANDOFF_PROCESS_LOSS_REASON : detail;
       let retiredEffects: number;
       let cancelledEffectIds: ReadonlyArray<string> = [];
       if (events.length === 0) {
@@ -1048,7 +1086,7 @@ export const make = Effect.gen(function* () {
           .cancelUnsettled({
             threadId: projection.thread.id,
             effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
-            reason: detail,
+            reason: cancellationReason,
           })
           .pipe(
             Effect.mapError(
@@ -1063,29 +1101,92 @@ export const make = Effect.gen(function* () {
         cancelledEffectIds = retiredEffectIds;
         retiredEffects = retiredEffectIds.length;
       } else {
-        const result = yield* eventSink
-          .commitCommand({
-            commandId,
-            threadId: projection.thread.id,
-            commandType: "provider-runtime.reconcile",
-            acceptedAt: now,
-            events,
-            effects,
-            cancelUnsettledEffects: {
-              effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
-              reason: detail,
-            },
-          })
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProviderRuntimeRecoveryError({
-                  operation: "reconcile",
-                  threadId: projection.thread.id,
-                  cause,
+        const commit = {
+          commandId,
+          threadId: projection.thread.id,
+          commandType: "provider-runtime.reconcile",
+          acceptedAt: now,
+          events,
+          effects,
+          cancelUnsettledEffects: {
+            effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
+            reason: cancellationReason,
+          },
+        };
+        const ownerId = projection.thread.id;
+        const readySessions = new Map(
+          projection.providerSessions
+            .filter((session) => session.status === "ready")
+            .map((session) => [session.id, session]),
+        );
+        const stopEvents = events.flatMap((event) => {
+          const before =
+            event.type === "provider-session.updated"
+              ? readySessions.get(event.payload.id)
+              : undefined;
+          return before !== undefined &&
+            event.type === "provider-session.updated" &&
+            sameHandoffSession(stopReadyHandoffSession(before, event.occurredAt), event.payload)
+            ? [{ ...event, handoffStartupBefore: before }]
+            : [];
+        });
+        const write =
+          trigger === "startup" &&
+          Option.isSome(threads) &&
+          stopEvents.length === events.length &&
+          effects.length === 0
+            ? eventSink.withProviderBatch(
+                Effect.gen(function* () {
+                  const owner = yield* projections.getThreadRecords(ownerId, ["providerSessions"]);
+                  const sourceId = owner.thread.lineage.parentThreadId ?? ownerId;
+                  const source =
+                    sourceId === ownerId ? owner.thread : yield* projections.getThread(sourceId);
+                  const transfer = source.handoffTransfer;
+                  const decision =
+                    transfer?.state === "released"
+                      ? yield* projections.getRuntimeRequest(sourceId, transfer.requestId)
+                      : null;
+                  if (
+                    transfer?.state !== "released" ||
+                    source.handoffStopCommandId !== undefined ||
+                    decision?.status !== "resolved" ||
+                    decision.decision !== "accept" ||
+                    decision.responseCapability.type !== "handoff" ||
+                    decision.responseCapability.generation !== transfer.generation ||
+                    (ownerId !== sourceId &&
+                      (owner.thread.lineage.parentThreadId !== sourceId ||
+                        owner.thread.lineage.relationshipToParent !== "subagent" ||
+                        !decision.responseCapability.children.some(
+                          (child) => child.id === ownerId,
+                        ))) ||
+                    stopEvents.some(
+                      ({ handoffStartupBefore }) =>
+                        !owner.providerSessions.some((current) =>
+                          sameHandoffSession(current, handoffStartupBefore),
+                        ),
+                    )
+                  )
+                    return yield* eventSink.commitCommand(commit);
+                  const stopped = yield* eventSink.commitCommand({
+                    ...commit,
+                    commandId: handoffStartupStopCommand(transfer, ownerId),
+                    commandType: "handoff.transfer.startup-stop",
+                    events: stopEvents,
+                  });
+                  return stopped.committed ? stopped : yield* eventSink.commitCommand(commit);
                 }),
-            ),
-          );
+              )
+            : eventSink.commitCommand(commit);
+        const result = yield* write.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderRuntimeRecoveryError({
+                operation: "reconcile",
+                threadId: projection.thread.id,
+                cause,
+              }),
+          ),
+        );
         retiredEffects = result.cancelledEffectCount;
       }
       return {
@@ -1095,6 +1196,7 @@ export const make = Effect.gen(function* () {
         retiredEffects,
         cancelledEffectIds,
         resends,
+        releasedSourceId: pair?.state === "released" ? pair.sourceThreadId : undefined,
       };
     },
   );
@@ -1115,6 +1217,7 @@ export const make = Effect.gen(function* () {
     let closedRequests = 0;
     let retiredEffects = 0;
     const resends: Array<EffectOutbox.PendingOrchestrationEffectV2> = [];
+    const releasedSources = new Set<ThreadId>();
     const stoppedThisPass = new Map<string, RecoverySession>();
     const grouped = trigger === "shutdown" && threadIds.length > 1;
     const groupSize = grouped ? 32 : 1;
@@ -1145,6 +1248,7 @@ export const make = Effect.gen(function* () {
           }
           cancelledEffectIds.push(...result.cancelledEffectIds);
           resends.push(...result.resends);
+          if (result.releasedSourceId !== undefined) releasedSources.add(result.releasedSourceId);
           terminalizedRuns += result.terminalizedRuns;
           stoppedSessions += result.stoppedSessions;
           closedRequests += result.closedRequests;
@@ -1176,6 +1280,18 @@ export const make = Effect.gen(function* () {
             (cause) => new ProviderRuntimeRecoveryError({ operation: "reconcile", cause }),
           ),
         );
+    }
+    if (trigger === "startup" && Option.isSome(threads)) {
+      const owner = threads.value;
+      // The source's delivery effects may already be settled. Reconcile the exact
+      // start receipt directly once the process-bound outbox pass has finished.
+      for (const sourceId of releasedSources) {
+        yield* recoverReleasedHandoff(sourceId, owner, outbox).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Guarded handoff recovery left the pair fenced", { sourceId, cause }),
+          ),
+        );
+      }
     }
     return {
       terminalizedRuns,
@@ -1212,11 +1328,12 @@ export const make = Effect.gen(function* () {
               .continueThreadsAfterServerUpdate
           )
             return;
+          const pair = yield* getInitialHandoffPair(projection.thread);
           const run = restartContinuationRun(
-            yield* rewindUnacceptedRuns(projection),
+            yield* rewindUnacceptedRuns(projection, pair?.runId),
             yield* DateTime.now,
           );
-          if (!run) return;
+          if (!run || run.id === pair?.runId) return;
           const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
           yield* eventSink.writeWithEffects({
             commandId,

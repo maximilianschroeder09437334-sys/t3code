@@ -1,3 +1,9 @@
+import { AsyncResult } from "effect/reactivity";
+import { View } from "react-native";
+import { deriveParkedHandoffRecovery } from "@t3tools/client-runtime/state/thread-requests";
+import { AppText as Text } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
+import { useOpenLinkedThread } from "./useOpenLinkedThread";
 import * as Dialog from "../../components/ui/Dialog";
 import { useRememberThreadProject } from "./useRememberThreadProject";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -68,7 +74,10 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
-import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
+import {
+  useQuietThreadStructure,
+  useSelectedThreadDetailState,
+} from "../../state/use-thread-detail";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
 import {
@@ -380,6 +389,28 @@ function ThreadRouteContent(
   );
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const selectedStructure = useQuietThreadStructure(selectedThreadDetailRef);
+  const handoffSourceId = selectedStructure?.projection.thread.handoffSourceThreadId;
+  const handoffSource = useQuietThreadStructure(
+    handoffSourceId === undefined || selectedThreadDetailRef === null
+      ? null
+      : { environmentId: selectedThreadDetailRef.environmentId, threadId: handoffSourceId },
+  );
+  const handoffRecovery = deriveParkedHandoffRecovery(
+    selectedStructure,
+    handoffSourceId === undefined ? selectedStructure : handoffSource,
+    canOperateThread,
+  );
+  const handoffSuccessor = useThreadShell(handoffRecovery?.successorRef ?? null);
+  const reverseHandoff = useAtomCommand(threadEnvironment.reverseHandoff, {
+    label: "return to original thread",
+    reportFailure: false,
+  });
+  const openOriginalThread = useOpenLinkedThread();
+  const handoffReturnKey = handoffRecovery?.action?.input.generation ?? null;
+  const handoffReturnInFlight = useRef(false);
+  const [returningHandoff, setReturningHandoff] = useState(false);
+  const [failedHandoffReturn, setFailedHandoffReturn] = useState<string | null>(null);
   const { selectedThreadCwd } = useSelectedThreadWorktree();
   const startSideChat = useStartSideChat();
   const composer = useThreadComposerState({ startSideChat });
@@ -997,17 +1028,75 @@ function ThreadRouteContent(
       <>
         <ThreadScreenBinding
           header={
-            props.inspectorPresentation ? null : (
-              <ThreadHeader
-                title={selectedThread.title}
-                subtitle={threadSyncLabel ?? headerSubtitle}
-                gitControls={threadGitControlProps}
-                hasThreadCwd={selectedThreadCwd !== null}
-                inspectorMode={inspectorMode}
-                onOpenFilesInspector={handleOpenFilesInspector}
-                onReturnToThread={props.onReturnToThread}
-              />
-            )
+            <>
+              {props.inspectorPresentation ? null : (
+                <ThreadHeader
+                  title={selectedThread.title}
+                  subtitle={threadSyncLabel ?? headerSubtitle}
+                  gitControls={threadGitControlProps}
+                  hasThreadCwd={selectedThreadCwd !== null}
+                  inspectorMode={inspectorMode}
+                  onOpenFilesInspector={handleOpenFilesInspector}
+                  onReturnToThread={props.onReturnToThread}
+                />
+              )}
+              {handoffRecovery !== null ? (
+                <View className="mx-3 mb-2 gap-2 rounded-xl border border-border bg-card-alt p-3">
+                  <Text accessibilityLiveRegion="polite" className="text-sm text-foreground">
+                    {handoffRecovery.reason}
+                  </Text>
+                  <Text className="text-xs text-foreground-secondary">
+                    Original: {handoffRecovery.originalTitle}
+                    {"\n"}
+                    Replacement: {handoffSuccessor?.title ?? handoffRecovery.successorRef.threadId}
+                  </Text>
+                  {handoffRecovery.action !== null ? (
+                    <Button
+                      label="Return to original thread"
+                      tone="secondary"
+                      disabled={routeConnectionState !== "connected" || returningHandoff}
+                      onPress={async () => {
+                        const action = handoffRecovery.action;
+                        if (
+                          action === null ||
+                          handoffReturnKey === null ||
+                          routeConnectionState !== "connected" ||
+                          handoffReturnInFlight.current ||
+                          !readEnvironmentScope(action.environmentId, AuthOrchestrationOperateScope)
+                        )
+                          return;
+                        handoffReturnInFlight.current = true;
+                        setReturningHandoff(true);
+                        setFailedHandoffReturn(null);
+                        try {
+                          const result = await reverseHandoff(action);
+                          if (AsyncResult.isSuccess(result)) {
+                            if (!navigation.isFocused()) return;
+                            openOriginalThread({
+                              environmentId: action.environmentId,
+                              threadId: result.value,
+                            });
+                          } else {
+                            setFailedHandoffReturn(handoffReturnKey);
+                          }
+                        } finally {
+                          handoffReturnInFlight.current = false;
+                          setReturningHandoff(false);
+                        }
+                      }}
+                    />
+                  ) : null}
+                  {handoffReturnKey !== null && failedHandoffReturn === handoffReturnKey ? (
+                    <Text
+                      accessibilityLiveRegion="polite"
+                      className="text-xs text-foreground-secondary"
+                    >
+                      Could not return. Try again if Return is still available.
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+            </>
           }
           canOperateThread={canOperateThread}
           selectedThread={selectedThreadWithDraftSettings ?? selectedThread}

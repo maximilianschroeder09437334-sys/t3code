@@ -118,6 +118,24 @@ const make = Effect.gen(function* () {
   const forwardingCaller = (scope: Scope) =>
     readCaller().pipe(
       Effect.tap((caller) => assertNotLinked(caller, "use this environment's links")),
+      Effect.tap((caller) =>
+        caller.caller === undefined
+          ? Effect.void
+          : threads.getThreadRecords(caller.caller.id, []).pipe(
+              Effect.mapError(unavailable),
+              Effect.flatMap((records) =>
+                records.thread.agentExecutionIntent?.restrictedTools === undefined
+                  ? Effect.void
+                  : Effect.fail(
+                      new OrchestratorMcpFailure({
+                        code: "capability_denied",
+                        message:
+                          "Restricted tool intent cannot be forwarded to linked environments.",
+                      }),
+                    ),
+              ),
+            ),
+      ),
       Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
       Effect.provideService(ThreadManagement.ThreadManagementService, threads),
     );

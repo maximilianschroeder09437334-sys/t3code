@@ -232,6 +232,8 @@ export interface FakeThread {
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
   readonly runtimeRequests?: OrchestrationV2ThreadProjection["runtimeRequests"];
+  readonly handoffTransfer?: OrchestrationV2ThreadProjection["thread"]["handoffTransfer"];
+  readonly handoffSourceThreadId?: ThreadId;
 }
 
 /** A thread of `turns` user prompts, each answered in markdown with a list and inline code. */
@@ -370,6 +372,10 @@ function projectionOf(thread: FakeThread): OrchestrationV2ThreadProjection {
       activeProviderThreadId: shell.activeProviderThreadId,
       lineage: shell.lineage,
       forkedFrom: null,
+      ...(thread.handoffTransfer === undefined ? {} : { handoffTransfer: thread.handoffTransfer }),
+      ...(thread.handoffSourceThreadId === undefined
+        ? {}
+        : { handoffSourceThreadId: thread.handoffSourceThreadId }),
       createdBy: "user",
       creationSource: "web",
       createdAt: AT,
@@ -413,7 +419,7 @@ let projects: ReadonlyArray<OrchestrationProjectShell> = [project];
 let holdCommand: (command: OrchestrationV2Command) => boolean = () => false;
 let pendingDispatches: Array<{
   readonly command: OrchestrationV2Command;
-  readonly reply: Deferred.Deferred<never, OrchestrationV2DispatchCommandError>;
+  readonly reply: Deferred.Deferred<{ sequence: number }, OrchestrationV2DispatchCommandError>;
 }> = [];
 let pendingAssetUrls: Array<Deferred.Deferred<AssetCreateUrlResult>> = [];
 let sequence = 1;
@@ -440,7 +446,10 @@ const handlers: Record<string, (input: never) => unknown> = {
       dispatched.push(command);
       if (acceptCommands && !holdCommand(command))
         return Effect.succeed({ sequence: sequence + 1 });
-      const reply = Deferred.makeUnsafe<never, OrchestrationV2DispatchCommandError>();
+      const reply = Deferred.makeUnsafe<
+        { sequence: number },
+        OrchestrationV2DispatchCommandError
+      >();
       pendingDispatches.push({ command, reply });
       return Deferred.await(reply);
     }),
@@ -632,6 +641,13 @@ export async function rejectPendingCommand(message: string): Promise<void> {
       }),
     ),
   );
+}
+
+/** Answers the oldest held command successfully without inventing projection events. */
+export async function acceptPendingCommand(): Promise<void> {
+  const pending = pendingDispatches.shift();
+  if (!pending) throw new Error("No pending command");
+  await Effect.runPromise(Deferred.succeed(pending.reply, { sequence: sequence + 1 }));
 }
 
 export function hasPendingAssetUrl(): boolean {

@@ -8,6 +8,7 @@ import {
   OrchestrationV2CheckpointUnavailableError,
   WS_METHODS,
   type ChatAttachment,
+  type HandoffTransfer,
   MessageId,
   type ModelSelection,
   type NodeId,
@@ -209,6 +210,7 @@ export interface InterruptThreadTurnInput extends ThreadCommandInput {
 }
 
 export interface RespondToThreadApprovalInput extends ThreadCommandInput {
+  readonly handoffGeneration?: string;
   readonly requestId: RuntimeRequestId;
   readonly decision: ProviderApprovalDecision;
   readonly feedback?: string;
@@ -967,6 +969,19 @@ export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThrea
   });
 });
 
+export const reverseThreadHandoff = Effect.fn("EnvironmentCommands.reverseThreadHandoff")(
+  function* (input: ThreadCommandInput & Pick<HandoffTransfer, "requestId" | "generation">) {
+    yield* dispatch({
+      type: "handoff.transfer.reverse",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      requestId: input.requestId,
+      generation: input.generation,
+    });
+    return input.threadId;
+  },
+);
+
 export const respondToThreadApproval = Effect.fn("EnvironmentCommands.respondToThreadApproval")(
   function* (input: RespondToThreadApprovalInput) {
     return yield* dispatch({
@@ -975,6 +990,9 @@ export const respondToThreadApproval = Effect.fn("EnvironmentCommands.respondToT
       threadId: input.threadId,
       requestId: input.requestId,
       decision: input.decision,
+      ...(input.handoffGeneration === undefined
+        ? {}
+        : { handoffGeneration: input.handoffGeneration }),
       ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
     });
   },

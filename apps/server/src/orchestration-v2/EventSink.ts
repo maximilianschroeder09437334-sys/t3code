@@ -1,5 +1,8 @@
 import {
+  HandoffApprovalCapability,
+  HandoffRequest,
   CommandId,
+  type OrchestrationV2AppThread,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
@@ -78,6 +81,13 @@ const CurrentProviderBatch = Context.Reference<ProviderBatchPublication | undefi
   "t3/orchestration-v2/EventSink/CurrentProviderBatch",
   { defaultValue: () => undefined },
 );
+
+export interface HandoffCommitExpectation {
+  readonly review: HandoffApprovalCapability;
+  readonly request: HandoffRequest;
+}
+const sameHandoffReview = Schema.toEquivalence(HandoffApprovalCapability);
+const sameHandoffRequest = Schema.toEquivalence(HandoffRequest);
 
 export interface EventSinkV2Shape {
   /** Items that are not provider snapshots, such as a consumer's own control items, never batch. */
@@ -193,6 +203,11 @@ export interface EventSinkV2Shape {
     EventSinkV2Error
   >;
   readonly commitCommand: (input: {
+    readonly expectedHandoff?: HandoffCommitExpectation;
+    readonly expectedThreadSequences?: ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly sequence: number;
+    }>;
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -203,6 +218,7 @@ export interface EventSinkV2Shape {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
     };
+    readonly cancelHandoffStart?: { readonly threadId: ThreadId; readonly runId: RunId };
     /** Like writeWithEffects' updateDelegatedCompletionOnly, for this run's run.updated only. */
     readonly updateDelegatedCompletionOnlyRunId?: RunId;
   }) => Effect.Effect<
@@ -304,12 +320,28 @@ const layerBase: Layer.Layer<
       events: ReadonlyArray<OrchestrationV2StoredEvent>,
       outcomes: ReadonlyArray<RunOutcome>,
     ) =>
-      runOutcomes
-        .record(outcomes)
-        .pipe(
-          Effect.andThen(eventStore.publishCommitted(events)),
-          Effect.andThen(publishLiveEvents(events)),
-        );
+      runOutcomes.record(outcomes).pipe(
+        Effect.andThen(eventStore.publishCommitted(events)),
+        Effect.andThen(publishLiveEvents(events)),
+        Effect.andThen(
+          Effect.gen(function* () {
+            for (const stored of events) {
+              if (
+                stored.event.type !== "run.updated" ||
+                !["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(
+                  stored.event.payload.status,
+                )
+              )
+                continue;
+              const ready = yield* effectOutbox
+                .get(`core-handoff:${stored.event.threadId}:ready:${stored.event.payload.id}`)
+                .pipe(Effect.orDie);
+              if (Option.isSome(ready) && ready.value.status === "pending")
+                yield* effectOutbox.notifyAvailable();
+            }
+          }),
+        ),
+      );
 
     // Serialize commit and publish; reordered publication makes clients drop earlier sequences.
     const publishLane = yield* Semaphore.make(1);
@@ -386,7 +418,150 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+    const guardHandoffEvent = Effect.fn("EventSink.guardHandoffEvent")(function* (
+      event: OrchestrationV2DomainEvent,
+      handoffMutation: boolean,
+    ): Effect.fn.Return<OrchestrationV2DomainEvent, unknown> {
+      const runnable =
+        ((event.type === "run.created" || event.type === "run.updated") &&
+          ["preparing", "queued", "starting", "running", "waiting"].includes(
+            event.payload.status,
+          )) ||
+        (event.type === "provider-turn.updated" &&
+          ["starting", "running", "waiting"].includes(event.payload.status)) ||
+        (event.type === "subagent.updated" &&
+          ["pending", "running", "waiting"].includes(event.payload.status)) ||
+        (event.type === "node.updated" &&
+          ["pending", "running", "waiting"].includes(event.payload.status)) ||
+        (event.type === "provider-thread.updated" && event.payload.status === "active") ||
+        (event.type === "message.updated" && event.payload.role === "user");
+      // Streamed content changes cannot grant execution or replace a thread's ownership binding.
+      if (!runnable && !("lineage" in event.payload)) return event;
+      if (
+        !handoffMutation &&
+        event.type === "thread.created" &&
+        event.threadId.startsWith("core-handoff:") &&
+        event.threadId.endsWith(":successor")
+      )
+        return yield* new EventSinkWriteError({
+          eventCount: 1,
+          cause: "Successor creation requires guarded transfer.",
+        });
+      if (
+        !handoffMutation &&
+        event.type === "thread.created" &&
+        event.payload.lineage.parentThreadId !== null
+      ) {
+        let parentId: ThreadId | null = event.payload.lineage.parentThreadId;
+        for (let depth = 0; parentId !== null && depth < 32; depth++) {
+          const parent: OrchestrationV2AppThread = yield* projectionStore.getThread(parentId);
+          if (parent.handoffTransfer !== undefined && parent.handoffTransfer.state !== "cancelled")
+            return yield* new EventSinkWriteError({
+              eventCount: 1,
+              cause: "Handoff source child creation is fenced.",
+            });
+          parentId = parent.lineage.parentThreadId;
+          if (depth === 31 && parentId !== null)
+            return yield* new EventSinkWriteError({
+              eventCount: 1,
+              cause: "Handoff ancestry unavailable.",
+            });
+        }
+      }
+      const shell = yield* projectionStore.getThreadShell(event.threadId);
+      if (shell === null) return event;
+      const thread = yield* projectionStore.getThread(event.threadId);
+      if (runnable && !handoffMutation) {
+        if (thread.handoffSourceThreadId !== undefined) {
+          const source = yield* projectionStore.getThread(thread.handoffSourceThreadId);
+          const pair = source.handoffTransfer;
+          let runId =
+            event.type === "run.updated" || event.type === "run.created"
+              ? event.payload.id
+              : event.runId;
+          if (
+            event.type === "node.updated" ||
+            event.type === "message.updated" ||
+            event.type === "subagent.updated"
+          )
+            runId = event.payload.runId ?? undefined;
+          if (
+            pair &&
+            (event.type === "provider-thread.updated" || event.type === "provider-turn.updated")
+          ) {
+            const run = yield* projectionStore.getRun(thread.id, pair.runId);
+            if (
+              run &&
+              (event.type === "provider-thread.updated"
+                ? run.providerThreadId === event.payload.id
+                : run.activeAttemptId === event.payload.runAttemptId)
+            )
+              runId = pair.runId;
+          }
+          if (
+            !pair ||
+            pair.successorThreadId !== thread.id ||
+            !["released", "started"].includes(pair.state) ||
+            (pair.state !== "started" && runId !== pair.runId)
+          )
+            return yield* new EventSinkWriteError({
+              eventCount: 1,
+              cause: "Handoff successor is fenced.",
+            });
+        } else {
+          let owner = thread;
+          for (let depth = 0; depth < 32; depth++) {
+            if (owner.handoffTransfer && owner.handoffTransfer.state !== "cancelled")
+              return yield* new EventSinkWriteError({
+                eventCount: 1,
+                cause: "Handoff source or descendant is fenced.",
+              });
+            if (owner.lineage.parentThreadId === null) break;
+            owner = yield* projectionStore.getThread(owner.lineage.parentThreadId);
+          }
+        }
+      }
+      switch (event.type) {
+        case "thread.metadata-updated":
+        case "thread.settled":
+        case "thread.unsettled":
+        case "thread.archived":
+        case "thread.unarchived":
+        case "thread.deleted":
+        case "thread.runtime-mode-updated":
+        case "thread.interaction-mode-updated":
+        case "thread.model-selection-updated":
+        case "thread.provider-switched":
+        case "thread.visited":
+        case "thread.marked-unread":
+        case "thread.pinned":
+        case "thread.unpinned":
+        case "thread.pin-reordered":
+        case "thread.active-reordered":
+        case "thread.tags-updated":
+        case "thread.snoozed":
+        case "thread.unsnoozed":
+        case "thread.auto-settle-set":
+        case "thread.pull-request-synced":
+        case "thread.guest-share-updated":
+          return {
+            ...event,
+            payload: {
+              ...event.payload,
+              ...(!handoffMutation ? { handoffTransfer: thread.handoffTransfer } : {}),
+              handoffSourceThreadId: thread.handoffSourceThreadId,
+              ...(!handoffMutation ? { handoffStopCommandId: thread.handoffStopCommandId } : {}),
+            },
+          };
+        default:
+          return event;
+      }
+    });
+
+    const normalizeEvents = (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      handoffMutation = false,
+    ) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -396,15 +571,16 @@ const layerBase: Layer.Layer<
       );
       return Effect.forEach(
         events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
+        (incoming) =>
+          Effect.gen(function* (): Effect.fn.Return<OrchestrationV2DomainEvent, unknown> {
+            const event = yield* guardHandoffEvent(incoming, handoffMutation);
+            if (event.type !== "turn-item.updated") return event;
+            const payload = yield* turnItemPositions.normalize(
+              event.payload,
+              event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+            );
+            return { ...event, payload };
+          }),
         { concurrency: 1 },
       );
     };
@@ -415,6 +591,40 @@ const layerBase: Layer.Layer<
         yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
           concurrency: 1,
         });
+        for (const stored of storedEvents) {
+          if (
+            stored.event.type !== "run.updated" ||
+            !["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(
+              stored.event.payload.status,
+            )
+          )
+            continue;
+          const sourceId = stored.event.threadId;
+          const source = yield* projectionStore.getThread(sourceId);
+          if (
+            source.handoffTransfer !== undefined ||
+            source.handoffStopCommandId !== undefined ||
+            source.deletedAt !== null ||
+            source.archivedAt !== null
+          )
+            continue;
+          const parked = yield* effectOutbox.get(`core-handoff:${sourceId}`);
+          if (
+            Option.isNone(parked) ||
+            parked.value.request.type !== "thread.handoff" ||
+            parked.value.status === "cancelled"
+          )
+            continue;
+          const id = `core-handoff:${sourceId}:ready:${stored.event.payload.id}`;
+          yield* effectOutbox.enqueue([
+            {
+              id,
+              commandId: CommandId.make(id),
+              threadId: sourceId,
+              request: parked.value.request,
+            },
+          ]);
+        }
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
           const now = DateTime.formatIso(yield* DateTime.now);
@@ -779,6 +989,62 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
+          if (input.expectedHandoff !== undefined) {
+            const { review, request } = input.expectedHandoff;
+            const decision = yield* projectionStore.getRuntimeRequest(
+              request.sourceThreadId,
+              review.requestId,
+            );
+            const parked = yield* effectOutbox.get(`core-handoff:${request.sourceThreadId}`);
+            const children = yield* projectionStore.listAppOwnedChildThreadIds(
+              request.sourceThreadId,
+              true,
+            );
+            const expectedChildren = review.children.map((child) => child.id).toSorted();
+            if (
+              decision?.status !== "resolved" ||
+              decision.decision !== "accept" ||
+              decision.responseCapability.type !== "handoff" ||
+              !sameHandoffReview(decision.responseCapability, review) ||
+              review.sourceThreadId !== request.sourceThreadId ||
+              review.successorThreadId !== request.successorThreadId ||
+              Option.isNone(parked) ||
+              parked.value.status === "cancelled" ||
+              parked.value.request.type !== "thread.handoff" ||
+              !sameHandoffRequest(parked.value.request, request) ||
+              children === null ||
+              children.length !== expectedChildren.length ||
+              children.toSorted().some((id, index) => id !== expectedChildren[index])
+            )
+              return yield* new EventSinkWriteError({
+                eventCount: input.events.length,
+                commandId: input.commandId,
+                cause:
+                  "Handoff decision, durable request or child roster changed before conditional commit.",
+              });
+            for (const childId of expectedChildren) {
+              const nested = yield* projectionStore.listAppOwnedChildThreadIds(childId, true);
+              if (nested === null || nested.length !== 0)
+                return yield* new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  commandId: input.commandId,
+                  cause: "Nested handoff child roster changed before conditional commit.",
+                });
+            }
+          }
+
+          for (const expected of input.expectedThreadSequences ?? []) {
+            if (
+              (yield* eventStore.latestSequence({ threadId: expected.threadId })) !==
+              expected.sequence
+            )
+              return yield* new EventSinkWriteError({
+                eventCount: input.events.length,
+                commandId: input.commandId,
+                cause: "Handoff owner changed before conditional commit.",
+              });
+          }
+
           // Planning does not lock the source. Once deletion commits, maintenance
           // can remove its checkpoints, so a new fork must not revive that history.
           if (input.commandType === "thread.fork") {
@@ -816,6 +1082,9 @@ const layerBase: Layer.Layer<
             runId === undefined
               ? input.events
               : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
+            input.commandType.startsWith("handoff.transfer.") ||
+              input.commandType === "prepared-run.release" ||
+              input.commandType === "thread.stop",
           );
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,
@@ -851,7 +1120,21 @@ const layerBase: Layer.Layer<
                   threadId: input.threadId,
                   ...input.cancelUnsettledEffects,
                 });
-          return { receipt, storedEvents, outcomes, committed: true as const, cancelledEffectIds };
+          const cancelledHandoffStartIds =
+            input.cancelHandoffStart === undefined
+              ? []
+              : yield* effectOutbox.cancelUnsettled({
+                  ...input.cancelHandoffStart,
+                  effectTypes: ["provider-turn.start"],
+                  reason: "Retired unclaimed handoff start.",
+                });
+          return {
+            receipt,
+            storedEvents,
+            outcomes,
+            committed: true as const,
+            cancelledEffectIds: [...cancelledEffectIds, ...cancelledHandoffStartIds],
+          };
         }),
         (result) =>
           Effect.gen(function* () {

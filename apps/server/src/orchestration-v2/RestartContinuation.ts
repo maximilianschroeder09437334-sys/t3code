@@ -254,6 +254,13 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
         .continueThreadsAfterServerUpdate
     )
       return;
+    if (projection.thread.handoffSourceThreadId !== undefined) {
+      const sourceThread = (yield* threads.getThreadRecords(
+        projection.thread.handoffSourceThreadId,
+        [],
+      )).thread;
+      if (sourceThread.handoffTransfer?.runId === input.sourceRunId) return;
+    }
     if (projection.messages.some((message) => message.id === messageId)) return;
     const source = projection.runs.find((run) => run.id === input.sourceRunId);
     if (

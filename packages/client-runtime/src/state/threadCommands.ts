@@ -41,6 +41,7 @@ import {
   retryWorkspacePreparation,
   linkThreadPullRequest,
   respondToThreadApproval,
+  reverseThreadHandoff,
   respondToThreadUserInput,
   dismissThreadUserInput,
   revertThreadCheckpoint,
@@ -314,6 +315,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     interruptTurn: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:interrupt-turn",
       execute: interruptTurn,
+      scheduler,
+      concurrency,
+    }),
+    reverseHandoff: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:reverse-handoff",
+      execute: reverseThreadHandoff,
       scheduler,
       concurrency,
     }),

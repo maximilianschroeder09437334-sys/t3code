@@ -12,6 +12,9 @@ import {
   selectHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
 
+const LONG_NATIVE_CONTEXT_TOKENS = 150_000;
+const LONG_CONTEXT_HISTORY_BYTE_CAP = 6_000;
+
 /** The provider prompt for a turn that carries inline context ahead of the user's text. */
 export const withInlineContext = (context: string, userText: string): string =>
   context === "" ? userText : `${context}\n\nUser message:\n${userText}`;
@@ -38,7 +41,17 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     );
     if (pending.length === 0 || (input.deferInline && input.inject === undefined))
       return { context: "", delivered: Effect.void, unsent: Effect.void };
-    const budget = typeof input.budget === "number" ? input.budget : yield* input.budget;
+    const availableBudget = typeof input.budget === "number" ? input.budget : yield* input.budget;
+    const summaryContext = pending
+      .filter((handoff) => handoff.history === undefined)
+      .map((handoff) => handoff.summaryText)
+      .filter(Boolean)
+      .join("\n\n");
+    const measuredTokens = input.providerThread.contextUsage?.usedTokens ?? 0;
+    const budget =
+      summaryContext === "" && measuredTokens >= LONG_NATIVE_CONTEXT_TOKENS
+        ? Math.min(availableBudget, LONG_CONTEXT_HISTORY_BYTE_CAP)
+        : availableBudget;
     let coverage = pending
       .map(
         (handoff) =>
@@ -60,13 +73,9 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
         seen.add(message.itemId);
         return true;
       });
-    const oldContext = pending
-      .filter((handoff) => handoff.history === undefined)
-      .map((handoff) => handoff.summaryText)
-      .join("\n\n");
     const fullCoverage =
-      oldContext && historyCost([], `${coverage}\n${oldContext}`) + 512 <= budget
-        ? `${coverage}\n${oldContext}`
+      summaryContext && historyCost([], `${coverage}\n${summaryContext}`) + 512 <= budget
+        ? `${coverage}\n${summaryContext}`
         : coverage;
     const selected = selectHistory({
       messages,

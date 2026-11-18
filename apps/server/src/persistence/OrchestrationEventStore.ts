@@ -184,7 +184,9 @@ const decodeV2StoredEvent = Schema.decodeUnknownEffect(OrchestrationV2StoredEven
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
-function metadataForV2Event(event: OrchestrationV2DomainEvent): Record<string, unknown> {
+function metadataForV2Event(
+  event: typeof OrchestrationV2DomainEventJson.Encoded,
+): Record<string, unknown> {
   return {
     ...(event.runId === undefined ? {} : { runId: event.runId }),
     ...(event.nodeId === undefined ? {} : { nodeId: event.nodeId }),
@@ -193,6 +195,9 @@ function metadataForV2Event(event: OrchestrationV2DomainEvent): Record<string, u
       ? {}
       : { providerInstanceId: event.providerInstanceId }),
     ...(event.rawEventId === undefined ? {} : { rawEventId: event.rawEventId }),
+    ...("handoffStartupBefore" in event && event.handoffStartupBefore !== undefined
+      ? { handoffStartupBefore: event.handoffStartupBefore }
+      : {}),
   };
 }
 
@@ -216,6 +221,9 @@ const rowToV2StoredEvent = Effect.fn("OrchestrationEventStore.rowToV2StoredEvent
       ? {}
       : { providerInstanceId: values.providerInstanceId }),
     ...(values.rawEventId === undefined ? {} : { rawEventId: values.rawEventId }),
+    ...(values.handoffStartupBefore === undefined
+      ? {}
+      : { handoffStartupBefore: values.handoffStartupBefore }),
   });
   return yield* decodeV2StoredEvent({
     sequence: row.sequence,
@@ -506,7 +514,7 @@ const makeEventStore = Effect.gen(function* () {
               ${input.commandId ?? null},
               ${event.rawEventId === undefined ? "server" : "provider"},
               ${storedPayload},
-              ${yield* encodeJson(metadataForV2Event(event))},
+              ${yield* encodeJson(metadataForV2Event(encoded))},
               2
             )
             RETURNING sequence${

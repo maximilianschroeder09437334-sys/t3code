@@ -705,6 +705,14 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /** Handoff only: an adapter may declare that its live probes cover all app-owned work,
+   * including native children and detached tasks. Absence is no absence-of-work proof.
+   * This is observation coverage, never transfer or execution authorization. */
+  readonly handoffReadinessCoverage?: {
+    readonly scope: "all-app-owned-work";
+    readonly nativeSubagents: true;
+    readonly detachedTasks: true;
+  };
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   /** Root-subscription probe; replacement checks opt in to subagents owned by the live process. */
   readonly hasPendingBackgroundWorkForThread?: (

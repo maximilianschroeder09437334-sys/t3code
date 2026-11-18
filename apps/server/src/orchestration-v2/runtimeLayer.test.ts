@@ -1,3 +1,34 @@
+import { OrchestrationV2Run as OrchestrationV2RunSchema } from "@t3tools/contracts";
+import * as HandoffIds from "@t3tools/provider-core/server/IdAllocator";
+import * as TransferAdmission from "./HandoffTransferAdmission.ts";
+import * as CoreHandoff from "./CoreHandoff.ts";
+import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import { projectThreadProjectionForWire } from "./WireProjection.ts";
+import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
+import { DocumentText } from "../provider/DocumentText.ts";
+import * as ActivityLedger from "../activity/ActivityLedger.ts";
+import * as CommandReceipts from "./CommandReceiptStore.ts";
+import * as ProviderStart from "./ProviderTurnStartService.ts";
+import { requestHandoffApproval } from "./HandoffApproval.ts";
+import { queryHandoffReadiness } from "./CoreHandoffReadiness.ts";
+import * as Schema from "effect/Schema";
+import * as HandoffGit from "../git/GitManager.ts";
+import { OrchestrationV2ProviderThread, HandoffWorkspace } from "@t3tools/contracts";
+import {
+  WsRpcGroup,
+  ORCHESTRATION_V2_WS_METHODS,
+  OrchestrationV2DispatchCommandError,
+} from "@t3tools/contracts";
+import * as RpcTest from "effect/rpc/RpcTest";
+import * as RpcAuthorization from "../auth/RpcAuthorization.ts";
+import { withAuthenticatedHandoffResponse } from "../auth/HandoffResponseAuthority.ts";
+import {
+  AuthSessionId,
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  OrchestrationV2ThreadProjection as ThreadProjectionSchema,
+} from "@t3tools/contracts";
+import type { AuthenticatedSession } from "../auth/EnvironmentAuth.ts";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
@@ -11,10 +42,12 @@ import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   type ApplicationStoredEvent,
+  ActivityLedgerError,
   CheckpointId,
   CheckpointRef,
   CommandId,
   ContextTransferId,
+  DEFAULT_TERMINAL_ID,
   EnvironmentId,
   EventId,
   MessageId,
@@ -22,6 +55,8 @@ import {
   RuntimeRequestId,
   TurnItemId,
   type ModelSelection,
+  type OrchestrationV2Command,
+  type TerminalAttachStreamEvent,
   type OrchestrationV2Run,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2RuntimeRequest,
@@ -40,6 +75,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -52,6 +88,8 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
+import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import type { PtyExitEvent } from "@t3tools/shared/PtyAdapter";
 
 import { createAttachmentId } from "../attachmentStore.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
@@ -97,11 +135,15 @@ import * as DeviceHost from "../device/DeviceHost.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import type { TerminalError } from "@t3tools/contracts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+
+const decodeHandoffFixtureProvider = Schema.decodeEffect(OrchestrationV2ProviderThread);
 
 const layerPlatformTest = Layer.merge(
   Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
@@ -1384,6 +1426,423 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
 );
 
 it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
+  it.effect(
+    "handoff producer records an exact observed review without a runnable successor (fake owners)",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threads = yield* ThreadManagementService.ThreadManagementService;
+        const sink = yield* EventSink.EventSinkV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const threadId = ThreadId.make("producer-source");
+        const successorThreadId = ThreadId.make("producer-successor");
+        const projectId = ProjectId.make("producer-project");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("producer-create"),
+          threadId,
+          projectId,
+          createdBy: "user",
+          creationSource: "web",
+          title: "Producer",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "feature",
+          worktreePath: "/fake/workspace",
+        });
+        yield* outbox.enqueue([
+          {
+            id: `core-handoff:${threadId}`,
+            commandId: CommandId.make("producer-park"),
+            threadId,
+            request: {
+              type: "thread.handoff",
+              sourceThreadId: threadId,
+              successorThreadId,
+              projectId,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: "feature",
+              worktreePath: "/fake/workspace",
+              handoff: {
+                goal: "Fixture",
+                decisions: [],
+                state: { branch: "feature", commits: [], verified: [] },
+                deadEnds: [],
+                next: "Review",
+                pointers: [],
+              },
+            },
+          },
+        ]);
+        const now = yield* DateTime.now;
+        const provider = yield* decodeHandoffFixtureProvider({
+          id: "producer-provider",
+          driver: "codex",
+          providerInstanceId: modelSelection.instanceId,
+          providerSessionId: "producer-session",
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          pendingBackgroundTasks: [],
+          createdAt: now,
+          updatedAt: now,
+        });
+        const workspace: HandoffWorkspace = {
+          root: "/fake/workspace",
+          branch: "feature",
+          head: "fake-head",
+          status: "",
+          indexDiff: "",
+          worktreeDiff: "",
+          untracked: "",
+          submodules: "",
+          checkpointRef: null,
+          checkpointCommit: null,
+          checkpointMatches: null,
+          checkpointError: null,
+        };
+        let busy = false;
+        let changedWorkspace = false;
+        const readRecords = threads.readHandoffRecords;
+        using _records = vi.spyOn(threads, "readHandoffRecords").mockImplementation((id, fields) =>
+          readRecords(id, fields).pipe(
+            Effect.map((records) => ({
+              ...records,
+              thread: {
+                ...records.thread,
+                worktreePath: changedWorkspace ? "/fake/other" : records.thread.worktreePath,
+              },
+              providerThreads: [provider],
+            })),
+          ),
+        );
+        const owners = Layer.mergeAll(
+          NodeCrypto.layer,
+          Layer.mock(HandoffGit.GitManager)({
+            observeHandoffWorkspace: () => Effect.succeed(workspace),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            observeHandoffSession: () =>
+              Effect.succeedSome({
+                idleGeneration: 1,
+                busyTurns: [],
+                runtime: {
+                  providerSessionId: "producer-session",
+                  instanceId: modelSelection.instanceId,
+                  driver,
+                  hasPendingBackgroundWork: Effect.sync(() => busy),
+                  hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+                } as never,
+              }),
+          }),
+          Layer.mock(TerminalManager.TerminalManager)({ observeHandoff: () => Effect.succeed([]) }),
+        );
+        const observe = queryHandoffReadiness(threadId).pipe(Effect.provide(owners));
+        const request = (generation: string) =>
+          requestHandoffApproval(threadId, generation).pipe(Effect.provide(owners));
+        const before = yield* outbox.get(`core-handoff:${threadId}`);
+        const snapshot = yield* observe;
+        assert.equal(snapshot.classification, "manual_review");
+        assert.equal((yield* request("stale").pipe(Effect.flip))._tag, "OrchestratorMcpFailure");
+        busy = true;
+        assert.equal(
+          (yield* request(snapshot.generation).pipe(Effect.flip))._tag,
+          "OrchestratorMcpFailure",
+        );
+        busy = false;
+        changedWorkspace = true;
+        const mismatched = yield* observe;
+        assert.equal(
+          (yield* request(mismatched.generation).pipe(Effect.flip))._tag,
+          "OrchestratorMcpFailure",
+        );
+        changedWorkspace = false;
+        const created = yield* request(snapshot.generation);
+        assert.equal(created.status, "awaiting_review");
+        assert.equal(created.generation, snapshot.generation);
+        assert.equal(created.successorThreadId, successorThreadId);
+        assert.isFalse(created.transferAuthorized);
+        assert.equal(
+          (yield* request(snapshot.generation).pipe(Effect.flip))._tag,
+          "OrchestratorMcpFailure",
+        );
+        const response = {
+          type: "runtime-request.respond" as const,
+          commandId: CommandId.make("producer-accept"),
+          threadId,
+          requestId: created.requestId,
+          decision: "accept" as const,
+          handoffGeneration: created.generation,
+        };
+        assert.equal(
+          (yield* orchestrator
+            .dispatch({ ...response, commandId: CommandId.make("producer-spoof") })
+            .pipe(Effect.flip))._tag,
+          "OrchestratorDispatchError",
+        );
+        yield* withAuthenticatedHandoffResponse(
+          {
+            sessionId: AuthSessionId.make("producer-client"),
+            subject: "paired-client",
+            method: "browser-session-cookie",
+            scopes: [AuthOrchestrationOperateScope],
+          },
+          orchestrator.dispatch(response),
+        );
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(projection.runtimeRequests[0]?.decision, "accept");
+        assert.isEmpty(projection.runs);
+        assert.isEmpty(projection.messages);
+        assert.isTrue(
+          Option.isNone(
+            yield* orchestrator.getThreadProjection(successorThreadId).pipe(Effect.option),
+          ),
+        );
+        assert.deepEqual(yield* outbox.get(`core-handoff:${threadId}`), before);
+        assert.lengthOf(yield* outbox.listByCommandId(response.commandId), 1);
+        assert.isAbove(yield* sink.latestSequence({ threadId }), snapshot.after.sourceSequence!);
+      }),
+  );
+
+  it.effect(
+    "handoff review binds client authority, generation and one-time decisions without runnable effects",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        for (const mode of ["accept", "decline", "cancel", "changed"] as const) {
+          const decision = mode === "changed" ? "accept" : mode;
+          const threadId = ThreadId.make(`review-${mode}`);
+          const successorThreadId = ThreadId.make(`${threadId}-successor`);
+          const requestId = RuntimeRequestId.make(`${threadId}-request`);
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${threadId}-create`),
+            createdBy: "user",
+            creationSource: "web",
+            threadId,
+            projectId: ProjectId.make(`${threadId}-project`),
+            title: "Review",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: "feature",
+            worktreePath: process.cwd(),
+          });
+          yield* outbox.enqueue([
+            {
+              id: `core-handoff:${threadId}`,
+              commandId: CommandId.make(`${threadId}-park`),
+              threadId,
+              request: {
+                type: "thread.handoff",
+                projectId: ProjectId.make(`${threadId}-project`),
+                sourceThreadId: threadId,
+                successorThreadId,
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: "feature",
+                worktreePath: process.cwd(),
+                handoff: {
+                  goal: "Inert review fixture",
+                  decisions: [],
+                  state: { branch: "feature", commits: [], verified: [] },
+                  deadEnds: [],
+                  next: "Wait",
+                  pointers: [],
+                },
+              },
+            },
+          ]);
+          const review = {
+            type: "handoff" as const,
+            requestId,
+            sourceThreadId: threadId,
+            successorThreadId,
+            generation: "generation-one",
+            declaration:
+              "I reviewed native and detached work manually. This decision records review only; transfer remains parked." as const,
+            blockers: [],
+            unknowns: [],
+            children: [],
+            manualReview: ["Native and detached coverage is manual"],
+            sourceSequence: yield* sink.latestSequence({ threadId }),
+          };
+          const record = {
+            type: "handoff.approval.record" as const,
+            commandId: CommandId.make(`${threadId}-record`),
+            threadId,
+            review,
+          };
+          for (const field of ["blockers", "unknowns"] as const) {
+            const refused = yield* orchestrator
+              .dispatch({
+                ...record,
+                commandId: CommandId.make(`${threadId}-${field}`),
+                review: {
+                  ...review,
+                  [field]: ["Cannot waive known work or essential uncertainty"],
+                },
+              })
+              .pipe(Effect.flip);
+            assert.equal(refused._tag, "OrchestratorDispatchError");
+          }
+          yield* orchestrator.dispatch(record);
+          assert.equal(
+            (yield* orchestrator
+              .dispatch({
+                ...record,
+                commandId: CommandId.make(`${threadId}-rewrite`),
+                review: { ...review, generation: "replacement" },
+              })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          const session = {
+            sessionId: AuthSessionId.make("test-client"),
+            subject: "paired-client",
+            method: "browser-session-cookie" as const,
+            scopes: [AuthOrchestrationOperateScope],
+          };
+          const response = {
+            type: "runtime-request.respond" as const,
+            commandId: CommandId.make(`${threadId}-respond`),
+            threadId,
+            requestId,
+            decision,
+            handoffGeneration: review.generation,
+          };
+          assert.equal(
+            (yield* orchestrator
+              .dispatch({ ...response, commandId: CommandId.make(`${threadId}-no-authority`) })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.equal(
+            (yield* withAuthenticatedHandoffResponse(
+              { ...session, subject: "mcp-client" },
+              orchestrator.dispatch({ ...response, commandId: CommandId.make(`${threadId}-mcp`) }),
+            ).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.equal(
+            (yield* withAuthenticatedHandoffResponse(
+              session,
+              orchestrator.dispatch({
+                ...response,
+                handoffGeneration: "stale",
+                commandId: CommandId.make(`${threadId}-stale`),
+              }),
+            ).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.equal(
+            (yield* withAuthenticatedHandoffResponse(
+              session,
+              orchestrator.dispatch({
+                ...response,
+                decision: "acceptForSession",
+                commandId: CommandId.make(`${threadId}-session`),
+              }),
+            ).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          if (mode === "changed") {
+            yield* orchestrator.dispatch({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(`${threadId}-change`),
+              threadId,
+              title: "External change",
+            });
+            assert.equal(
+              (yield* withAuthenticatedHandoffResponse(
+                session,
+                orchestrator.dispatch(response),
+              ).pipe(Effect.flip))._tag,
+              "OrchestratorDispatchError",
+            );
+            yield* withAuthenticatedHandoffResponse(
+              session,
+              orchestrator.dispatch({
+                ...response,
+                decision: "cancel",
+                commandId: CommandId.make(`${threadId}-cancel-stale`),
+              }),
+            );
+            continue;
+          }
+          const method = ORCHESTRATION_V2_WS_METHODS.dispatchCommand;
+          const group = WsRpcGroup.omit(
+            ...[...WsRpcGroup.requests.keys()].filter(
+              (
+                tag,
+              ): tag is Exclude<keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES, typeof method> =>
+                tag !== method,
+            ),
+          );
+          const client = yield* RpcTest.makeClient(group).pipe(
+            Effect.provide(
+              Layer.merge(
+                group.toLayerHandler(method, (command) =>
+                  withAuthenticatedHandoffResponse(session, orchestrator.dispatch(command)).pipe(
+                    Effect.map((result) => ({ sequence: result.sequence })),
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationV2DispatchCommandError({
+                          commandId: command.commandId,
+                          commandType: command.type,
+                          message: String(cause),
+                        }),
+                    ),
+                  ),
+                ),
+                RpcAuthorization.layer(session.scopes),
+              ),
+            ),
+          );
+          yield* client[method](response);
+          const replay = yield* withAuthenticatedHandoffResponse(
+            session,
+            orchestrator.dispatch(response),
+          );
+          assert.isTrue(replay.replayed);
+          assert.equal(
+            (yield* withAuthenticatedHandoffResponse(
+              session,
+              orchestrator.dispatch({
+                ...response,
+                commandId: CommandId.make(`${threadId}-duplicate`),
+              }),
+            ).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(projection.runtimeRequests[0]?.decision, decision);
+          assert.deepEqual(projection.runtimeRequests[0]?.responseCapability, review);
+          assert.isEmpty(projection.runs);
+          assert.isEmpty(projection.messages);
+          assert.isTrue(
+            Option.isNone(
+              yield* orchestrator.getThreadProjection(successorThreadId).pipe(Effect.option),
+            ),
+          );
+          assert.isEmpty(yield* outbox.listByCommandId(response.commandId));
+          assert.isTrue(Option.isSome(yield* outbox.get(`core-handoff:${threadId}`)));
+        }
+      }),
+  );
+
   const seedFailingRollbackThread = (name: string) =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -6656,6 +7115,154 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         messageId: MessageId.make("hook-stale"),
       });
       assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+    }),
+  );
+
+  it.effect("pauses generic hook continuation and holds staged turns at the context limit", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      for (const { name, usedTokens, matchingNativeId, staged, notice } of [
+        { name: "below", usedTokens: 249_999, matchingNativeId: true, staged: true, notice: null },
+        {
+          name: "at-limit",
+          usedTokens: 250_000,
+          matchingNativeId: true,
+          staged: true,
+          notice: "250,000",
+        },
+        { name: "stale", usedTokens: 300_000, matchingNativeId: false, staged: true, notice: null },
+        {
+          name: "generic",
+          usedTokens: 1_000,
+          matchingNativeId: true,
+          staged: false,
+          notice: "Continue explicitly",
+        },
+      ]) {
+        const key = `hook-context-${name}`;
+        const threadId = ThreadId.make(key);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`${key}-create`),
+          threadId,
+          projectId: ProjectId.make(`${key}-project`),
+          title: "Hook context",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: "/tmp/hook-context",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`${key}-user`),
+          threadId,
+          messageId: MessageId.make(`${key}-user`),
+          text: "Build it",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        const source = projection.runs[0]!;
+        const attempt = projection.attempts.find((value) => value.id === source.activeAttemptId)!;
+        const provider = projection.providerThreads.find(
+          (value) => value.id === source.providerThreadId,
+        )!;
+        const nativeId = `${key}-native`;
+        const turnId = ProviderTurnId.make(`${key}-turn`);
+        yield* eventSink.commitCommand({
+          commandId: CommandId.make(`${key}-complete`),
+          threadId,
+          commandType: "provider-runtime.reconcile",
+          acceptedAt: now,
+          events: [
+            {
+              id: EventId.make(`${key}-provider`),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...provider,
+                nativeThreadRef: { driver, nativeId, strength: "strong" },
+                status: "idle",
+              },
+            },
+            {
+              id: EventId.make(`${key}-attempt`),
+              type: "run-attempt.updated",
+              threadId,
+              runId: source.id,
+              occurredAt: now,
+              payload: {
+                ...attempt,
+                nativeThreadId: matchingNativeId ? nativeId : "previous-native",
+                providerTurnId: turnId,
+                status: "completed",
+                completedAt: now,
+              },
+            },
+            {
+              id: EventId.make(`${key}-turn-event`),
+              type: "provider-turn.updated",
+              threadId,
+              runId: source.id,
+              occurredAt: now,
+              payload: {
+                id: turnId,
+                providerThreadId: provider.id,
+                nodeId: attempt.rootNodeId,
+                runAttemptId: attempt.id,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "completed",
+                startedAt: now,
+                completedAt: now,
+                tokenUsage: { usedTokens, updatedAt: DateTime.formatIso(now) },
+              },
+            },
+            {
+              id: EventId.make(`${key}-run`),
+              type: "run.updated",
+              threadId,
+              runId: source.id,
+              occurredAt: now,
+              payload: { ...source, status: "completed", completedAt: now },
+            },
+          ],
+          effects: [],
+        });
+        const command = {
+          type: "message.dispatch" as const,
+          createdBy: "agent" as const,
+          creationSource: "server" as const,
+          commandId: CommandId.make(`${key}-continue`),
+          threadId,
+          messageId: MessageId.make(`${key}-continue`),
+          text: "Continue",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" as const },
+          hookContinuationOfRunId: source.id,
+          ...(staged ? { hookStageWorkspaceRoot: "/tmp/hook-context" } : {}),
+        };
+        yield* orchestrator.dispatch(command);
+        yield* orchestrator.dispatch(command);
+        const result = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(result.runs, notice === null ? 2 : 1, name);
+        const notices = result.turnItems.filter((item) => item.type === "system_notice");
+        assert.lengthOf(notices, notice === null ? 0 : 1, name);
+        if (notice !== null) {
+          assert.equal(notices[0]?.title, "Automatic continuation paused");
+          assert.include(notices[0]?.message, notice);
+        }
+      }
     }),
   );
 
@@ -12862,6 +13469,2490 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
             "a refused resume re-holds the queue instead of leaving it looking resumable",
           );
         }),
+    );
+  },
+);
+
+const layerTransferOwners = Layer.mergeAll(
+  Layer.mock(HandoffGit.GitManager)({
+    observeHandoffWorkspace: () => Effect.die("Configure fake Git owner"),
+  }),
+  Layer.mock(CheckpointStore.CheckpointStore)({ isGitRepository: () => Effect.succeed(false) }),
+);
+const makeTransferTestLayer = (
+  sqlite: typeof SqlitePersistence.layerMemory | ReturnType<typeof SqlitePersistence.layerFromPath>,
+  continueThreadsAfterServerUpdate = false,
+  terminalLayer: Layer.Layer<
+    TerminalManager.TerminalManager,
+    never,
+    | FileSystem.FileSystem
+    | Path.Path
+    | ServerConfig.ServerConfig
+    | SqlClient.SqlClient
+    | ChildProcessSpawner.ChildProcessSpawner
+  > = Layer.mock(TerminalManager.TerminalManager)({
+    observeHandoff: () => Effect.succeed([]),
+  }),
+) =>
+  Layer.mergeAll(
+    RuntimeLayer.layer,
+    RuntimeLayer.layerEventSink,
+    RuntimeLayer.layerEventInfrastructure,
+    ProjectStore.layer,
+    ProjectionStore.layer,
+    EffectOutbox.layer,
+    ThreadCommandExecutor.layer,
+    ActivityLedger.layer,
+    EventStore.layerFromOrchestrationEventStore.pipe(
+      Layer.provide(RuntimeLayer.layerEventInfrastructure),
+    ),
+    CommandReceipts.layerFromApplicationReceipts.pipe(
+      Layer.provide(RuntimeLayer.layerEventInfrastructure),
+    ),
+  ).pipe(
+    Layer.provideMerge(Layer.merge(layerTransferOwners, terminalLayer)),
+    Layer.provide(
+      Layer.succeed(ProviderStart.ProviderTurnStartModels, {
+        getProviders: Effect.succeed([
+          {
+            instanceId: modelSelection.instanceId,
+            models: [
+              {
+                slug: modelSelection.model,
+                name: "Inert fixture",
+                capabilities: {
+                  optionDescriptors: [
+                    {
+                      id: "reasoningEffort",
+                      type: "select",
+                      label: "Effort",
+                      role: "reasoning",
+                      options: [{ id: "high", label: "High" }],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ] as never),
+      }),
+    ),
+    Layer.provide(McpSessionRegistryTestkit.layer),
+    Layer.provide(McpProviderSessions.layer),
+    Layer.provide(sqlite),
+    Layer.provide(layerServerConfig),
+    Layer.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate })),
+    Layer.provide(layerTestProviderInstanceRegistry),
+    Layer.provide(layerGitWorkflowTest),
+    Layer.provide(layerProjectServiceTest),
+    Layer.provideMerge(layerPlatformTest),
+  );
+
+const layerTransferTest = makeTransferTestLayer(SqlitePersistence.layerMemory);
+
+const configureGuardedHandoffOwners = Effect.fn("test.configureGuardedHandoffOwners")(function* (
+  key: string,
+  cwd: string,
+  selection: ModelSelection,
+) {
+  const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const git = yield* HandoffGit.GitManager;
+  const now = yield* DateTime.now;
+  const workspace: { -readonly [K in keyof HandoffWorkspace]: HandoffWorkspace[K] } = {
+    root: cwd,
+    branch: "feature",
+    head: "fake-head",
+    status: "",
+    indexDiff: "",
+    worktreeDiff: "",
+    untracked: "",
+    submodules: "",
+    checkpointRef: null,
+    checkpointCommit: null,
+    checkpointMatches: null,
+    checkpointError: null,
+  };
+  const availability = { cold: false };
+  yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      vi
+        .spyOn(git, "observeHandoffWorkspace")
+        .mockImplementation(() =>
+          Effect.suspend(() =>
+            availability.cold
+              ? Effect.die("Physical owner unavailable before the start worker")
+              : Effect.succeed(workspace),
+          ),
+        ),
+    ),
+    (spy) => Effect.sync(() => spy.mockRestore()),
+  );
+  const observe = sessions.observeHandoffSession;
+  yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      vi.spyOn(sessions, "observeHandoffSession").mockImplementation((id) =>
+        observe(id).pipe(
+          Effect.map((live) =>
+            Option.isSome(live)
+              ? live
+              : Option.some({
+                  idleGeneration: 1,
+                  busyTurns: [],
+                  runtime: {
+                    providerSessionId: id,
+                    instanceId: selection.instanceId,
+                    driver,
+                    hasPendingBackgroundWork: Effect.succeed(false),
+                    hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+                  } as never,
+                }),
+          ),
+        ),
+      ),
+    ),
+    (spy) => Effect.sync(() => spy.mockRestore()),
+  );
+  const starts: ProviderAdapter.ProviderAdapterV2TurnInput[] = [];
+  yield* Effect.acquireRelease(
+    Effect.sync(() =>
+      vi.spyOn(orchestrationAdapter, "openSession").mockImplementation((input) =>
+        Effect.succeed({
+          instanceId: selection.instanceId,
+          driver,
+          providerSessionId: input.providerSessionId,
+          providerSession: {
+            id: input.providerSessionId,
+            driver,
+            providerInstanceId: selection.instanceId,
+            status: "ready",
+            cwd,
+            model: selection.model,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+          events: Stream.never,
+          hasPendingBackgroundWork: Effect.succeed(false),
+          hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+          ensureThread: (ensure: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) =>
+            Effect.succeed({
+              ...ensure.existingProviderThread!,
+              providerSessionId: input.providerSessionId,
+              nativeThreadRef: {
+                driver,
+                nativeId: `inert-successor-${ensure.threadId}`,
+                strength: "strong" as const,
+              },
+            }),
+          resumeThread: (
+            resume: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]>[0],
+          ) => Effect.succeed(resume.providerThread),
+          startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+            Effect.sync(() => {
+              starts.push(turn);
+            }),
+          resumeTurn: () => Effect.void,
+          compactThread: () => Effect.void,
+          steerTurn: () => Effect.void,
+          interruptTurn: () => Effect.void,
+          unloadThread: () => Effect.void,
+          respondToRuntimeRequest: () => Effect.void,
+          readThreadSnapshot: () => Effect.die("unused inert snapshot"),
+          rollbackThread: () => Effect.die("unused inert rollback"),
+          forkThread: () => Effect.die("unused inert fork"),
+        } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime),
+      ),
+    ),
+    (spy) => Effect.sync(() => spy.mockRestore()),
+  );
+  return { sessions, git, now, workspace, starts, availability };
+});
+
+const decodeProducerFixtureRun = Schema.decodeEffect(OrchestrationV2RunSchema);
+
+const setupGuardedHandoff = Effect.fn("test.setupGuardedHandoff")(function* (
+  key: string,
+  autoAccept = true,
+  withChild = false,
+  retainedCwd?: string,
+  beforeReview?: (
+    sourceId: ThreadId,
+    childId: ThreadId,
+    cwd: string,
+  ) => Effect.Effect<void, TerminalError>,
+  persistReadySessions = false,
+) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
+  const sink = yield* EventSink.EventSinkV2;
+  const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+  const ledger = yield* ActivityLedger.ActivityLedger;
+  const fs = yield* FileSystem.FileSystem;
+  const cwd =
+    retainedCwd ?? (yield* fs.makeTempDirectoryScoped({ prefix: "guarded-handoff-fixture-" }));
+  const sourceId = ThreadId.make(`guarded-${key}-source`);
+  const projectId = ProjectId.make(`guarded-${key}-project`);
+  const selection = { ...modelSelection, options: [{ id: "reasoningEffort", value: "high" }] };
+  const { sessions, git, now, workspace, starts } = yield* configureGuardedHandoffOwners(
+    key,
+    cwd,
+    selection,
+  );
+  yield* seedProject({
+    projectId,
+    title: "Guarded fixture",
+    workspaceRoot: cwd,
+    defaultModelSelection: selection,
+    createdAt: DateTime.formatIso(now),
+  });
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make(`guarded-${key}-create`),
+    threadId: sourceId,
+    projectId,
+    createdBy: "user",
+    creationSource: "web",
+    title: "Guarded fixture",
+    modelSelection: selection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: "feature",
+    worktreePath: cwd,
+  });
+  const sourceProvider = yield* decodeHandoffFixtureProvider({
+    id: `guarded-${key}-provider`,
+    driver: "codex",
+    providerInstanceId: selection.instanceId,
+    providerSessionId: HandoffIds.derive.providerSession({
+      providerInstanceId: selection.instanceId,
+    }),
+    appThreadId: sourceId,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeConversationHeadRef: null,
+    status: "idle",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    pendingBackgroundTasks: [],
+    createdAt: now,
+    updatedAt: now,
+  });
+  yield* sink.write({
+    events: [
+      {
+        id: EventId.make(`guarded-${key}-provider-event`),
+        type: "provider-thread.updated",
+        threadId: sourceId,
+        occurredAt: now,
+        payload: sourceProvider,
+      },
+    ],
+  });
+  const submitted = yield* CoreHandoff.submitHandoff(sourceId, {
+    goal: "Guarded fixture",
+    decisions: [],
+    state: { branch: "feature", commits: [], verified: [] },
+    deadEnds: [],
+    next: "Remain inert",
+    pointers: [],
+  });
+  const childId = ThreadId.make(`guarded-${key}-child`);
+  if (withChild) {
+    const sourceThread = (yield* orchestrator.getThreadProjection(sourceId)).thread;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`${key}-child`),
+          type: "thread.created",
+          threadId: childId,
+          occurredAt: now,
+          payload: {
+            ...sourceThread,
+            id: childId,
+            title: "Settled child fixture",
+            lineage: {
+              parentThreadId: sourceId,
+              rootThreadId: sourceId,
+              relationshipToParent: "subagent",
+            },
+          },
+        },
+        {
+          id: EventId.make(`${key}-child-provider`),
+          type: "provider-thread.updated",
+          threadId: childId,
+          occurredAt: now,
+          payload: {
+            ...sourceProvider,
+            id: ProviderThreadId.make(`${key}-child-provider`),
+            appThreadId: childId,
+            providerSessionId: ProviderSessionId.make(`${key}-child-session`),
+          },
+        },
+        {
+          id: EventId.make(`${key}-child-owner`),
+          type: "subagent.updated",
+          threadId: sourceId,
+          occurredAt: now,
+          payload: {
+            id: NodeId.make(`${key}-task`),
+            threadId: sourceId,
+            runId: null,
+            parentNodeId: NodeId.make(`${key}-parent`),
+            origin: "app_owned",
+            createdBy: "agent",
+            driver,
+            providerInstanceId: selection.instanceId,
+            providerThreadId: sourceProvider.id,
+            childThreadId: childId,
+            nativeTaskRef: null,
+            prompt: "Settled fake child",
+            title: "Settled fake child",
+            model: null,
+            status: "completed",
+            result: "Settled",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+  }
+  if (persistReadySessions) {
+    yield* sink.write({
+      events: [sourceId, ...(withChild ? [childId] : [])].map((id) => ({
+        id: EventId.make(`guarded-${id}-ready-session`),
+        type: "provider-session.attached" as const,
+        threadId: id,
+        occurredAt: now,
+        payload: {
+          id:
+            id === sourceId
+              ? sourceProvider.providerSessionId!
+              : ProviderSessionId.make(`${key}-child-session`),
+          driver,
+          providerInstanceId: selection.instanceId,
+          status: "ready" as const,
+          cwd,
+          model: selection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      })),
+    });
+  }
+  if (beforeReview !== undefined) yield* beforeReview(sourceId, childId, cwd);
+  const snapshot = yield* queryHandoffReadiness(sourceId);
+  assert.equal(snapshot.classification, "manual_review");
+  const review = yield* requestHandoffApproval(sourceId, snapshot.generation);
+  const session = {
+    sessionId: AuthSessionId.make("guarded-client"),
+    subject: "paired-client",
+    method: "browser-session-cookie" as const,
+    scopes: [AuthOrchestrationOperateScope],
+  };
+  const accept = withAuthenticatedHandoffResponse(
+    session,
+    orchestrator.dispatch({
+      type: "runtime-request.respond",
+      commandId: CommandId.make(`guarded-${key}-accept`),
+      threadId: sourceId,
+      requestId: review.requestId,
+      decision: "accept",
+      handoffGeneration: review.generation,
+    }),
+  );
+  if (autoAccept) yield* accept;
+  const admission = yield* TransferAdmission.HandoffTransferAdmission;
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const parked = Option.getOrThrow(yield* outbox.get(`core-handoff:${sourceId}`));
+  if (parked.request.type !== "thread.handoff") return yield* Effect.die("Wrong fixture request");
+  const prepare = {
+    type: "handoff.transfer.prepare" as const,
+    commandId: CommandId.make(`handoff-transfer:${review.requestId}:prepare`),
+    threadId: sourceId,
+    requestId: review.requestId,
+    generation: review.generation,
+  };
+  const reverse = {
+    type: "handoff.transfer.reverse" as const,
+    commandId: CommandId.make(`handoff-transfer:${review.requestId}:reverse`),
+    threadId: sourceId,
+    requestId: review.requestId,
+    generation: review.generation,
+  };
+  return {
+    orchestrator,
+    threads,
+    sink,
+    worker,
+    sessions,
+    git,
+    ledger,
+    cwd,
+    now,
+    sourceId,
+    childId,
+    projectId,
+    selection,
+    workspace,
+    starts,
+    submitted,
+    snapshot,
+    review,
+    session,
+    accept,
+    admission,
+    outbox,
+    request: parked.request,
+    prepare,
+    reverse,
+  };
+});
+
+const encodeGuardedDetail = Schema.encodeSync(ThreadProjectionSchema);
+const decodeGuardedDetail = Schema.decodeSync(ThreadProjectionSchema);
+const readGuardedDetail = (projection: ThreadProjectionSchema) =>
+  decodeGuardedDetail(encodeGuardedDetail(projectThreadProjectionForWire(projection)));
+
+const guardedHandoffClient = Effect.fn("test.guardedHandoffClient")(function* (
+  session: AuthenticatedSession,
+) {
+  const context =
+    yield* Effect.context<
+      Effect.Services<ReturnType<typeof ThreadMessageIntake.dispatchCommand>>
+    >();
+  const method = ORCHESTRATION_V2_WS_METHODS.dispatchCommand;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES, typeof method> =>
+        tag !== method,
+    ),
+  );
+  const client = yield* RpcTest.makeClient(group).pipe(
+    Effect.provide(
+      Layer.merge(
+        group.toLayerHandler(method, (command) =>
+          withAuthenticatedHandoffResponse(
+            session,
+            ThreadMessageIntake.dispatchCommand(command),
+          ).pipe(
+            Effect.provide(context),
+            Effect.map(({ sequence }) => ({ sequence })),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2DispatchCommandError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  message:
+                    userFacingDispatchErrorMessage(cause) ??
+                    "Failed to dispatch orchestration V2 command",
+                }),
+            ),
+          ),
+        ),
+        RpcAuthorization.layer(session.scopes),
+      ),
+    ),
+  );
+  return client[method];
+});
+
+it.layer(Layer.empty)(
+  "guarded handoff SQLite with fake physical owners and inert provider",
+  (it) => {
+    it.effect.each(["decision", "prepare", "ledger", "ack"] as const)(
+      "guarded handoff file SQLite reopens after %s loss with one durable owner",
+      (phase) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fs.makeTempDirectoryScoped({ prefix: "handoff-reopen-" });
+          const cwd = path.join(directory, "workspace");
+          yield* fs.makeDirectory(cwd);
+          const filename = path.join(directory, "state.sqlite");
+          const saved = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* setupGuardedHandoff(`reopen-${phase}`, true, false, cwd);
+              if (phase === "prepare") yield* f.orchestrator.dispatch(f.prepare);
+              if (phase === "ledger") {
+                const append = f.ledger.append;
+                using _failure = vi
+                  .spyOn(f.ledger, "append")
+                  .mockImplementation(() =>
+                    Effect.fail(new ActivityLedgerError({ message: "Injected ledger loss" })),
+                  );
+                yield* CoreHandoff.deliverHandoff(f.request).pipe(Effect.flip);
+                assert.isTrue(append !== undefined);
+              }
+              if (phase === "ack") {
+                yield* CoreHandoff.deliverHandoff(f.request).pipe(
+                  Effect.andThen(Effect.fail("lost acknowledgement")),
+                  Effect.exit,
+                );
+              }
+              const claim = yield* f.outbox.claimNext({ workerId: "lost-process" });
+              assert.isTrue(Option.isSome(claim));
+              assert.isEmpty(f.starts);
+              return {
+                sourceId: f.sourceId,
+                projectId: f.projectId,
+                successorId: f.submitted.successorThreadId,
+                selection: f.selection,
+                request: f.request,
+              };
+            }).pipe(
+              Effect.provide(makeTransferTestLayer(SqlitePersistence.layerFromPath(filename))),
+            ),
+          );
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const { starts } = yield* configureGuardedHandoffOwners(
+                `reopen-${phase}`,
+                cwd,
+                saved.selection,
+              );
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const outbox = yield* EffectOutbox.EffectOutboxV2;
+              const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+              const ledger = yield* ActivityLedger.ActivityLedger;
+              yield* outbox.reconcileAfterProcessLoss;
+              yield* Effect.all(
+                [
+                  CoreHandoff.deliverHandoff(saved.request),
+                  CoreHandoff.deliverHandoff(saved.request),
+                ],
+                { concurrency: "unbounded" },
+              );
+              const secondWorker = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+                Effect.provide(EffectWorker.layerWithOptions({ workerId: "second-reopen-worker" })),
+              );
+              yield* Effect.all([worker.drain(), secondWorker.drain()], {
+                concurrency: "unbounded",
+              });
+              const source = (yield* orchestrator.getThreadProjection(saved.sourceId)).thread;
+              const successor = yield* orchestrator.getThreadProjection(saved.successorId);
+              const providerEffect = yield* outbox.get(
+                `effect:handoff-transfer:${source.handoffTransfer?.requestId}:release:provider-turn.start:${source.handoffTransfer?.runId}`,
+              );
+              assert.equal(
+                source.handoffTransfer?.state,
+                "started",
+                `${successor.runs[0]?.status}: ${Option.isSome(providerEffect) ? (providerEffect.value.lastError ?? providerEffect.value.status) : "no-effect"}`,
+              );
+              assert.equal(source.settledOverride, "settled");
+              assert.lengthOf(successor.messages, 1);
+              assert.lengthOf(successor.runs, 1);
+              assert.lengthOf(starts, 1);
+              const sink = yield* EventSink.EventSinkV2;
+              const preparedEvents = yield* sink
+                .readByCommandId({
+                  commandId: CommandId.make(
+                    `handoff-transfer:${source.handoffTransfer!.requestId}:prepare`,
+                  ),
+                })
+                .pipe(Stream.runCollect);
+              assert.lengthOf(
+                preparedEvents.filter((row) => row.event.type === "thread.created"),
+                1,
+              );
+              assert.lengthOf(
+                preparedEvents.filter((row) => row.event.type === "run.created"),
+                1,
+              );
+              assert.lengthOf(
+                preparedEvents.filter(
+                  (row) =>
+                    row.event.type === "message.updated" && row.event.payload.role === "user",
+                ),
+                1,
+              );
+              assert.equal(successor.thread.worktreePath, cwd);
+              assert.equal(successor.thread.branch, "feature");
+              assert.deepEqual(starts[0]?.modelSelection, saved.selection);
+              assert.lengthOf(
+                yield* ledger.list({ projectId: saved.projectId, kinds: ["handoff"], limit: 10 }),
+                1,
+              );
+            }).pipe(
+              Effect.provide(makeTransferTestLayer(SqlitePersistence.layerFromPath(filename))),
+            ),
+          );
+        }).pipe(Effect.provide(layerPlatformTest), Effect.scoped),
+    );
+
+    it.effect.each([
+      ...[false, true].flatMap((enabled) =>
+        (["pending", "before-claim", "after-claim"] as const).map((phase) => ({
+          enabled,
+          phase,
+          drift: "none" as const,
+        })),
+      ),
+      ...(["source", "child", "shared-after-recovery", "foreign-on-loss"] as const).map(
+        (drift) => ({
+          enabled: false,
+          phase: "pending" as const,
+          drift,
+        }),
+      ),
+    ])(
+      "guarded handoff startup reconciles $phase with continuation=$enabled and drift=$drift",
+      ({ enabled, phase, drift }) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "handoff-runtime-reopen-" });
+          const cwd = path.join(dir, "workspace");
+          yield* fs.makeDirectory(cwd);
+          const testLayer = () =>
+            makeTransferTestLayer(
+              SqlitePersistence.layerFromPath(path.join(dir, "state.sqlite")),
+              enabled,
+            );
+          const key = `actual-startup-${phase}-${enabled}-${drift}`;
+          const saved = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* setupGuardedHandoff(key, true, true, cwd, undefined, true);
+              yield* CoreHandoff.deliverHandoff(f.request);
+              for (const workerId of ["lost-startup-source", "lost-startup-review"]) {
+                const row = Option.getOrThrow(yield* f.outbox.claimNext({ workerId }));
+                assert.equal(row.request.type, "thread.handoff");
+                assert.isTrue(yield* f.outbox.succeed({ effectId: row.id, workerId }));
+              }
+              const pair = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread
+                .handoffTransfer!;
+              const releaseId = `effect:handoff-transfer:${pair.requestId}:release:provider-turn.start:${pair.runId}`;
+              if (phase !== "pending") {
+                const row = Option.getOrThrow(
+                  yield* f.outbox.claimNext({ workerId: "lost-provider" }),
+                );
+                assert.equal(row.id, releaseId);
+                const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+                if (phase === "before-claim") {
+                  const paused = yield* Deferred.make<void>();
+                  using _pause = vi
+                    .spyOn(f.admission, "start")
+                    .mockImplementation(() =>
+                      Deferred.succeed(paused, undefined).pipe(Effect.andThen(Effect.never)),
+                    );
+                  const running = yield* executor
+                    .execute(row)
+                    .pipe(Effect.forkChild({ startImmediately: true }));
+                  yield* Effect.raceFirst(
+                    Deferred.await(paused),
+                    Fiber.join(running).pipe(
+                      Effect.andThen(Effect.fail("provider never reached admission")),
+                    ),
+                  );
+                  yield* Fiber.interrupt(running);
+                } else yield* executor.execute(row);
+                const successor = yield* f.orchestrator.getThreadProjection(pair.successorThreadId);
+                assert.equal(successor.runs[0]?.status, "running");
+                assert.isEmpty(successor.providerTurns);
+                assert.lengthOf(f.starts, phase === "after-claim" ? 1 : 0);
+                assert.equal(
+                  (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer
+                    ?.state,
+                  phase === "after-claim" ? "started" : "released",
+                );
+              }
+              for (const ownerId of [f.sourceId, f.childId]) {
+                const { providerSessions } = yield* f.orchestrator.getThreadProjection(ownerId);
+                assert.deepEqual(
+                  providerSessions.map((session) => session.status),
+                  ["ready"],
+                );
+              }
+              if (drift === "source" || drift === "child") {
+                const threadId = drift === "source" ? f.sourceId : f.childId;
+                const { providerSessions } = yield* f.orchestrator.getThreadProjection(threadId);
+                yield* f.sink.write({
+                  events: [
+                    {
+                      id: EventId.make(`${key}-unrelated`),
+                      type: "provider-session.updated",
+                      threadId,
+                      occurredAt: f.now,
+                      payload: providerSessions[0]!,
+                    },
+                  ],
+                });
+              }
+              return { pair, releaseId, selection: f.selection, childId: f.childId };
+            }).pipe(Effect.provide(testLayer())),
+          );
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const { starts, availability, git } = yield* configureGuardedHandoffOwners(
+                key,
+                cwd,
+                saved.selection,
+              );
+              const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+              const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const outbox = yield* EffectOutbox.EffectOutboxV2;
+              const { pair, releaseId } = saved;
+              // Startup should reserve bounded recovery even while the physical owner is cold.
+              const physicalRead = vi.mocked(git.observeHandoffWorkspace);
+              availability.cold = true;
+              yield* recovery.recover;
+              availability.cold = false;
+              assert.equal(physicalRead.mock.calls.length, 0);
+              for (const ownerId of [pair.sourceThreadId, saved.childId]) {
+                const { providerSessions } = yield* orchestrator.getThreadProjection(ownerId);
+                assert.deepEqual(
+                  providerSessions.map((session) => session.status),
+                  ["stopped"],
+                );
+              }
+              const recovered = (yield* orchestrator.getThreadProjection(pair.sourceThreadId))
+                .thread.handoffTransfer;
+              const startBeforeDrain = (yield* orchestrator.getThreadProjection(
+                pair.successorThreadId,
+              )).runs[0];
+              const lost = Option.getOrThrow(yield* outbox.get(releaseId));
+              assert.equal(lost.status, "cancelled");
+              assert.isEmpty(
+                yield* outbox.listByCommandId(
+                  CommandId.make(`command:restart-resend:${pair.runId}`),
+                ),
+              );
+              assert.isTrue(
+                Option.isNone(yield* outbox.get(`effect:restart-continuation:${pair.runId}`)),
+              );
+              if (drift === "source" || drift === "child") {
+                assert.equal(recovered?.state, "released");
+                assert.isUndefined(recovered?.recoveryCount);
+                yield* worker.drain();
+                assert.isEmpty(starts);
+                return;
+              }
+              if (phase === "after-claim") {
+                assert.equal(recovered?.state, "started");
+                assert.isUndefined(recovered?.recoveryCount);
+                assert.equal(startBeforeDrain?.status, "cancelled");
+                const admission = yield* TransferAdmission.HandoffTransferAdmission;
+                assert.equal(
+                  (yield* admission.start(pair.successorThreadId, pair.runId).pipe(Effect.flip))
+                    .stage,
+                  "initial-start-already-claimed",
+                );
+              } else {
+                assert.equal(lost.lastError, EffectOutbox.HANDOFF_PROCESS_LOSS_REASON);
+                assert.equal(recovered?.state, "released");
+                assert.equal(recovered?.recoveryCount, 1);
+                assert.equal(startBeforeDrain?.status, "starting");
+                const replacement = Option.getOrThrow(
+                  yield* outbox.get(
+                    `effect:handoff-transfer:${pair.requestId}:recover:1:provider-turn.start:${pair.runId}`,
+                  ),
+                );
+                assert.equal(replacement.status, "pending");
+              }
+              if (drift === "shared-after-recovery" || drift === "foreign-on-loss") {
+                const sink = yield* EventSink.EventSinkV2;
+                const { providerSessions } = yield* orchestrator.getThreadProjection(
+                  pair.sourceThreadId,
+                );
+                yield* sink.write({
+                  events: [
+                    {
+                      id: EventId.make(`${key}-unrelated-shared-session`),
+                      type: "provider-session.updated",
+                      threadId: pair.successorThreadId,
+                      occurredAt: yield* DateTime.now,
+                      payload: providerSessions[0]!,
+                    },
+                  ],
+                });
+                if (drift === "foreign-on-loss") {
+                  yield* recovery.recover;
+                  const replacementId = TransferAdmission.handoffStartEffectId({
+                    ...pair,
+                    recoveryCount: 1,
+                  });
+                  const lostReplacement = Option.getOrThrow(yield* outbox.get(replacementId));
+                  assert.equal(lostReplacement.lastError, EffectOutbox.HANDOFF_PROCESS_LOSS_REASON);
+                }
+                yield* worker.drain();
+                assert.isEmpty(starts);
+                const guarded = (yield* orchestrator.getThreadProjection(pair.sourceThreadId))
+                  .thread.handoffTransfer;
+                assert.equal(guarded?.state, "released");
+                assert.equal(guarded?.recoveryCount, 1);
+                assert.isUndefined(guarded?.parkedRecovery);
+                return;
+              }
+              yield* worker.drain();
+              const successor = yield* orchestrator.getThreadProjection(pair.successorThreadId);
+              assert.lengthOf(successor.messages, 1);
+              assert.deepEqual(
+                successor.runs.map((run) => run.id),
+                [pair.runId],
+              );
+              assert.lengthOf(starts, phase === "after-claim" ? 0 : 1);
+              assert.lengthOf(physicalRead.mock.calls, phase === "after-claim" ? 0 : 2);
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(pair.sourceThreadId)).thread
+                  .handoffTransfer?.state,
+                "started",
+              );
+            }).pipe(Effect.provide(testLayer())),
+          );
+        }).pipe(Effect.provide(layerPlatformTest), Effect.scoped),
+    );
+
+    it.effect.each(["reverse", "stop"] as const)(
+      "guarded handoff parks after the first replacement bootstraps, then handles %s",
+      (resolution) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "handoff-replacement-loss-" });
+          const cwd = path.join(dir, "workspace");
+          yield* fs.makeDirectory(cwd);
+          const testLayer = () =>
+            makeTransferTestLayer(
+              SqlitePersistence.layerFromPath(path.join(dir, "state.sqlite")),
+              true,
+            );
+          const key = "replacement-loss";
+          const saved = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const f = yield* setupGuardedHandoff(key, true, true, cwd, undefined, true);
+              yield* CoreHandoff.deliverHandoff(f.request);
+              for (const workerId of ["lost-replacement-source", "lost-replacement-review"]) {
+                const row = Option.getOrThrow(yield* f.outbox.claimNext({ workerId }));
+                assert.equal(row.request.type, "thread.handoff");
+                assert.isTrue(yield* f.outbox.succeed({ effectId: row.id, workerId }));
+              }
+              const pair = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread
+                .handoffTransfer!;
+              const source = yield* f.orchestrator.getThreadProjection(f.sourceId);
+              return {
+                pair,
+                selection: f.selection,
+                session: f.session,
+                sharedSessionId: source.providerSessions[0]!.id,
+              };
+            }).pipe(Effect.provide(testLayer())),
+          );
+          const bootstrap = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const { starts } = yield* configureGuardedHandoffOwners(key, cwd, saved.selection);
+              const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+              yield* recovery.recover;
+              const { pair } = saved;
+              const outbox = yield* EffectOutbox.EffectOutboxV2;
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const admission = yield* TransferAdmission.HandoffTransferAdmission;
+              const sink = yield* EventSink.EventSinkV2;
+              const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+              const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+              const replacement = (yield* orchestrator.getThreadProjection(pair.sourceThreadId))
+                .thread.handoffTransfer!;
+              assert.equal(replacement.recoveryCount, 1);
+              const row = Option.getOrThrow(
+                yield* outbox.claimNext({ workerId: "lost-replacement" }),
+              );
+              assert.equal(row.id, TransferAdmission.handoffStartEffectId(replacement));
+              const paused = yield* Deferred.make<void>();
+              using _pause = vi
+                .spyOn(admission, "start")
+                .mockImplementation(() =>
+                  Deferred.succeed(paused, undefined).pipe(Effect.andThen(Effect.never)),
+                );
+              const running = yield* executor
+                .execute(row)
+                .pipe(Effect.forkChild({ startImmediately: true }));
+              yield* Effect.raceFirst(
+                Deferred.await(paused),
+                Fiber.join(running).pipe(
+                  Effect.andThen(Effect.fail("replacement never reached admission")),
+                ),
+              );
+              const rows = yield* sink
+                .readByCommandId({
+                  commandId: TransferAdmission.handoffProviderOpenCommand(replacement),
+                })
+                .pipe(Stream.runCollect);
+              const ready = rows.find(
+                ({ event }) =>
+                  event.type === "provider-session.updated" &&
+                  event.threadId === pair.successorThreadId &&
+                  event.payload.id === saved.sharedSessionId &&
+                  event.payload.status === "ready",
+              );
+              assert.isDefined(ready);
+              assert.isFalse(
+                Option.exists(
+                  yield* receipts.getByCommandId(
+                    CommandId.make(`handoff-transfer:${pair.requestId}:start`),
+                  ),
+                  (receipt) => receipt.status === "accepted",
+                ),
+              );
+              assert.isEmpty(starts);
+              yield* Fiber.interrupt(running);
+              return { effectId: row.id, eventId: ready!.event.id };
+            }).pipe(Effect.provide(testLayer())),
+          );
+          // Lose startup after it records the recovery rejection, before it can publish parking.
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* configureGuardedHandoffOwners(key, cwd, saved.selection);
+              const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+              const threads = yield* ThreadManagementService.ThreadManagementService;
+              const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+              const parkId = TransferAdmission.handoffParkRecoveryCommand({
+                ...saved.pair,
+                recoveryCount: 1,
+              });
+              const dispatch = threads.dispatch;
+              using _loseBeforePark = vi
+                .spyOn(threads, "dispatch")
+                .mockImplementation((command) =>
+                  command.commandId === parkId ? Effect.interrupt : dispatch(command),
+                );
+              const startup = yield* recovery.recover.pipe(Effect.forkChild());
+              assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(startup)));
+              const failedRecovery = Option.getOrThrow(
+                yield* receipts.getByCommandId(
+                  TransferAdmission.handoffRecoveryCommand(saved.pair, 2),
+                ),
+              );
+              assert.equal(failedRecovery.status, "rejected");
+              assert.isTrue(Option.isNone(yield* receipts.getByCommandId(parkId)));
+              assert.isUndefined(
+                (yield* threads.getThreadRecords(saved.pair.sourceThreadId, [])).thread
+                  .handoffTransfer?.parkedRecovery,
+              );
+            }).pipe(Effect.provide(testLayer())),
+          );
+          const writeTitle = (threadId: ThreadId, title: string) => ({
+            type: "thread.metadata.update" as const,
+            commandId: CommandId.make(`guarded-${title}-${threadId}`),
+            threadId,
+            title,
+          });
+          const assertNoRunnableStart = Effect.fn("test.assertNoRunnableStart")(function* () {
+            const outbox = yield* EffectOutbox.EffectOutboxV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const { pair } = saved;
+            assert.isTrue(
+              Option.isNone(yield* outbox.get(`effect:restart-continuation:${pair.runId}`)),
+            );
+            assert.isEmpty(
+              yield* outbox.listByCommandId(CommandId.make(`command:restart-resend:${pair.runId}`)),
+            );
+            assert.isEmpty(
+              yield* outbox.listByCommandId(TransferAdmission.handoffRecoveryCommand(pair, 2)),
+            );
+            assert.equal(
+              Option.getOrThrow(yield* outbox.get(bootstrap.effectId)).status,
+              "cancelled",
+            );
+            yield* worker.drain();
+            assert.isTrue(
+              Option.isNone(yield* outbox.claimNext({ workerId: "no-runnable-successor" })),
+            );
+          });
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const { starts } = yield* configureGuardedHandoffOwners(key, cwd, saved.selection);
+              const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+              yield* recovery.recover;
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const outbox = yield* EffectOutbox.EffectOutboxV2;
+              const { pair } = saved;
+              const source = yield* orchestrator.getThreadProjection(pair.sourceThreadId);
+              const lost = Option.getOrThrow(yield* outbox.get(bootstrap.effectId));
+              assert.equal(lost.status, "cancelled");
+              assert.equal(lost.lastError, EffectOutbox.HANDOFF_PROCESS_LOSS_REASON);
+              assert.equal(source.thread.handoffTransfer?.state, "released");
+              assert.equal(source.thread.handoffTransfer?.recoveryCount, 1);
+              assert.deepInclude(source.thread.handoffTransfer, {
+                parkedRecovery: {
+                  reason: "replacement-lost-after-bootstrap",
+                  bootstrapEventId: bootstrap.eventId,
+                  effectId: bootstrap.effectId,
+                },
+              });
+              const replacement = readGuardedDetail(
+                yield* orchestrator.getThreadProjection(pair.successorThreadId),
+              );
+              const original = readGuardedDetail(
+                yield* orchestrator.getThreadProjection(replacement.thread.handoffSourceThreadId!),
+              );
+              const detailPair = original.thread.handoffTransfer!;
+              assert.equal(detailPair.successorThreadId, replacement.thread.id);
+              assert.deepEqual(
+                detailPair.parkedRecovery,
+                source.thread.handoffTransfer?.parkedRecovery,
+              );
+              assert.isFalse(
+                original.runtimeRequests.some((request) => request.status === "pending"),
+              );
+              const reverse = {
+                type: "handoff.transfer.reverse" as const,
+                commandId: CommandId.make("guarded-return-from-detail"),
+                threadId: detailPair.sourceThreadId,
+                requestId: detailPair.requestId,
+                generation: detailPair.generation,
+              };
+              const dispatch = yield* guardedHandoffClient(saved.session);
+              const readonly = yield* guardedHandoffClient({
+                ...saved.session,
+                scopes: [AuthOrchestrationReadScope],
+              });
+              const mcp = yield* guardedHandoffClient({ ...saved.session, subject: "mcp-client" });
+              assert.equal(
+                (yield* readonly(reverse).pipe(Effect.flip))._tag,
+                "EnvironmentAuthorizationError",
+              );
+              assert.include(
+                (yield* mcp(reverse).pipe(Effect.flip)).message,
+                "Authenticated client authority",
+              );
+              assert.include(
+                (yield* dispatch({
+                  ...reverse,
+                  commandId: CommandId.make("guarded-stale-return"),
+                  generation: "stale",
+                }).pipe(Effect.flip)).message,
+                "No reversible unstarted transfer",
+              );
+              for (const id of [pair.sourceThreadId, pair.successorThreadId])
+                yield* dispatch(writeTitle(id, "before-return")).pipe(Effect.flip);
+              yield* assertNoRunnableStart();
+
+              const result =
+                resolution === "reverse"
+                  ? yield* dispatch(reverse)
+                  : yield* dispatch({
+                      type: "thread.stop",
+                      threadId: detailPair.successorThreadId,
+                      commandId: CommandId.make("guarded-stop-parked-successor"),
+                    });
+              const restored = (yield* orchestrator.getThreadProjection(pair.sourceThreadId))
+                .thread;
+              assert.equal(restored.settledOverride, pair.previousSettledOverride ?? null);
+              yield* dispatch(writeTitle(pair.sourceThreadId, "after-return"));
+              yield* dispatch(writeTitle(pair.successorThreadId, "after-return")).pipe(Effect.flip);
+              yield* dispatch({
+                type: "thread.settle",
+                commandId: CommandId.make("guarded-settle-after-return"),
+                threadId: pair.sourceThreadId,
+              });
+              const afterWrite = (yield* orchestrator.getThreadProjection(pair.sourceThreadId))
+                .thread;
+              assert.equal(afterWrite.settledOverride, "settled");
+              if (resolution === "reverse") {
+                const replay = yield* dispatch(reverse);
+                assert.equal(replay.sequence, result.sequence);
+                assert.include(
+                  (yield* dispatch({ ...reverse, generation: "stale-on-replay" }).pipe(Effect.flip))
+                    .message,
+                  "No matching handoff reversal receipt",
+                );
+                assert.include(
+                  (yield* mcp(reverse).pipe(Effect.flip)).message,
+                  "Authenticated client authority",
+                );
+              }
+              yield* dispatch({
+                ...reverse,
+                commandId: CommandId.make("guarded-fresh-return-duplicate"),
+              });
+              assert.deepEqual(
+                (yield* orchestrator.getThreadProjection(pair.sourceThreadId)).thread,
+                afterWrite,
+              );
+              assert.equal(afterWrite.handoffTransfer?.state, "cancelled");
+              assert.isUndefined(afterWrite.handoffTransfer?.parkedRecovery);
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(pair.successorThreadId)).runs[0]?.status,
+                "cancelled",
+              );
+              yield* assertNoRunnableStart();
+              assert.isEmpty(starts);
+            }).pipe(Effect.provide(testLayer())),
+          );
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const { starts } = yield* configureGuardedHandoffOwners(key, cwd, saved.selection);
+              const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+              yield* recovery.recover;
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const { pair } = saved;
+              const dispatch = yield* guardedHandoffClient(saved.session);
+              yield* dispatch(writeTitle(pair.sourceThreadId, "after-reopen"));
+              yield* dispatch(writeTitle(pair.successorThreadId, "after-reopen")).pipe(Effect.flip);
+              const original = readGuardedDetail(
+                yield* orchestrator.getThreadProjection(pair.sourceThreadId),
+              );
+              const successor = readGuardedDetail(
+                yield* orchestrator.getThreadProjection(pair.successorThreadId),
+              );
+              assert.equal(original.thread.title, "after-reopen");
+              assert.equal(original.thread.handoffTransfer?.state, "cancelled");
+              assert.isUndefined(original.thread.handoffTransfer?.parkedRecovery);
+              assert.equal(successor.runs[0]?.status, "cancelled");
+              assert.isEmpty(successor.providerTurns);
+              yield* assertNoRunnableStart();
+              assert.isEmpty(starts);
+            }).pipe(Effect.provide(testLayer())),
+          );
+        }).pipe(
+          Effect.provide(layerServerConfig.pipe(Layer.provideMerge(layerPlatformTest))),
+          Effect.provideService(DocumentText, {
+            ensure: () => Effect.die("No documents in reversal"),
+          }),
+          Effect.scoped,
+        ),
+    );
+
+    it.effect.each(["claim", "reversal"] as const)(
+      "guarded handoff serializes a pre-claim start with %s first",
+      (winner) =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff(`race-${winner}`, true, true);
+          yield* CoreHandoff.deliverHandoff(f.request);
+          for (const workerId of ["race-source", "race-review"]) {
+            const row = Option.getOrThrow(yield* f.outbox.claimNext({ workerId }));
+            assert.equal(row.request.type, "thread.handoff");
+            assert.isTrue(yield* f.outbox.succeed({ effectId: row.id, workerId }));
+          }
+          const pair = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread
+            .handoffTransfer!;
+          const row = Option.getOrThrow(yield* f.outbox.claimNext({ workerId: "race-start" }));
+          assert.equal(row.id, TransferAdmission.handoffStartEffectId(pair));
+          const preClaim = yield* Deferred.make<void>();
+          const enterClaim = yield* Deferred.make<void>();
+          const heldCommit = yield* Deferred.make<void>();
+          const releaseCommit = yield* Deferred.make<void>();
+          const contenderAtLock = yield* Deferred.make<void>();
+          const actualStart = f.admission.start;
+          using _claim = vi
+            .spyOn(f.admission, "start")
+            .mockImplementation((...args) =>
+              Deferred.succeed(preClaim, undefined).pipe(
+                Effect.andThen(Deferred.await(enterClaim)),
+                Effect.andThen(actualStart(...args)),
+              ),
+            );
+          const commitCommand = f.sink.commitCommand;
+          const firstCommand =
+            winner === "claim" ? "handoff.transfer.start" : "handoff.transfer.reverse";
+          using _commit = vi
+            .spyOn(f.sink, "commitCommand")
+            .mockImplementation((input) =>
+              input.commandType === firstCommand
+                ? Deferred.succeed(heldCommit, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseCommit)),
+                    Effect.andThen(commitCommand(input)),
+                  )
+                : commitCommand(input),
+            );
+          const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+          const start = yield* executor
+            .execute(row)
+            .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+          yield* Effect.raceFirst(
+            Deferred.await(preClaim),
+            Fiber.join(start).pipe(Effect.andThen(Effect.fail("provider did not reach pre-claim"))),
+          );
+          const reverse = withAuthenticatedHandoffResponse(
+            f.session,
+            f.orchestrator.dispatch(f.reverse),
+          );
+          const locks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+          const withLock = locks.withLock;
+          let observeContender = false;
+          const observeLock: typeof withLock = (id, effect) =>
+            id === f.sourceId && observeContender
+              ? Deferred.succeed(contenderAtLock, undefined).pipe(
+                  Effect.andThen(withLock(id, effect)),
+                )
+              : withLock(id, effect);
+          using _locks = vi.spyOn(locks, "withLock").mockImplementation(observeLock);
+          // Release the pre-claim gate first only when the claim should acquire the source lock first.
+          if (winner === "claim") yield* Deferred.succeed(enterClaim, undefined);
+          const beginReverse = yield* Deferred.make<void>();
+          if (winner === "reversal") yield* Deferred.succeed(beginReverse, undefined);
+          const reversing = yield* Deferred.await(beginReverse).pipe(
+            Effect.andThen(reverse),
+            Effect.result,
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* Deferred.await(heldCommit);
+          observeContender = true;
+          if (winner === "claim") yield* Deferred.succeed(beginReverse, undefined);
+          else yield* Deferred.succeed(enterClaim, undefined);
+          yield* Deferred.await(contenderAtLock);
+          yield* Deferred.succeed(releaseCommit, undefined);
+          const reversal = yield* Fiber.join(reversing);
+          yield* Fiber.join(start);
+          const original = yield* f.orchestrator.getThreadProjection(f.sourceId);
+          const successor = yield* f.orchestrator.getThreadProjection(pair.successorThreadId);
+          const claimWon = winner === "claim";
+          assert.equal(reversal._tag, claimWon ? "Failure" : "Success");
+          assert.equal(original.thread.handoffTransfer?.state, claimWon ? "started" : "cancelled");
+          assert.lengthOf(f.starts, claimWon ? 1 : 0);
+          const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+          assert.equal(
+            Option.exists(
+              yield* receipts.getByCommandId(
+                CommandId.make(`handoff-transfer:${pair.requestId}:start`),
+              ),
+              (receipt) => receipt.status === "accepted",
+            ),
+            claimWon,
+          );
+          for (const id of [pair.sourceThreadId, pair.successorThreadId]) {
+            const result = yield* f.orchestrator
+              .dispatch({
+                type: "thread.metadata.update",
+                commandId: CommandId.make(`guarded-${winner}-owner-${id}`),
+                title: "Race owner write",
+                threadId: id,
+              })
+              .pipe(Effect.result);
+            assert.equal(
+              result._tag,
+              id === (claimWon ? pair.successorThreadId : pair.sourceThreadId)
+                ? "Success"
+                : "Failure",
+            );
+          }
+          if (!claimWon) {
+            assert.equal(successor.runs[0]?.status, "cancelled");
+            assert.equal(Option.getOrThrow(yield* f.outbox.get(row.id)).status, "cancelled");
+            yield* f.worker.drain();
+            assert.isEmpty(f.starts);
+            assert.isTrue(Option.isNone(yield* f.outbox.claimNext({ workerId: "race-reversed" })));
+          }
+        }).pipe(Effect.provide(layerTransferTest)),
+    );
+
+    it.effect(
+      "guarded handoff rejects a source event between tail validation and observation",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("watermark-race");
+          const store = yield* EventStore.EventStoreV2;
+          const thread = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+          const read = store.read;
+          const append = f.sink
+            .write({
+              events: [
+                {
+                  id: EventId.make("unvalidated-watermark"),
+                  type: "thread.metadata-updated",
+                  threadId: f.sourceId,
+                  occurredAt: f.now,
+                  payload: { ...thread, updatedAt: DateTime.add(f.now, { seconds: 1 }) },
+                },
+              ],
+            })
+            .pipe(Effect.orDie);
+          using mutation = vi
+            .spyOn(store, "read")
+            .mockImplementation((filter) =>
+              filter?.threadId === f.sourceId &&
+              filter.afterSequence === f.snapshot.after.sourceSequence
+                ? Stream.concat(read(filter), Stream.fromEffect(append).pipe(Stream.drain))
+                : read(filter),
+            );
+          assert.isTrue(yield* f.orchestrator.dispatch(f.prepare).pipe(Effect.isFailure));
+          assert.isTrue(
+            Option.isNone(
+              yield* f.orchestrator
+                .getThreadProjection(f.submitted.successorThreadId)
+                .pipe(Effect.option),
+            ),
+          );
+          assert.isUndefined(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer,
+          );
+          assert.isEmpty(f.starts);
+          assert.isEmpty(
+            yield* store
+              .read({ threadId: f.submitted.successorThreadId, eventType: "thread.created" })
+              .pipe(Stream.runCollect),
+          );
+          assert.isTrue(
+            mutation.mock.calls.some(
+              ([filter]) => filter?.afterSequence === f.snapshot.after.sourceSequence,
+            ),
+          );
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+
+    it.effect.each(["child-roster", "nested-roster", "durable-request"] as const)(
+      "guarded handoff conditional transaction rejects %s changes after observation",
+      (mode) =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff(`commit-${mode}`, true, mode === "nested-roster");
+          const store = yield* EventStore.EventStoreV2;
+          const commit = f.sink.commitCommand;
+          using _changed = vi.spyOn(f.sink, "commitCommand").mockImplementation((input) =>
+            Effect.gen(function* () {
+              if (input.commandType === "handoff.transfer.prepare") {
+                if (mode === "durable-request")
+                  yield* f.outbox
+                    .cancelUnsettled({
+                      threadId: f.sourceId,
+                      effectTypes: ["thread.handoff"],
+                      reason: "Injected cancellation before commit",
+                    })
+                    .pipe(Effect.orDie);
+                else {
+                  const source = (yield* f.orchestrator
+                    .getThreadProjection(f.sourceId)
+                    .pipe(Effect.orDie)).thread;
+                  const id = ThreadId.make("late-unindexed-child");
+                  const parentId = mode === "nested-roster" ? f.childId : f.sourceId;
+                  yield* f.sink.write({
+                    events: [
+                      {
+                        id: EventId.make("late-unindexed-child"),
+                        type: "thread.created",
+                        threadId: id,
+                        occurredAt: f.now,
+                        payload: {
+                          ...source,
+                          id,
+                          lineage: {
+                            parentThreadId: parentId,
+                            rootThreadId: f.sourceId,
+                            relationshipToParent: "subagent",
+                          },
+                        },
+                      },
+                    ],
+                  });
+                }
+              }
+              return yield* commit(input);
+            }),
+          );
+          yield* CoreHandoff.deliverHandoff(f.request).pipe(Effect.flip);
+          assert.isUndefined(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer,
+          );
+          assert.isTrue(
+            Option.isNone(
+              yield* f.orchestrator
+                .getThreadProjection(f.submitted.successorThreadId)
+                .pipe(Effect.option),
+            ),
+          );
+          assert.isEmpty(f.starts);
+          assert.isEmpty(
+            yield* store
+              .read({ threadId: f.submitted.successorThreadId, eventType: "thread.created" })
+              .pipe(Stream.runCollect),
+          );
+          yield* f.orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make(`commit-${mode}-source-writable`),
+            threadId: f.sourceId,
+          });
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+
+    it.effect.each(["source", "child", "head", "index", "checkpoint", "provider"] as const)(
+      "guarded handoff paused release rejects %s changes and recovers source ownership",
+      (mode) =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff(`race-${mode}`, true, true);
+          const paused = yield* Deferred.make<void>();
+          const resume = yield* Deferred.make<void>();
+          let calls = 0;
+          const inspect = f.admission.inspect;
+          using _pause = vi
+            .spyOn(f.admission, "inspect")
+            .mockImplementation((...args) =>
+              inspect(...args).pipe(
+                Effect.tap(() =>
+                  ++calls === 2
+                    ? Deferred.succeed(paused, undefined).pipe(
+                        Effect.andThen(Deferred.await(resume)),
+                      )
+                    : Effect.void,
+                ),
+              ),
+            );
+          const delivery = yield* CoreHandoff.deliverHandoff(f.request).pipe(
+            Effect.exit,
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* Effect.raceFirst(
+            Deferred.await(paused),
+            Fiber.join(delivery).pipe(
+              Effect.andThen(Effect.fail("delivery ended before release pause")),
+            ),
+          );
+          if (mode === "source" || mode === "child") {
+            const id = mode === "source" ? f.sourceId : f.childId;
+            const thread = (yield* f.orchestrator.getThreadProjection(id)).thread;
+            yield* f.sink.write({
+              events: [
+                {
+                  id: EventId.make(`race-${mode}-mutation`),
+                  type: "thread.metadata-updated",
+                  threadId: id,
+                  occurredAt: f.now,
+                  payload: { ...thread, title: "Unrelated owner mutation during preflight" },
+                },
+              ],
+            });
+          } else if (mode === "head") f.workspace.head = "different-head";
+          else if (mode === "index") f.workspace.indexDiff = "different-index";
+          else if (mode === "checkpoint") f.workspace.checkpointCommit = "different-checkpoint";
+          else
+            vi.spyOn(f.sessions, "observeHandoffSession").mockImplementation((id) =>
+              Effect.succeedSome({
+                idleGeneration: 2,
+                busyTurns: ["new-work"],
+                runtime: {
+                  providerSessionId: id,
+                  instanceId: f.selection.instanceId,
+                  driver,
+                  hasPendingBackgroundWork: Effect.succeed(true),
+                  hasPendingBackgroundWorkForThread: () => Effect.succeed(true),
+                } as never,
+              }),
+            );
+          yield* Deferred.succeed(resume, undefined);
+          yield* Fiber.join(delivery);
+          yield* f.worker.drain();
+          assert.isEmpty(f.starts);
+          const beforeReverse = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+          assert.notEqual(beforeReverse.handoffTransfer?.state, "started");
+          yield* withAuthenticatedHandoffResponse(f.session, f.orchestrator.dispatch(f.reverse));
+          const recovered = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+          assert.equal(recovered.handoffTransfer?.state, "cancelled");
+          assert.isNull(recovered.settledAt);
+          yield* f.orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make(`race-${mode}-source-resumed`),
+            threadId: f.sourceId,
+          });
+          assert.lengthOf(
+            (yield* f.orchestrator.getThreadProjection(f.submitted.successorThreadId)).messages,
+            1,
+          );
+          assert.isEmpty(f.starts);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect.each(["head", "index", "source", "child", "successor"] as const)(
+      "guarded handoff final provider boundary refuses %s changes after runnable release",
+      (mode) =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff(`final-${mode}`, true, true);
+          const paused = yield* Deferred.make<void>();
+          const resume = yield* Deferred.make<void>();
+          const start = f.admission.start;
+          using _pause = vi
+            .spyOn(f.admission, "start")
+            .mockImplementation((...args) =>
+              Deferred.succeed(paused, undefined).pipe(
+                Effect.andThen(Deferred.await(resume)),
+                Effect.andThen(start(...args)),
+              ),
+            );
+          const draining = yield* f.worker
+            .drain()
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Effect.raceFirst(
+            Deferred.await(paused),
+            Fiber.join(draining).pipe(
+              Effect.andThen(Effect.fail("worker ended before provider boundary")),
+            ),
+          );
+          if (mode === "head") f.workspace.head = "changed-at-provider-boundary";
+          else if (mode === "index") f.workspace.indexDiff = "changed-at-provider-boundary";
+          else {
+            const id =
+              mode === "source"
+                ? f.sourceId
+                : mode === "successor"
+                  ? f.submitted.successorThreadId
+                  : f.childId;
+            const thread = (yield* f.orchestrator.getThreadProjection(id)).thread;
+            yield* f.sink.write({
+              events: [
+                {
+                  id: EventId.make(`provider-boundary-${mode}`),
+                  threadId: id,
+                  type: "thread.metadata-updated",
+                  occurredAt: f.now,
+                  payload: {
+                    ...thread,
+                    title: "Unrelated change after runnable release",
+                    ...(mode === "successor" ? { branch: "different-branch" } : {}),
+                  },
+                },
+              ],
+            });
+          }
+          yield* Deferred.succeed(resume, undefined);
+          yield* Fiber.join(draining);
+          assert.isEmpty(f.starts);
+          assert.notEqual(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer?.state,
+            "started",
+          );
+          yield* withAuthenticatedHandoffResponse(f.session, f.orchestrator.dispatch(f.reverse));
+          assert.equal(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer?.state,
+            "cancelled",
+          );
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect(
+      "guarded handoff fences managed terminals through final admission and after the claim",
+      () =>
+        Effect.gen(function* () {
+          const writes: Array<string | Buffer> = [];
+          let spawned = 0;
+          const layerFakeTerminal = Layer.effect(
+            TerminalManager.TerminalManager,
+            Effect.gen(function* () {
+              const { terminalLogsDir } = yield* ServerConfig.ServerConfig;
+              return yield* TerminalManager.makeWithOptions({
+                logsDir: terminalLogsDir,
+                env: {},
+                shellResolver: () => process.execPath,
+                foregroundProcessGroup: (pid) => Effect.succeed(pid),
+                subprocessInspector: () =>
+                  Effect.succeed({
+                    hasRunningSubprocess: false,
+                    childCommand: null,
+                    processIds: [],
+                  }),
+                processKillGraceMs: 1,
+                ptyAdapter: {
+                  spawn: () =>
+                    Effect.sync(() => {
+                      let onExit: ((event: PtyExitEvent) => void) | undefined;
+                      return {
+                        pid: 9000 + ++spawned,
+                        write: (data) => {
+                          writes.push(data);
+                        },
+                        resize: () => {},
+                        kill: () => onExit?.({ exitCode: 0, signal: null }),
+                        onData: () => () => {},
+                        onExit: (callback) => {
+                          onExit = callback;
+                          return () => {
+                            if (onExit === callback) onExit = undefined;
+                          };
+                        },
+                      };
+                    }),
+                },
+              });
+            }),
+          ).pipe(
+            Layer.provide(Layer.merge(ProjectionStore.layer, ThreadCommandExecutor.layer)),
+            Layer.provide(ProcessRunner.layer),
+          );
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const terminal = yield* TerminalManager.TerminalManager;
+              const terminalFor = (id: ThreadId) => ({
+                threadId: id,
+                terminalId: DEFAULT_TERMINAL_ID,
+              });
+              const inputFor = (id: ThreadId, cwd: string) => ({ ...terminalFor(id), cwd });
+              const outsider = ThreadId.make("terminal-checkout-outsider");
+              const newOutsider = ThreadId.make("new-terminal-checkout-outsider");
+              const separate = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({
+                prefix: "separate-terminal-checkout-",
+              });
+              const f = yield* setupGuardedHandoff(
+                "terminal-race",
+                true,
+                true,
+                undefined,
+                (source, child, cwd) =>
+                  Effect.forEach([source, child], (id) => terminal.open(inputFor(id, cwd)), {
+                    discard: true,
+                  }).pipe(
+                    Effect.andThen(
+                      terminal.open({
+                        ...inputFor(outsider, separate),
+                        worktreePath: cwd,
+                      }),
+                    ),
+                    Effect.asVoid,
+                  ),
+              );
+              assert.equal(spawned, 3);
+              const paused = yield* Deferred.make<void>();
+              const resume = yield* Deferred.make<void>();
+              const commit = f.sink.commitCommand;
+              using _pause = vi
+                .spyOn(f.sink, "commitCommand")
+                .mockImplementation((input) =>
+                  input.commandType === "handoff.transfer.start"
+                    ? Deferred.succeed(paused, undefined).pipe(
+                        Effect.andThen(Deferred.await(resume)),
+                        Effect.andThen(commit(input)),
+                      )
+                    : commit(input),
+                );
+              const draining = yield* f.worker
+                .drain()
+                .pipe(Effect.forkChild({ startImmediately: true }));
+              yield* Effect.raceFirst(
+                Deferred.await(paused),
+                Fiber.join(draining).pipe(
+                  Effect.andThen(Effect.fail("provider never reached conditional claim")),
+                ),
+              );
+              const oldOwners = [f.sourceId, f.childId, outsider];
+              const racingWrites = yield* Effect.forEach(oldOwners, (id) =>
+                terminal
+                  .write({ ...terminalFor(id), data: "inert input" })
+                  .pipe(Effect.flip, Effect.forkChild({ startImmediately: true })),
+              );
+              const racingOpen = yield* terminal
+                .open(inputFor(newOutsider, f.cwd))
+                .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
+              const separateInput = inputFor(newOutsider, separate);
+              yield* terminal.open(separateInput);
+              yield* terminal.write({ ...terminalFor(newOutsider), data: "separate checkout" });
+              yield* terminal.close(separateInput);
+              yield* Deferred.succeed(resume, undefined);
+              yield* Fiber.join(draining);
+              assert.equal((yield* Fiber.join(racingOpen))._tag, "TerminalHandoffFencedError");
+              for (const race of racingWrites)
+                assert.equal((yield* Fiber.join(race))._tag, "TerminalHandoffFencedError");
+              assert.lengthOf(f.starts, 1);
+              assert.equal(
+                (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer
+                  ?.state,
+                "started",
+              );
+              for (const id of oldOwners) {
+                const input = inputFor(id, f.cwd);
+                assert.equal(
+                  (yield* terminal
+                    .write({ ...terminalFor(id), data: "after claim" })
+                    .pipe(Effect.flip))._tag,
+                  "TerminalHandoffFencedError",
+                );
+                assert.equal(
+                  (yield* terminal.open({ ...input, terminalId: "another" }).pipe(Effect.flip))
+                    ._tag,
+                  "TerminalHandoffFencedError",
+                );
+                assert.equal(
+                  (yield* terminal
+                    .attachOutputStream(input, "fake-viewer")
+                    .pipe(Stream.runHead, Effect.flip))._tag,
+                  "TerminalHandoffFencedError",
+                );
+                const observed = yield* Deferred.make<TerminalAttachStreamEvent>();
+                const stop = yield* terminal.observeStream(input, (event) =>
+                  Deferred.succeed(observed, event).pipe(Effect.asVoid),
+                );
+                assert.equal((yield* Deferred.await(observed)).type, "snapshot");
+                stop();
+                yield* terminal.close(input);
+              }
+              assert.equal(spawned, 4);
+              assert.deepEqual(writes, ["separate checkout"]);
+              const successor = inputFor(f.submitted.successorThreadId, f.cwd);
+              yield* terminal.open(successor);
+              yield* terminal.write({
+                ...terminalFor(f.submitted.successorThreadId),
+                data: "new owner",
+              });
+              assert.deepEqual(writes, ["separate checkout", "new owner"]);
+              yield* terminal.close(successor);
+            }).pipe(
+              Effect.provide(
+                makeTransferTestLayer(SqlitePersistence.layerMemory, false, layerFakeTerminal),
+              ),
+            ),
+          );
+        }),
+    );
+
+    it.effect(
+      "guarded handoff refuses live terminals and essential owner uncertainty despite accepted review",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("essential-unknown");
+          const terminals = yield* TerminalManager.TerminalManager;
+          using _terminal = vi.spyOn(terminals, "observeHandoff").mockImplementation(() =>
+            Effect.succeed([
+              {
+                threadId: f.sourceId,
+                terminalId: "fake-live-terminal",
+                cwd: f.cwd,
+                status: "running",
+                pid: 123,
+                sequence: 1,
+                cachedRunning: true,
+                running: true,
+                processIds: [123],
+                error: null,
+              },
+            ]),
+          );
+          assert.equal(
+            (yield* f.orchestrator
+              .dispatch({ ...f.prepare, commandId: CommandId.make("known-terminal-prepare") })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          _terminal.mockImplementation(() => Effect.succeed([]));
+          using _unknown = vi
+            .spyOn(f.sessions, "observeHandoffSession")
+            .mockImplementation(() => Effect.succeedNone);
+          assert.equal(
+            (yield* f.orchestrator
+              .dispatch({ ...f.prepare, commandId: CommandId.make("unknown-owner-prepare") })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.isUndefined(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer,
+          );
+          assert.isEmpty(f.starts);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect(
+      "guarded handoff recovery has a finite process-loss budget and leaves explicit reversal available",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("finite-recovery");
+          yield* CoreHandoff.deliverHandoff(f.request);
+          const initial = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread
+            .handoffTransfer!;
+          for (const acknowledged of [0, 1]) {
+            const row = Option.getOrThrow(
+              yield* f.outbox.claimNext({ workerId: `direct-delivery-ack-${acknowledged}` }),
+            );
+            assert.equal(row.request.type, "thread.handoff");
+            assert.isTrue(
+              yield* f.outbox.succeed({
+                effectId: row.id,
+                workerId: `direct-delivery-ack-${acknowledged}`,
+              }),
+            );
+          }
+          const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+          for (const count of [0, 1, 2]) {
+            const id =
+              count === 0
+                ? `effect:handoff-transfer:${f.review.requestId}:release:provider-turn.start:${initial.runId}`
+                : `effect:handoff-transfer:${f.review.requestId}:recover:${count}:provider-turn.start:${initial.runId}`;
+            const row = Option.getOrThrow(yield* f.outbox.get(id));
+            const claimed = yield* f.outbox.claimNext({ workerId: "bounded-loss" });
+            assert.isTrue(Option.isSome(claimed));
+            if (Option.isSome(claimed)) assert.equal(claimed.value.id, row.id);
+            yield* recovery.recover;
+            const current = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread
+              .handoffTransfer;
+            assert.equal(current?.recoveryCount, Math.min(count + 1, 2));
+            assert.equal(current?.state, "released");
+            if (count === 2)
+              assert.isTrue(
+                Option.isNone(yield* f.outbox.claimNext({ workerId: "exhausted-loss" })),
+              );
+          }
+          yield* withAuthenticatedHandoffResponse(f.session, f.orchestrator.dispatch(f.reverse));
+          assert.equal(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer?.state,
+            "cancelled",
+          );
+          assert.isEmpty(f.starts);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect(
+      "guarded handoff denies missing decision and direct pair bypasses and supports explicit reverse",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("bypasses", false, true);
+          assert.equal(
+            (yield* f.orchestrator
+              .dispatch({ ...f.prepare, commandId: CommandId.make("guarded-missing-decision") })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          const create = {
+            type: "thread.create" as const,
+            commandId: CommandId.make("guarded-unreserved-create"),
+            threadId: f.submitted.successorThreadId,
+            projectId: f.projectId,
+            createdBy: "user" as const,
+            creationSource: "web" as const,
+            title: "Forbidden bypass",
+            modelSelection: f.selection,
+            runtimeMode: "full-access" as const,
+            interactionMode: "default" as const,
+            branch: "feature",
+            worktreePath: f.cwd,
+          };
+          assert.equal(
+            (yield* f.orchestrator.dispatch(create).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          yield* f.accept;
+          yield* f.orchestrator.dispatch(f.prepare);
+          const source = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+          const pair = source.handoffTransfer!;
+          const forbiddenChild = ThreadId.make("guarded-raw-child-bypass");
+          assert.equal(
+            (yield* f.sink
+              .write({
+                events: [
+                  {
+                    id: EventId.make("guarded-raw-child-bypass"),
+                    type: "thread.created",
+                    threadId: forbiddenChild,
+                    occurredAt: f.now,
+                    payload: {
+                      ...source,
+                      id: forbiddenChild,
+                      handoffTransfer: undefined,
+                      lineage: {
+                        parentThreadId: f.sourceId,
+                        rootThreadId: f.sourceId,
+                        relationshipToParent: "subagent",
+                      },
+                    },
+                  },
+                ],
+              })
+              .pipe(Effect.flip))._tag,
+            "EventSinkWriteError",
+          );
+          const sourceMessage = {
+            type: "message.dispatch" as const,
+            commandId: CommandId.make("guarded-forbidden-source-message"),
+            threadId: f.sourceId,
+            messageId: MessageId.make("guarded-forbidden-source-message"),
+            text: "Bypass",
+            attachments: [],
+            modelSelection: f.selection,
+            dispatchMode: { type: "start_immediately" as const },
+            createdBy: "user" as const,
+            creationSource: "web" as const,
+          };
+          for (const threadId of [f.sourceId, f.childId, pair.successorThreadId]) {
+            assert.equal(
+              (yield* f.orchestrator
+                .dispatch({
+                  ...sourceMessage,
+                  threadId,
+                  commandId: CommandId.make(`bypass-${threadId}`),
+                })
+                .pipe(Effect.flip))._tag,
+              "OrchestratorDispatchError",
+            );
+            assert.equal(
+              (yield* f.orchestrator
+                .dispatch({
+                  type: "queue.resume",
+                  threadId,
+                  commandId: CommandId.make(`bypass-queue-${threadId}`),
+                })
+                .pipe(Effect.flip))._tag,
+              "OrchestratorDispatchError",
+            );
+          }
+          assert.equal(
+            (yield* f.orchestrator
+              .dispatch({
+                type: "delegated_task.request",
+                commandId: CommandId.make("guarded-forbidden-child-start"),
+                parentThreadId: f.sourceId,
+                parentRunId: RunId.make("no-live-source-run"),
+                parentNodeId: NodeId.make("no-live-source-node"),
+                task: "Forbidden child",
+                modelSelection: f.selection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                createdBy: "agent",
+                creationSource: "mcp",
+              })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          const successorRun = (yield* f.orchestrator.getThreadProjection(pair.successorThreadId))
+            .runs[0]!;
+          assert.equal(
+            (yield* f.sink
+              .write({
+                events: [
+                  {
+                    id: EventId.make("source-direct-run-bypass"),
+                    type: "run.created",
+                    threadId: f.sourceId,
+                    occurredAt: f.now,
+                    payload: {
+                      ...successorRun,
+                      id: RunId.make("source-bypass-run"),
+                      threadId: f.sourceId,
+                      status: "starting",
+                    },
+                  },
+                ],
+              })
+              .pipe(Effect.flip))._tag,
+            "EventSinkWriteError",
+          );
+          const release = {
+            type: "prepared-run.release" as const,
+            commandId: CommandId.make(`handoff-transfer:${f.review.requestId}:release`),
+            threadId: pair.successorThreadId,
+            runId: pair.runId,
+          };
+          assert.equal(
+            (yield* f.orchestrator.dispatch(release).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.equal(
+            (yield* f.orchestrator
+              .dispatch({
+                type: "prepared-run.retry",
+                commandId: CommandId.make("bypass-retry"),
+                threadId: pair.successorThreadId,
+                runId: pair.runId,
+              })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.equal(
+            (yield* f.orchestrator.dispatch(f.reverse).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          yield* withAuthenticatedHandoffResponse(
+            f.session,
+            f.orchestrator.dispatch({
+              ...f.reverse,
+              commandId: CommandId.make("guarded-trusted-reverse"),
+            }),
+          );
+          yield* f.orchestrator.dispatch({
+            ...sourceMessage,
+            commandId: CommandId.make("guarded-recovered-source"),
+            dispatchMode: { type: "defer_start" },
+          });
+          assert.equal(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer?.state,
+            "cancelled",
+          );
+          assert.isEmpty(f.starts);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect.each(["prepared-run.progress", "prepared-run.fail"] as const)(
+      "guarded handoff refuses public preparation command %s before its one initial start",
+      (type) =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("protected-preparation");
+          yield* f.orchestrator.dispatch(f.prepare);
+          const pair = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread
+            .handoffTransfer!;
+          const { successorThreadId: threadId, runId } = pair;
+          const commands: ReadonlyArray<OrchestrationV2Command> = [
+            {
+              type: "prepared-run.progress",
+              commandId: CommandId.make("public-progress"),
+              threadId,
+              runId,
+              phase: "setup",
+            },
+            {
+              type: "prepared-run.fail",
+              commandId: CommandId.make("public-fail"),
+              threadId,
+              runId,
+              failure: {
+                class: "unknown",
+                message: "Ordinary caller cannot fail the reservation.",
+                code: null,
+                retryable: null,
+              },
+            },
+            {
+              type: "prepared-run.release",
+              commandId: CommandId.make("public-release"),
+              threadId,
+              runId,
+            },
+            {
+              type: "prepared-run.retry",
+              commandId: CommandId.make("public-retry"),
+              threadId,
+              runId,
+            },
+          ];
+          for (const command of commands.filter(
+            (command) =>
+              command.type === type ||
+              command.type === "prepared-run.release" ||
+              command.type === "prepared-run.retry",
+          )) {
+            assert.equal(
+              (yield* f.orchestrator.dispatch(command).pipe(Effect.flip))._tag,
+              "OrchestratorDispatchError",
+            );
+          }
+          const before = yield* f.orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(
+            before.runs.map((run) => [run.id, run.status]),
+            [[runId, "preparing"]],
+          );
+          yield* f.worker.drain();
+          yield* f.worker.drain();
+          assert.lengthOf(f.starts, 1);
+          assert.equal(f.starts[0]?.runId, runId);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect(
+      "guarded handoff idle Stop before reservation invalidates approval without reviving work",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("idle-stop");
+          yield* f.orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("guarded-idle-stop"),
+            threadId: f.sourceId,
+          });
+          yield* f.worker.drain();
+          const source = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+          assert.equal(source.handoffStopCommandId, CommandId.make("guarded-idle-stop"));
+          assert.isUndefined(source.handoffTransfer);
+          assert.isTrue(
+            Option.isNone(
+              yield* f.orchestrator
+                .getThreadProjection(f.submitted.successorThreadId)
+                .pipe(Effect.option),
+            ),
+          );
+          assert.equal(
+            (yield* CoreHandoff.deliverHandoff(f.request).pipe(Effect.flip))._tag,
+            "HandoffParked",
+          );
+          assert.isEmpty(f.starts);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect(
+      "guarded handoff Stop cancels the reserved pair and cannot be revived by parked workers",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("stop");
+          yield* f.orchestrator.dispatch(f.prepare);
+          yield* f.orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("guarded-stop-source"),
+            threadId: f.sourceId,
+          });
+          yield* f.worker.drain();
+          assert.equal(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer?.state,
+            "cancelled",
+          );
+          assert.isEmpty(f.starts);
+          assert.equal(
+            (yield* f.orchestrator.getThreadProjection(f.submitted.successorThreadId)).runs[0]
+              ?.status,
+            "cancelled",
+          );
+          assert.equal(
+            (yield* CoreHandoff.deliverHandoff(f.request).pipe(Effect.flip))._tag,
+            "HandoffParked",
+          );
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect(
+      "guarded handoff failed atomic creation preserves writable source without a stranded reservation",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("failed-create");
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const apply = projections.apply;
+          using _failure = vi.spyOn(projections, "apply").mockImplementation((event) =>
+            event.type === "thread.metadata-updated" &&
+            event.payload.handoffTransfer?.state === "reserved"
+              ? Effect.fail(
+                  new ProjectionStore.ProjectionStoreApplyEventError({
+                    eventType: event.type,
+                    cause: "Injected failure after successor/message/run writes",
+                  }),
+                )
+              : apply(event),
+          );
+          assert.equal(
+            (yield* f.orchestrator.dispatch(f.prepare).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.isUndefined(
+            (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer,
+          );
+          assert.isTrue(
+            Option.isNone(
+              yield* f.orchestrator
+                .getThreadProjection(f.submitted.successorThreadId)
+                .pipe(Effect.option),
+            ),
+          );
+          yield* f.orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make("failed-create-source-owner"),
+            threadId: f.sourceId,
+          });
+          assert.isEmpty(f.starts);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+
+    it.effect(
+      "guarded handoff completion worker produces one inert review without another agent turn",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("worker-producer", false);
+          const sourceId = ThreadId.make("guarded-worker-real-source");
+          const now = f.now;
+          yield* f.orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("worker-producer-source"),
+            threadId: sourceId,
+            projectId: f.projectId,
+            title: "Bounded worker producer",
+            modelSelection: f.selection,
+            createdBy: "user",
+            creationSource: "web",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: "feature",
+            worktreePath: f.cwd,
+          });
+          const provider = (yield* f.orchestrator.getThreadProjection(f.sourceId))
+            .providerThreads[0]!;
+          const run = yield* decodeProducerFixtureRun({
+            id: "existing-source-run",
+            threadId: sourceId,
+            ordinal: 1,
+            providerInstanceId: f.selection.instanceId,
+            modelSelection: f.selection,
+            providerThreadId: "worker-source-provider",
+            userMessageId: "existing-user-message",
+            rootNodeId: null,
+            activeAttemptId: null,
+            status: "running",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          });
+          yield* f.sink.write({
+            events: [
+              {
+                id: EventId.make("worker-source-provider"),
+                type: "provider-thread.updated",
+                threadId: sourceId,
+                occurredAt: now,
+                payload: {
+                  ...provider,
+                  id: ProviderThreadId.make("worker-source-provider"),
+                  appThreadId: sourceId,
+                },
+              },
+              {
+                id: EventId.make("worker-source-running"),
+                type: "run.created",
+                threadId: sourceId,
+                occurredAt: now,
+                payload: run,
+              },
+            ],
+          });
+          yield* CoreHandoff.submitHandoff(sourceId, f.request.handoff);
+          yield* f.worker.drain();
+          assert.isEmpty((yield* f.orchestrator.getThreadProjection(sourceId)).runtimeRequests);
+          yield* f.sink.write({
+            events: [
+              {
+                id: EventId.make("worker-source-completed"),
+                type: "run.updated",
+                threadId: sourceId,
+                occurredAt: now,
+                payload: { ...run, status: "completed", completedAt: now },
+              },
+            ],
+          });
+          yield* f.worker.drain();
+          const pending = yield* f.orchestrator.getThreadProjection(sourceId);
+          assert.lengthOf(pending.runtimeRequests, 1);
+          assert.lengthOf(pending.runs, 1);
+          assert.isEmpty(pending.messages);
+          const review = pending.runtimeRequests[0]!.responseCapability;
+          assert.equal(review.type, "handoff");
+          assert.isTrue(
+            Option.isNone(
+              yield* f.orchestrator
+                .getThreadProjection(ThreadId.make(`core-handoff:${sourceId}:successor`))
+                .pipe(Effect.option),
+            ),
+          );
+          assert.isEmpty(f.starts);
+          if (review.type !== "handoff") return yield* Effect.die("Expected handoff review");
+          yield* withAuthenticatedHandoffResponse(
+            f.session,
+            f.orchestrator.dispatch({
+              type: "runtime-request.respond",
+              commandId: CommandId.make("worker-producer-trusted-accept"),
+              threadId: sourceId,
+              requestId: pending.runtimeRequests[0]!.id,
+              decision: "accept",
+              handoffGeneration: review.generation,
+            }),
+          );
+          yield* f.worker.drain();
+          const transferred = yield* f.orchestrator.getThreadProjection(sourceId);
+          assert.equal(transferred.thread.handoffTransfer?.state, "started");
+          assert.lengthOf(transferred.runs, 1);
+          assert.lengthOf(f.starts, 1);
+          const successor = yield* f.orchestrator.getThreadProjection(
+            ThreadId.make(`core-handoff:${sourceId}:successor`),
+          );
+          assert.lengthOf(successor.runs, 1);
+          assert.lengthOf(successor.messages, 1);
+          assert.deepEqual(successor.thread.modelSelection, f.selection);
+          assert.equal(successor.thread.worktreePath, f.cwd);
+          assert.equal(successor.thread.branch, "feature");
+          yield* f.sink.write({
+            events: [
+              {
+                id: EventId.make("worker-source-completed-duplicate"),
+                type: "run.updated",
+                threadId: sourceId,
+                occurredAt: now,
+                payload: { ...run, status: "completed", completedAt: now },
+              },
+            ],
+          });
+          yield* f.worker.drain();
+          assert.lengthOf((yield* f.orchestrator.getThreadProjection(sourceId)).runtimeRequests, 1);
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+    it.effect(
+      "guarded handoff lost provider admission acknowledgement retains one successor owner",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* setupGuardedHandoff("start-ack-loss");
+          const commit = f.sink.commitCommand;
+          using _lost = vi.spyOn(f.sink, "commitCommand").mockImplementation((input) =>
+            commit(input).pipe(
+              Effect.tap(() =>
+                input.commandType === "handoff.transfer.start"
+                  ? Effect.fail(
+                      new EventSink.EventSinkWriteError({
+                        eventCount: input.events.length,
+                        cause: "Injected loss after durable provider ownership claim",
+                      }),
+                    )
+                  : Effect.void,
+              ),
+            ),
+          );
+          yield* f.worker.drain();
+          const source = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+          const successor = yield* f.orchestrator.getThreadProjection(
+            f.submitted.successorThreadId,
+          );
+          assert.equal(source.handoffTransfer?.state, "started");
+          assert.isEmpty(f.starts);
+          assert.lengthOf(successor.runs, 1);
+          assert.lengthOf(successor.messages, 1);
+          assert.equal(successor.runs[0]?.status, "failed");
+          yield* CoreHandoff.deliverHandoff(f.request);
+          yield* f.worker.drain();
+          assert.isEmpty(f.starts);
+          assert.equal(
+            (yield* f.orchestrator
+              .dispatch({
+                type: "queue.resume",
+                commandId: CommandId.make("start-ack-old-owner"),
+                threadId: f.sourceId,
+              })
+              .pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          yield* f.orchestrator.dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make("start-ack-new-owner"),
+            threadId: f.submitted.successorThreadId,
+          });
+          assert.equal(
+            (yield* withAuthenticatedHandoffResponse(
+              f.session,
+              f.orchestrator.dispatch(f.reverse),
+            ).pipe(Effect.flip))._tag,
+            "OrchestratorDispatchError",
+          );
+          assert.lengthOf(
+            (yield* f.orchestrator.getThreadProjection(f.submitted.successorThreadId)).runs,
+            1,
+          );
+          assert.lengthOf(
+            yield* f.ledger.list({ projectId: f.projectId, kinds: ["handoff"], limit: 10 }),
+            1,
+          );
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
+    );
+
+    it.effect(
+      "guarded handoff transfers one explicit tuple and recovers duplicate workers without duplicate work",
+      () =>
+        Effect.gen(function* () {
+          const {
+            orchestrator,
+            worker,
+            sourceId,
+            projectId,
+            submitted,
+            review,
+            starts,
+            selection,
+            cwd,
+            ledger,
+          } = yield* setupGuardedHandoff("positive");
+          yield* worker.drain();
+          const source = (yield* orchestrator.getThreadProjection(sourceId)).thread;
+          const successor = yield* orchestrator.getThreadProjection(submitted.successorThreadId);
+          const providerEffect = yield* (yield* EffectOutbox.EffectOutboxV2).get(
+            `effect:handoff-transfer:${review.requestId}:release:provider-turn.start:${source.handoffTransfer?.runId}`,
+          );
+          assert.equal(
+            source.handoffTransfer?.state,
+            "started",
+            Option.isSome(providerEffect)
+              ? (providerEffect.value.lastError ?? providerEffect.value.status)
+              : "no effect",
+          );
+          assert.equal(source.settledOverride, "settled");
+          assert.lengthOf(successor.messages, 1);
+          assert.lengthOf(successor.runs, 1);
+          assert.lengthOf(
+            starts,
+            1,
+            `${successor.runs[0]?.status}: ${successor.providerThreads[0]?.nativeThreadRef?.nativeId}`,
+          );
+          assert.deepEqual(starts[0]?.modelSelection, selection);
+          assert.equal(successor.thread.worktreePath, cwd);
+          assert.equal(successor.thread.branch, "feature");
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const row = yield* outbox.get(`core-handoff:${sourceId}`);
+          assert.isTrue(Option.isSome(row));
+          if (Option.isSome(row) && row.value.request.type === "thread.handoff") {
+            yield* Effect.all(
+              [
+                CoreHandoff.deliverHandoff(row.value.request),
+                CoreHandoff.deliverHandoff(row.value.request),
+              ],
+              { concurrency: "unbounded" },
+            );
+          }
+          yield* worker.drain();
+          assert.lengthOf(
+            (yield* orchestrator.getThreadProjection(submitted.successorThreadId)).runs,
+            1,
+          );
+
+          const managed = Option.getOrThrow(
+            yield* (yield* ProviderSessionManager.ProviderSessionManagerV2).get(
+              starts[0]!.providerThread.providerSessionId!,
+            ),
+          );
+          assert.equal(
+            (yield* managed.startTurn(starts[0]!).pipe(Effect.flip))._tag,
+            "ProviderAdapterTurnStartError",
+          );
+          const { message, ...resumeInput } = starts[0]!;
+          assert.equal(
+            (yield* managed.resumeTurn!({ ...resumeInput, messageId: message.messageId }).pipe(
+              Effect.flip,
+            ))._tag,
+            "ProviderAdapterTurnStartError",
+          );
+          assert.equal(
+            (yield* managed.compactThread!(starts[0]!).pipe(Effect.flip))._tag,
+            "ProviderAdapterTurnStartError",
+          );
+          assert.equal(
+            (yield* managed
+              .startTurn({ ...starts[0]!, threadId: sourceId, appThread: source })
+              .pipe(Effect.flip))._tag,
+            "ProviderAdapterTurnStartError",
+          );
+          assert.lengthOf(starts, 1);
+          assert.lengthOf(starts, 1);
+          assert.lengthOf(yield* ledger.list({ projectId, kinds: ["handoff"], limit: 10 }), 1);
+          const bypass = yield* orchestrator
+            .dispatch({
+              type: "queue.resume",
+              commandId: CommandId.make("guarded-source-bypass"),
+              threadId: sourceId,
+            })
+            .pipe(Effect.flip);
+          assert.equal(bypass._tag, "OrchestratorDispatchError");
+          const other = ThreadId.make("guarded-unrelated-human");
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("unrelated-human-create"),
+            threadId: other,
+            projectId,
+            title: "Unrelated human control",
+            createdBy: "user",
+            creationSource: "web",
+            modelSelection: selection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: "feature",
+            worktreePath: cwd,
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("unrelated-human-message"),
+            threadId: other,
+            messageId: MessageId.make("unrelated-human-message"),
+            text: "Inert human control",
+            attachments: [],
+            modelSelection: selection,
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+          assert.lengthOf(
+            starts.filter((turn) => turn.threadId === submitted.successorThreadId),
+            1,
+          );
+          assert.lengthOf(
+            starts.filter((turn) => turn.threadId === other),
+            1,
+          );
+        }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
     );
   },
 );

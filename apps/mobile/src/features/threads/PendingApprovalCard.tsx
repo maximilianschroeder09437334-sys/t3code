@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   FULL_ACCESS_OVERRIDE_QUESTION,
+  canRespondToApproval,
   fullAccessOverrideExplanation,
 } from "@t3tools/client-runtime/state/thread-requests";
 import { useState } from "react";
@@ -34,7 +35,7 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
   const options: ReadonlyArray<ProviderApprovalOption> =
     props.approval.options ?? DEFAULT_APPROVAL_OPTIONS;
   const warning = options.find((option) => option.warning)?.warning;
-  const canRespond = props.approval.responseCapability === "live";
+  const canRespond = canRespondToApproval(props.approval, "accept");
   const disabled = !canRespond || props.respondingApprovalId === props.approval.requestId;
   const [explanationOpen, setExplanationOpen] = useState(false);
   return (

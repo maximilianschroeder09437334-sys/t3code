@@ -388,6 +388,7 @@ describe("handoff budget", () => {
       0,
     );
   });
+
   it("reserves context for image batches up to the attachment limit, honoring smaller known windows", () => {
     let previousBudget = 16_000;
     for (let count = 1; count <= PROVIDER_SEND_TURN_MAX_ATTACHMENTS; count++) {
@@ -445,6 +446,104 @@ describe("handoff budget", () => {
 });
 
 describe("handoff delivery", () => {
+  it.effect.each([
+    { mixed: false, label: "summary-only" },
+    { mixed: true, label: "mixed structured and summary" },
+  ])("preserves a pending $label handoff after the long context threshold", ({ mixed }) =>
+    Effect.gen(function* () {
+      const { history: _history, ...summaryOnly } = handoff;
+      const marker = "DECISION: preserve the approved owner.";
+      const summary = { ...summaryOnly, summaryText: marker + "x".repeat(7_000) };
+      const structured = { ...handoff, id: ContextHandoffId.make("handoff:structured") };
+      const target = {
+        ...providerThread,
+        contextUsage: { usedTokens: 150_000, maxTokens: 1_000_000 },
+      };
+      const stored = new Map<string, OrchestrationV2ContextHandoff>();
+      const result = yield* deliverContextHandoffs({
+        handoffs: mixed ? [summary, structured] : [summary],
+        providerThread: target,
+        budget: handoffBudget({
+          tokenCap: 16_000,
+          userText: "Continue",
+          attachments: [],
+          nativeContextEstimate: 0,
+          providerThread: target,
+        }),
+        alreadyDeliveredItemIds: new Set(),
+        persist: (value) =>
+          Effect.sync(() => {
+            stored.set(value.id, value);
+          }),
+      });
+      yield* result.delivered;
+      assert.include(result.context, summary.summaryText);
+      assert.equal(stored.get(summary.id)?.delivery?.status, "inline");
+      if (mixed) {
+        assert.include(result.context, messages[0]!.text);
+        assert.deepEqual(
+          stored.get(structured.id)?.delivery?.itemIds,
+          messages.map((item) => item.itemId),
+        );
+      }
+    }),
+  );
+
+  it.effect("sends less portable history in a long native context and preserves recovery IDs", () =>
+    Effect.gen(function* () {
+      const olderOutput = message("item:long-output", "assistant", "older output ".repeat(680));
+      const candidate = {
+        ...handoff,
+        history: { ...handoff.history!, messages: [olderOutput, ...messages] },
+      };
+      const usage = { usedTokens: 150_000, maxTokens: 1_000_000 };
+      const longThread = { ...providerThread, contextUsage: usage };
+      let latest: OrchestrationV2ContextHandoff = candidate;
+      const deliver = (usedTokens: number | undefined, tokenCap = 16_000) => {
+        const target = {
+          ...longThread,
+          contextUsage: usedTokens === undefined ? null : { ...usage, usedTokens },
+        };
+        return deliverContextHandoffs({
+          handoffs: [candidate],
+          providerThread: target,
+          budget: handoffBudget({
+            userText: "Continue",
+            attachments: [],
+            tokenCap,
+            providerThread: target,
+            nativeContextEstimate: 150_000,
+            modelContextWindow: usage.maxTokens,
+          }),
+          alreadyDeliveredItemIds: new Set(),
+          persist: (value) =>
+            Effect.sync(() => {
+              latest = value;
+            }),
+        });
+      };
+
+      const estimated = yield* deliver(undefined);
+      const below = yield* deliver(149_999);
+      const above = yield* deliver(250_000);
+      const configured = yield* deliver(150_000, 1_024);
+      const atCap = yield* deliver(150_000);
+      assert.equal(estimated.context, below.context);
+      assert.equal(above.context, atCap.context);
+      assert.isBelow(Buffer.byteLength(configured.context), Buffer.byteLength(atCap.context));
+      yield* atCap.delivered;
+      assert.include(below.context, olderOutput.text);
+      assert.isAbove(Buffer.byteLength(below.context) - Buffer.byteLength(atCap.context), 8_000);
+      assert.include(atCap.context, messages[0]!.text);
+      assert.include(atCap.context, olderOutput.itemId);
+      assert.deepEqual(latest.delivery?.omittedItemIds, [olderOutput.itemId]);
+      assert.deepEqual(
+        latest.delivery?.itemIds,
+        messages.map((item) => item.itemId),
+      );
+    }),
+  );
+
   it.effect.each([
     { native: true, label: "injected" },
     { native: false, label: "inline" },

@@ -578,6 +578,34 @@ it.layer(
       }),
   );
 
+  it.effect(
+    "handoff observes actual managed sessions without closing them or treating failed inspection as idle",
+    () =>
+      Effect.gen(function* () {
+        let fail = false;
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          subprocessInspector: () =>
+            fail
+              ? Effect.die("fixture inspection failed")
+              : Effect.succeed({
+                  hasRunningSubprocess: true,
+                  childCommand: "fixture-job",
+                  processIds: [4242],
+                }),
+        });
+        yield* manager.open(openInput());
+        const observed = yield* manager.observeHandoff(["thread-1"], "/unrelated");
+        assert.equal(observed.length, 1);
+        assert.isTrue(observed[0]?.running);
+        assert.deepEqual(observed[0]?.processIds, [4242]);
+        fail = true;
+        const failed = yield* manager.observeHandoff(["thread-1"], "/unrelated");
+        assert.isNull(failed[0]?.running);
+        assert.isNotNull(failed[0]?.error);
+        assert.equal(ptyAdapter.processes.length, 1);
+      }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

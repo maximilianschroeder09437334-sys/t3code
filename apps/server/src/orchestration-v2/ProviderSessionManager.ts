@@ -1,3 +1,5 @@
+import { HandoffProviderSessionWrite } from "./HandoffProviderStartGuard.ts";
+import { CurrentHandoffProviderStart } from "./HandoffProviderStartGuard.ts";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -238,6 +240,13 @@ export interface ProviderSessionManagerV2Shape {
   ) => Effect.Effect<
     Option.Option<ProviderAdapter.ProviderAdapterV2SessionRuntime>,
     ProviderSessionManagerV2Error
+  >;
+  readonly observeHandoffSession: (id: ProviderSessionId) => Effect.Effect<
+    Option.Option<{
+      readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+      readonly idleGeneration: number;
+      readonly busyTurns: ReadonlyArray<string>;
+    }>
   >;
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
   readonly close: (
@@ -745,7 +754,16 @@ export const layerWithOptions = (
           }),
         );
         if (events.length > 0) {
-          yield* eventSink.write({ events });
+          const handoffWrite = yield* HandoffProviderSessionWrite;
+          yield* eventSink.write({
+            events,
+            ...(handoffWrite !== undefined &&
+            input.type === "provider-session.attached" &&
+            events.length === 1 &&
+            events[0]?.threadId === handoffWrite.threadId
+              ? { commandId: handoffWrite.commandId }
+              : {}),
+          });
         }
       });
 
@@ -2311,6 +2329,51 @@ export const layerWithOptions = (
               modelFamily: normalizeModelMetricLabel(model),
             },
           });
+        const guardHandoffStart = Effect.fn("ProviderSessionManager.guardHandoffStart")(
+          function* (
+            input: Pick<
+              ProviderAdapter.ProviderAdapterV2TurnInput,
+              "threadId" | "providerThread" | "runId"
+            >,
+            authorityOnly = false,
+          ) {
+            const handoffGuard = yield* CurrentHandoffProviderStart;
+            if (handoffGuard !== undefined) {
+              if (!authorityOnly) yield* handoffGuard;
+            } else {
+              let thread = yield* projectionStore.getThread(input.threadId);
+              for (let depth = 0; depth < 32; depth++) {
+                if (
+                  thread.handoffSourceThreadId !== undefined ||
+                  (thread.handoffTransfer !== undefined &&
+                    thread.handoffTransfer.state !== "cancelled")
+                )
+                  return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: runtime.driver,
+                    threadId: input.threadId,
+                    providerThreadId: input.providerThread.id,
+                    runId: input.runId,
+                    cause: "Guarded handoff provider-start authority is missing.",
+                  });
+                if (thread.lineage.parentThreadId === null) break;
+                thread = yield* projectionStore.getThread(thread.lineage.parentThreadId);
+              }
+            }
+          },
+          (effect, input, _authorityOnly?: boolean) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: runtime.driver,
+                    threadId: input.threadId,
+                    providerThreadId: input.providerThread.id,
+                    runId: input.runId,
+                    cause,
+                  }),
+              ),
+            ),
+        );
         return {
           ...runtime,
           // Pi replaces its session snapshot as metadata changes.
@@ -2441,8 +2504,11 @@ export const layerWithOptions = (
               ),
               Effect.map(({ loaded }) => loaded),
             ),
-          startTurn: (input) =>
-            observeActivity(
+          startTurn: Effect.fn("ProviderSessionManager.startTurn")(function* (
+            input: ProviderAdapter.ProviderAdapterV2TurnInput,
+          ) {
+            yield* guardHandoffStart(input, true);
+            yield* observeActivity(
               providerSessionId,
               ensureThreadAttached({
                 providerSessionId,
@@ -2488,7 +2554,23 @@ export const layerWithOptions = (
                     ),
                   ),
                   () =>
-                    runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
+                    Effect.gen(function* () {
+                      yield* guardHandoffStart(input);
+                      yield* runtime
+                        .startTurn(input)
+                        .pipe(turnMetrics("send", input.modelSelection.model));
+                    }).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterTurnStartError({
+                            driver: runtime.driver,
+                            threadId: input.threadId,
+                            providerThreadId: input.providerThread.id,
+                            runId: input.runId,
+                            cause,
+                          }),
+                      ),
+                    ),
                   (_, exit) =>
                     Exit.isFailure(exit)
                       ? observeActivity(
@@ -2498,7 +2580,25 @@ export const layerWithOptions = (
                       : Effect.void,
                 ),
               ),
-            ),
+            );
+          }),
+
+          ...(runtime.resumeTurn === undefined
+            ? {}
+            : {
+                resumeTurn: (input: ProviderAdapter.ProviderAdapterV2ResumeTurnInput) =>
+                  guardHandoffStart(input).pipe(
+                    Effect.andThen(Effect.suspend(() => runtime.resumeTurn!(input))),
+                  ),
+              }),
+          ...(runtime.compactThread === undefined
+            ? {}
+            : {
+                compactThread: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+                  guardHandoffStart(input).pipe(
+                    Effect.andThen(Effect.suspend(() => runtime.compactThread!(input))),
+                  ),
+              }),
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.steerTurn(input).pipe(turnMetrics("steer"))),
@@ -3131,6 +3231,19 @@ export const layerWithOptions = (
               yield* startEventPump(entry);
               yield* scheduleIdleRelease(input.providerSessionId);
               return exposedRuntime;
+            }),
+          ),
+        observeHandoffSession: (id) =>
+          Ref.get(sessions).pipe(
+            Effect.map((current) => {
+              const entry = current.get(sessionKey(id));
+              return entry === undefined
+                ? Option.none()
+                : Option.some({
+                    runtime: entry.exposedRuntime,
+                    idleGeneration: entry.idleGeneration,
+                    busyTurns: [...entry.busyTurns].sort(),
+                  });
             }),
           ),
         isLive: (providerSessionId) =>

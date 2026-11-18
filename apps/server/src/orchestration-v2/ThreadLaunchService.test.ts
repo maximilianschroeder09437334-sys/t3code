@@ -1,3 +1,7 @@
+import * as EffectWorker from "./EffectWorker.ts";
+import * as CoreHandoff from "./CoreHandoff.ts";
+import * as ActivityLedger from "../activity/ActivityLedger.ts";
+import { type HandoffInput, ActivityLedgerError } from "@t3tools/contracts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
@@ -18,6 +22,7 @@ import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  EventId,
   GitCommandError,
   MessageId,
   ProjectId,
@@ -69,6 +74,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -347,6 +353,124 @@ function launchInput(input: {
   };
 }
 
+it.effect("rejects restricted launches before workspace setup", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const error = yield* launches
+      .launch({
+        ...launchInput({ command: "command:restricted", thread: "thread:restricted" }),
+        agentExecutionIntent: {
+          modelSelection,
+          restrictedTools: {
+            profile: "notion-outbox-v1",
+            projectId,
+            taskId: ScheduledTaskId.make("task"),
+            batchId: "batch",
+          },
+        },
+        initialMessage: {
+          scheduledTaskId: ScheduledTaskId.make("task"),
+          text: "start",
+          attachments: [],
+        },
+      })
+      .pipe(Effect.flip);
+    assert.include(error.message, "unsupported");
+    assert.equal(harness.createWorktree.mock.calls.length, 0);
+    assert.equal(harness.runSetup.mock.calls.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+it.effect("persists restricted intent and rejects a mismatched project or a resumed turn", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threadId = ThreadId.make("thread:restricted-persistence");
+    const restrictedTools = {
+      profile: "notion-outbox-v1" as const,
+      projectId,
+      taskId: ScheduledTaskId.make("task"),
+      batchId: "batch",
+    };
+    const wrong = yield* launches
+      .launch({
+        ...launchInput({ command: "command:wrong-binding", thread: "thread:wrong-binding" }),
+        agentExecutionIntent: {
+          modelSelection,
+          restrictedTools: { ...restrictedTools, projectId: otherProjectId },
+        },
+        initialMessage: { scheduledTaskId: restrictedTools.taskId, text: "start", attachments: [] },
+      })
+      .pipe(Effect.flip);
+    assert.include(wrong.message, "binding");
+    const wrongTask = yield* launches
+      .launch({
+        ...launchInput({ command: "command:wrong-task", thread: "thread:wrong-task" }),
+        agentExecutionIntent: { modelSelection, restrictedTools },
+        initialMessage: {
+          scheduledTaskId: ScheduledTaskId.make("other-task"),
+          text: "start",
+          attachments: [],
+        },
+      })
+      .pipe(Effect.flip);
+    assert.include(wrongTask.message, "binding");
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:restricted-create"),
+      threadId,
+      projectId,
+      title: "Restricted",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "agent",
+      creationSource: "server",
+      agentExecutionIntent: { modelSelection, restrictedTools },
+    });
+    const projection = yield* threads.getThreadProjection(threadId);
+    assert.deepEqual(projection.thread.agentExecutionIntent?.restrictedTools, restrictedTools);
+    const reuse = yield* launches
+      .launch({
+        ...launchInput({ command: "command:restricted-reuse", thread: threadId }),
+        reuseExistingThread: true,
+      })
+      .pipe(Effect.flip);
+    assert.include(reuse.message, "unsupported");
+    const events = yield* threads
+      .streamStoredEventsFrom({ threadId })
+      .pipe(Stream.take(1), Stream.runCollect);
+    const created = Array.from(events).find((stored) => stored.event.type === "thread.created");
+    assert.deepEqual(
+      created?.event.type === "thread.created" &&
+        created.event.payload.agentExecutionIntent?.restrictedTools,
+      restrictedTools,
+    );
+    if (created?.event.type !== "thread.created") throw new Error("Missing creation event");
+    assert.deepEqual(
+      ProjectionStore.emptyProjection(created.event).thread.agentExecutionIntent?.restrictedTools,
+      restrictedTools,
+    );
+    const denied = yield* threads
+      .sendToThread({
+        projectId,
+        commandId: CommandId.make("command:restricted-send"),
+        threadId,
+        messageId: MessageId.make("message:restricted-send"),
+        text: "start",
+        attachments: [],
+        mode: "auto",
+        createdBy: "user",
+        creationSource: "web",
+      })
+      .pipe(Effect.flip);
+    assert.include(String(denied.cause), "unsupported");
+    assert.isEmpty((yield* threads.getThreadProjection(threadId)).runs);
+  }).pipe(Effect.provide(harness.layer));
+});
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>
     (["user", "agent"] as const).map((createdBy) => ({ target, createdBy })),
@@ -2486,6 +2610,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     };
     const failed = yield* ThreadMessageIntake.launchThread(input).pipe(
       Effect.provideService(ThreadLaunch.ThreadLaunchService, {
+        lookupCommandReceipt: launches.lookupCommandReceipt,
         launch: (request) =>
           launches.launch(request).pipe(
             Effect.andThen(
@@ -3215,3 +3340,204 @@ it.effect("replays an accepted send after the project disables the instance", ()
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
+
+it.effect(
+  "reconciles accepted legacy handoff after ledger failure and source settlement without launch replay",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      const handoff: HandoffInput = {
+        goal: "Finish",
+        decisions: [],
+        state: { branch: "feature", commits: [], verified: [] },
+        deadEnds: [],
+        next: "Review",
+        pointers: [],
+      };
+      const historyStores = Layer.merge(ProjectionStore.layer, CommandReceiptStore.layer).pipe(
+        Layer.provideMerge(harness.layer),
+      );
+      const recoveryLayer = ActivityLedger.layer.pipe(Layer.provideMerge(historyStores));
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        yield* launches.launch(launchInput({ command: "legacy-source-create", thread: "source" }));
+        const input = {
+          ...launchInput({
+            command: "core-handoff:source:launch",
+            thread: "core-handoff:source:successor",
+            message: JSON.stringify(handoff),
+            workspace: {
+              type: "existing_worktree",
+              worktreePath: "/repo/handoff",
+              branch: "feature",
+            },
+          }),
+          modelSelection: {
+            ...modelSelection,
+            options: [{ id: "reasoningEffort", value: "medium" }],
+          },
+        };
+        const request = {
+          type: "thread.handoff" as const,
+          handoff,
+          projectId,
+          sourceThreadId: ThreadId.make("source"),
+          successorThreadId: input.threadId!,
+          modelSelection: input.modelSelection,
+          runtimeMode: input.runtimeMode,
+          interactionMode: input.interactionMode,
+          branch: "feature",
+          worktreePath: "/repo/handoff",
+        };
+        const absent = yield* CoreHandoff.deliverHandoff(request).pipe(Effect.flip);
+        assert.equal(absent._tag, "HandoffParked");
+        assert.isTrue(Option.isNone(yield* launches.lookupCommandReceipt(input.commandId)));
+        const missing = yield* threads.getThreadProjection(input.threadId!).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(missing));
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const effectId = CoreHandoff.handoffId(request.sourceThreadId);
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId: CommandId.make(effectId),
+            threadId: request.sourceThreadId,
+            request,
+          },
+        ]);
+        const claimed = yield* outbox.claimNext({ workerId: "lost-worker" });
+        assert.isTrue(Option.isSome(claimed));
+        if (Option.isSome(claimed)) assert.equal(claimed.value.id, effectId);
+        const historical = yield* launches.launch({
+          ...input,
+          commandId: CommandId.make("historical-fixture-launch"),
+          threadId: ThreadId.make("historical-fixture-thread"),
+        });
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+        const sql = yield* SqlClient.SqlClient;
+        const occurredAt = yield* DateTime.now;
+        // Seed prior accepted history directly; current admission must never create an unreserved canonical successor.
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* projections.apply({
+              id: EventId.make("historical-fixture-thread"),
+              type: "thread.created",
+              threadId: input.threadId!,
+              occurredAt,
+              payload: {
+                ...historical.projection.thread,
+                id: input.threadId!,
+                lineage: {
+                  parentThreadId: null,
+                  rootThreadId: input.threadId!,
+                  relationshipToParent: null,
+                },
+              },
+            });
+            for (const message of historical.projection.messages)
+              yield* projections.apply({
+                id: EventId.make(`historical:${message.id}`),
+                type: "message.updated",
+                threadId: input.threadId!,
+                occurredAt,
+                payload: { ...message, threadId: input.threadId! },
+              });
+            for (const run of historical.projection.runs)
+              yield* projections.apply({
+                id: EventId.make(`historical:${run.id}`),
+                type: "run.created",
+                threadId: input.threadId!,
+                occurredAt,
+                payload: { ...run, threadId: input.threadId! },
+              });
+            yield* receipts.upsert({
+              commandId: input.commandId,
+              threadId: input.threadId!,
+              commandType: "thread.create",
+              acceptedAt: occurredAt,
+              resultSequence: 0,
+              status: "accepted",
+              error: null,
+            });
+          }),
+        );
+        const replay = {
+          threadId: input.threadId!,
+          projection: yield* threads.getThreadProjection(input.threadId!),
+        };
+        assert.equal(replay.threadId, input.threadId!);
+        assert.equal(replay.projection.messages.length, 1);
+        assert.equal(replay.projection.runs.length, 1);
+        assert.equal(replay.projection.messages[0]?.text, JSON.stringify(handoff));
+        assert.deepEqual(replay.projection.thread.modelSelection, input.modelSelection);
+        assert.equal(replay.projection.thread.branch, "feature");
+        assert.equal(replay.projection.thread.worktreePath, "/repo/handoff");
+        assert.isNull(replay.projection.thread.forkedFrom);
+        const ledger = yield* ActivityLedger.ActivityLedger;
+        const failed = yield* CoreHandoff.deliverHandoff(request).pipe(
+          Effect.provideService(ActivityLedger.ActivityLedger, {
+            ...ledger,
+            append: () =>
+              Effect.fail(new ActivityLedgerError({ message: "injected ledger write failure" })),
+          }),
+          Effect.exit,
+        );
+        assert.isTrue(Exit.isFailure(failed));
+        yield* threads.dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("settle-legacy-source"),
+          threadId: request.sourceThreadId,
+        });
+        assert.equal(
+          (yield* threads.getThreadProjection(request.sourceThreadId)).thread.settledOverride,
+          "settled",
+        );
+        const lookupOnly = {
+          ...launches,
+          launch: () => Effect.die("Reconciliation must never resubmit launch"),
+        };
+        yield* outbox.reconcileAfterProcessLoss;
+        const executor = Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+          execute: (effect) =>
+            (effect.request.type === "thread.handoff"
+              ? CoreHandoff.deliverHandoff(effect.request)
+              : Effect.fail(
+                  new CoreHandoff.HandoffParked({
+                    message: "Unrelated harness effect deliberately not executed",
+                  }),
+                )
+            ).pipe(
+              Effect.provideService(ThreadManagement.ThreadManagementService, threads),
+              Effect.provideService(ThreadLaunch.ThreadLaunchService, lookupOnly),
+              Effect.provideService(ActivityLedger.ActivityLedger, ledger),
+              Effect.mapError(
+                (cause) =>
+                  new EffectWorker.OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            ),
+        });
+        const workerLayer = EffectWorker.layerWithOptions({ workerId: "restarted-worker" }).pipe(
+          Layer.provide(executor),
+          Layer.provide(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox)),
+        );
+        yield* Effect.gen(function* () {
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          yield* Effect.all([worker.runOnce(), worker.runOnce()], { concurrency: "unbounded" });
+        }).pipe(Effect.provide(workerLayer));
+        const completed = yield* outbox.get(effectId);
+        assert.isTrue(Option.isSome(completed));
+        if (Option.isSome(completed)) assert.equal(completed.value.status, "succeeded");
+        const recovered = yield* threads.getThreadProjection(input.threadId!);
+        assert.equal(recovered.messages.length, 1);
+        assert.equal(recovered.runs.length, 1);
+        const events = yield* ledger.list({ limit: 10 });
+        assert.equal(events.length, 1);
+        assert.equal(events[0]!.links?.successorThreadId, input.threadId);
+      }).pipe(Effect.provide(recoveryLayer));
+    }),
+);

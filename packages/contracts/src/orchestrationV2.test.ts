@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 
 import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
 import {
+  AgentExecutionIntent,
   latestProviderTurnForAttempt,
   OrchestrationV2CheckpointFileSummary,
   OrchestrationV2ProviderCapabilities,
@@ -37,6 +38,20 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("preserves restricted tool intent through its wire codec", () => {
+    const input = {
+      modelSelection: { instanceId: "codex", model: "model" },
+      restrictedTools: {
+        profile: "notion-outbox-v1" as const,
+        projectId: "project",
+        taskId: "task",
+        batchId: "batch",
+      },
+    };
+    const codec = Schema.toCodecJson(AgentExecutionIntent);
+    expect(Schema.encodeSync(codec)(Schema.decodeSync(codec)(input))).toEqual(input);
+  });
+
   it("round-trips a Codex tool's source session while accepting older items without one", () => {
     const dynamicTool = {
       id: "tool-1",

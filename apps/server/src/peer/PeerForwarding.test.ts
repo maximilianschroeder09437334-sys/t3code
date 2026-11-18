@@ -394,8 +394,23 @@ const makeLaptop = Effect.gen(function* () {
             thread: liveThreadShell(threadId, { runtimeMode: "full-access" }),
           } as never),
         // The sender's handoff hook needs the run it sends from.
-        getThreadRecords: () =>
-          Effect.succeed({ runs: [{ id: RunId.make("run:laptop"), status: "running" }] } as never),
+        getThreadRecords: (threadId) =>
+          Effect.succeed({
+            thread:
+              threadId === ThreadId.make("thread:laptop-restricted")
+                ? {
+                    agentExecutionIntent: {
+                      restrictedTools: {
+                        profile: "notion-outbox-v1",
+                        projectId: "project",
+                        taskId: "task",
+                        batchId: "batch",
+                      },
+                    },
+                  }
+                : {},
+            runs: [{ id: RunId.make("run:laptop"), status: "running" }],
+          } as never),
       }),
     ),
     Layer.provide(
@@ -580,6 +595,28 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("does not forward restricted work to an older peer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const linkSession = yield* Ref.make("");
+      const b = yield* serveBox(seen, linkSession, true);
+      const a = yield* makeLaptop;
+      yield* linkTo(a.links, b, "full-access");
+      yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
+      const result = yield* a.call("thread:laptop-restricted", "t3_thread_send", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        message: "start",
+      });
+      expect(failureOf(result)).toMatchObject({
+        code: "capability_denied",
+        message: expect.stringContaining("Restricted tool intent"),
+      });
+      expect((yield* Ref.get(seen)).sends).toHaveLength(0);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
 it.effect("refuses a linked launch when the peer cannot attest model policy", () =>
   Effect.scoped(
     Effect.gen(function* () {

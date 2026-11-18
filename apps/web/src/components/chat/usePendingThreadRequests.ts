@@ -1,3 +1,4 @@
+import { canRespondToApproval } from "@t3tools/client-runtime/state/thread-requests";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
   AuthOrchestrationOperateScope,
@@ -355,11 +356,8 @@ export function usePendingThreadRequests(input: {
   ) => {
     if (!activeThreadId || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
       return;
-    if (
-      pendingApprovals.find((approval) => approval.requestId === requestId)?.responseCapability !==
-      "live"
-    )
-      return;
+    const approval = pendingApprovals.find((item) => item.requestId === requestId);
+    if (!canRespondToApproval(approval, decision)) return;
 
     setRespondingRequestIds((existing) =>
       existing.includes(requestId) ? existing : [...existing, requestId],
@@ -370,6 +368,9 @@ export function usePendingThreadRequests(input: {
         threadId: activeThreadId,
         requestId,
         decision,
+        ...(approval?.handoffReview
+          ? { handoffGeneration: approval.handoffReview.generation }
+          : {}),
         ...(feedback === undefined ? {} : { feedback }),
       },
     });

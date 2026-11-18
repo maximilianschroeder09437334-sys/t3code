@@ -519,7 +519,17 @@ export class TerminalResizeError extends Schema.TaggedError<TerminalResizeError>
   }
 }
 
+export class TerminalHandoffFencedError extends Schema.TaggedError<
+  TerminalHandoffFencedError,
+  { readonly brand: unique symbol }
+>()("TerminalHandoffFencedError", { threadId: Schema.String, terminalId: Schema.String }) {
+  override get message() {
+    return `Terminal input and attachment are fenced by workspace handoff for thread: ${this.threadId}, terminal: ${this.terminalId}`;
+  }
+}
+
 export const TerminalError = Schema.Union([
+  TerminalHandoffFencedError,
   TerminalCwdError,
   TerminalHistoryError,
   TerminalSessionLookupError,

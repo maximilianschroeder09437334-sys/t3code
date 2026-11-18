@@ -19,6 +19,48 @@ import * as DateTime from "effect/DateTime";
 import type { AtomCommandResult } from "./runtime.ts";
 import type { ThreadStructure, ThreadStructureVisibleTurnItem } from "./models.ts";
 
+type HandoffThreadDetail = {
+  readonly environmentId: EnvironmentId;
+  readonly projection: { readonly thread: ThreadStructure["thread"] };
+};
+
+export function deriveParkedHandoffRecovery(
+  selected: HandoffThreadDetail | null,
+  original: HandoffThreadDetail | null,
+  canOperate: boolean,
+) {
+  if (selected === null || original === null || selected.environmentId !== original.environmentId)
+    return null;
+  const current = selected.projection.thread;
+  const source = original.projection.thread;
+  const pair = source.handoffTransfer;
+  if (
+    pair?.state !== "released" ||
+    pair.parkedRecovery?.reason !== "replacement-lost-after-bootstrap" ||
+    pair.sourceThreadId !== source.id ||
+    source.handoffStopCommandId !== undefined ||
+    source.deletedAt !== null ||
+    current.deletedAt !== null
+  )
+    return null;
+  const onSuccessor =
+    current.id === pair.successorThreadId && current.handoffSourceThreadId === source.id;
+  if (current.id !== source.id && !onSuccessor) return null;
+  return {
+    reason:
+      "Handoff recovery paused after the replacement session opened and the server stopped again.",
+    originalTitle: source.title,
+    successorRef: { environmentId: selected.environmentId, threadId: pair.successorThreadId },
+    action:
+      onSuccessor && canOperate
+        ? {
+            environmentId: original.environmentId,
+            input: { threadId: source.id, requestId: pair.requestId, generation: pair.generation },
+          }
+        : null,
+  };
+}
+
 export type ApprovalResponder = (
   requestId: RuntimeRequestId,
   decision: ProviderApprovalDecision,
@@ -58,7 +100,11 @@ export interface ThreadPendingApproval {
   readonly fullAccessOverride?: ProviderApprovalFullAccessOverride;
   readonly appName?: string;
   readonly options?: ReadonlyArray<ProviderApprovalOption>;
-  readonly responseCapability: "live" | "not_resumable";
+  readonly responseCapability: "live" | "handoff" | "not_resumable";
+  readonly handoffReview?: Extract<
+    OrchestrationV2RuntimeRequest["responseCapability"],
+    { type: "handoff" }
+  >;
   readonly supportsFeedback?: boolean;
 }
 
@@ -242,6 +288,26 @@ export function derivePendingThreadRequests(
   for (const request of projection.runtimeRequests) {
     if (request.status !== "pending") continue;
     const responseCapability = request.responseCapability.type;
+    if (request.responseCapability.type === "handoff") {
+      const review = request.responseCapability;
+      if (request.kind !== "permission" || review.requestId !== request.id) continue;
+      approvals.push({
+        requestId: request.id,
+        requestKind: "permission",
+        createdAt: DateTime.formatIso(request.createdAt),
+        responseCapability: "handoff",
+        handoffReview: review,
+        appName: "Handoff review",
+        detail: `Source: ${review.sourceThreadId}\nSuccessor: ${review.successorThreadId}\nGeneration: ${review.generation}\n${review.declaration}`,
+        reason: `Blockers: ${review.blockers.join("; ") || "none observed"}. Unknowns: ${review.unknowns.join("; ") || "none essential"}. Manual coverage: ${review.manualReview.join("; ")}`,
+        options: [
+          { decision: "accept", label: "Approve review once" },
+          { decision: "decline", label: "Decline" },
+          { decision: "cancel", label: "Cancel" },
+        ],
+      });
+      continue;
+    }
     if (request.kind === "user_input") {
       const item = projection.turnItems.findLast(
         (candidate) =>
@@ -402,4 +468,19 @@ export function createChildThreadApprovalsAtom(input: {
   });
   const empty = Atom.make<ReadonlyArray<ChildThreadApproval>>([]);
   return (ref: ScopedThreadRef | null) => (ref === null ? empty : family(threadKey(ref)));
+}
+
+export function canRespondToApproval(
+  approval: ThreadPendingApproval | undefined,
+  decision: ProviderApprovalDecision,
+): boolean {
+  return (
+    approval?.responseCapability === "live" ||
+    (approval?.responseCapability === "handoff" &&
+      approval.handoffReview?.requestId === approval.requestId &&
+      ["accept", "decline", "cancel"].includes(decision) &&
+      (decision !== "accept" ||
+        (approval.handoffReview.blockers.length === 0 &&
+          approval.handoffReview.unknowns.length === 0)))
+  );
 }

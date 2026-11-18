@@ -1,3 +1,8 @@
+import {
+  CurrentHandoffProviderStart,
+  HandoffProviderSessionWrite,
+} from "./HandoffProviderStartGuard.ts";
+import * as HandoffAdmission from "./HandoffTransferAdmission.ts";
 import { agentModelPolicy } from "./AgentModelPolicy.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
@@ -222,6 +227,7 @@ export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
+    const handoffAdmission = yield* Effect.serviceOption(HandoffAdmission.HandoffTransferAdmission);
     const turnAnalytics = yield* ProviderUsageAnalytics.ProviderTurnAnalytics;
     const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -591,6 +597,14 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (projection.thread.agentExecutionIntent?.restrictedTools !== undefined) {
+        yield* settleStartFailure({
+          signal: "restricted-tools-unsupported",
+          title: "Restricted tools unsupported",
+          error: new Error("This provider cannot enforce restricted tools."),
+        });
+        return;
+      }
       if (
         projection.thread.createdBy === "agent" ||
         projection.thread.delegatedFrom !== undefined ||
@@ -995,25 +1009,41 @@ export const layer: Layer.Layer<
         run,
         checkpointScope,
       });
+      const sourceId = projection.thread.handoffSourceThreadId;
+      const pair =
+        sourceId === undefined
+          ? undefined
+          : (yield* projectionStore.getThread(sourceId)).handoffTransfer;
+      const handoffWrite =
+        pair?.state === "released" &&
+        pair.runId === run.id &&
+        pair.successorThreadId === input.threadId
+          ? {
+              threadId: input.threadId,
+              commandId: HandoffAdmission.handoffProviderOpenCommand(pair),
+            }
+          : undefined;
       const sessionResult = yield* Effect.result(
-        providerSessions.open({
-          threadId: projection.thread.id,
-          providerSessionId,
-          modelSelection: run.modelSelection,
-          runtimePolicy: providerRuntimePolicy,
-          ...(existingSessionProjection === undefined
-            ? {}
-            : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null
-            ? {}
-            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-            ? {}
-            : {
-                initialProviderItemIdentityVersion:
-                  providerThread.nativeMetadata.itemIdentityVersion,
-              }),
-        }),
+        providerSessions
+          .open({
+            threadId: projection.thread.id,
+            providerSessionId,
+            modelSelection: run.modelSelection,
+            runtimePolicy: providerRuntimePolicy,
+            ...(existingSessionProjection === undefined
+              ? {}
+              : { resumeFromSession: existingSessionProjection }),
+            ...(providerThread.nativeThreadRef?.nativeId == null
+              ? {}
+              : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+            ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+              ? {}
+              : {
+                  initialProviderItemIdentityVersion:
+                    providerThread.nativeMetadata.itemIdentityVersion,
+                }),
+          })
+          .pipe(Effect.provideService(HandoffProviderSessionWrite, handoffWrite)),
       );
       if (sessionResult._tag === "Failure") {
         const failure = sessionResult.failure;
@@ -1555,7 +1585,11 @@ export const layer: Layer.Layer<
           resumedRetryHandoff = yield* prepareRetryHandoff(context);
           const fits = yield* deliverContextHandoffs({
             handoffs: [...handoffs, ...resumedRetryHandoff],
-            providerThread: { ...resumed.success, id: providerThread.id },
+            providerThread: {
+              ...resumed.success,
+              id: providerThread.id,
+              contextUsage: context.handoffUsage,
+            },
             budget: context.budget,
             deferInline: isCompactionCommandMessage(providerMessage) || goalCommand,
             alreadyDeliveredItemIds: context.deliveredItemIds,
@@ -1570,7 +1604,7 @@ export const layer: Layer.Layer<
           const { handoff } = yield* recoveryHandoff;
           const fitsFresh = yield* deliverContextHandoffs({
             handoffs: withRecoveryHandoff(handoff),
-            providerThread: freshThread,
+            providerThread: { ...freshThread, contextUsage: freshContext.handoffUsage },
             budget: freshContext.budget,
             alreadyDeliveredItemIds: freshContext.deliveredItemIds,
             persist: () => Effect.void,
@@ -1886,6 +1920,7 @@ export const layer: Layer.Layer<
         },
       ];
       const runningWrite = yield* eventSink.writeIfRunCurrent({
+        ...(handoffWrite === undefined ? {} : { commandId: handoffWrite.commandId }),
         threadId: projection.thread.id,
         runId: run.id,
         activeAttemptId: attempt.id,
@@ -1955,6 +1990,52 @@ export const layer: Layer.Layer<
           const startInput = noteContinuation ? promptedInput : turnInput;
           const { resume: _resume, ...contextInput } = startInput;
           const { message: resumeMessage, resume: _resumeIntent, ...resumeInput } = startInput;
+          const sessionWrite =
+            handoffWrite === undefined
+              ? undefined
+              : runningWrite.storedEvents.find(
+                  ({ event }) =>
+                    event.type === "provider-session.updated" &&
+                    event.payload.id === providerSessionId,
+                );
+          const handoffStart = Option.isSome(handoffAdmission)
+            ? handoffAdmission.value
+                .start(input.threadId, run.id, {
+                  sessionId: providerSessionId,
+                  busyTurnKey: `${runningProviderThread.id}#${run.ordinal}`,
+                  ...(sessionWrite?.event.type === "provider-session.updated"
+                    ? {
+                        sessionWrite: {
+                          id: sessionWrite.event.id,
+                          payload: sessionWrite.event.payload,
+                        },
+                      }
+                    : {}),
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterTurnStartError({
+                        driver: runningProviderThread.driver,
+                        threadId: input.threadId,
+                        providerThreadId: runningProviderThread.id,
+                        runId: run.id,
+                        cause,
+                      }),
+                  ),
+                )
+            : undefined;
+          if (Option.isNone(handoffAdmission)) {
+            const currentThread = yield* projectionStore.getThread(input.threadId);
+            if (
+              currentThread.handoffSourceThreadId !== undefined ||
+              currentThread.handoffTransfer !== undefined
+            )
+              return yield* new ProviderTurnStartError({
+                runId: run.id,
+                cause: "Handoff admission unavailable.",
+              });
+          }
           const operation =
             turnInput.resume && context === "" && session.resumeTurn !== undefined
               ? session.resumeTurn({ ...resumeInput, messageId: resumeMessage.messageId })
@@ -1969,6 +2050,7 @@ export const layer: Layer.Layer<
                     : { inlineContextLength: text.length - userText.length }),
                 });
           yield* operation.pipe(
+            Effect.provideService(CurrentHandoffProviderStart, handoffStart),
             // Clear pending handoff markers for refused prompts so the next turn retains the native session.
             Effect.tapError((error) =>
               refusedBeforePrompt(error)
@@ -2022,6 +2104,8 @@ export const layer: Layer.Layer<
         ),
       );
       const deliverySession =
+        projection.thread.handoffSourceThreadId === undefined &&
+        projection.thread.handoffTransfer === undefined &&
         effectiveHandoffs.length === 0 &&
         retryHandoff.length === 0 &&
         sideChatHandoff === undefined &&

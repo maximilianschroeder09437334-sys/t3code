@@ -1,3 +1,4 @@
+import { ParkedHandoffRecovery } from "./chat/ParkedHandoffRecovery";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -511,6 +512,9 @@ export default function ChatView(props: ChatViewProps) {
   });
   const serverThreadProjection = useQuietThreadProjection(routeThreadDetailRef);
   const serverProjection = serverThreadProjection?.projection ?? null;
+  const mayHaveParkedHandoff =
+    serverProjection?.thread.handoffSourceThreadId !== undefined ||
+    serverProjection?.thread.handoffTransfer?.parkedRecovery !== undefined;
   // Only the shell-less fallback needs these; with a shell, the shell carries them.
   const fallbackDetailRef = serverThreadShell === null ? routeThreadDetailRef : null;
   const fallbackUpdatedAt = useThreadUpdatedAt(fallbackDetailRef);
@@ -3567,6 +3571,22 @@ export default function ChatView(props: ChatViewProps) {
                   data-chat-composer-stack="true"
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
+                  {mayHaveParkedHandoff ? (
+                    <ParkedHandoffRecovery
+                      key={routeThreadKey}
+                      environmentId={environmentId}
+                      selected={serverThreadProjection}
+                      canOperate={canOperateThread}
+                      environmentUnavailable={activeEnvironmentUnavailable}
+                      onReturned={(originalId) => {
+                        if (currentRouteThreadKeyRef.current !== routeThreadKey) return;
+                        void navigate({
+                          to: "/$environmentId/$threadId",
+                          params: buildThreadRouteParams(scopeThreadRef(environmentId, originalId)),
+                        });
+                      }}
+                    />
+                  ) : null}
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full">
                       <div

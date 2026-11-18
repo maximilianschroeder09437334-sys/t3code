@@ -1,3 +1,5 @@
+import * as HandoffProducer from "./HandoffApprovalProducer.ts";
+import * as HandoffReceipts from "./CommandReceiptStore.ts";
 import { CommandId, type RunId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -33,6 +35,9 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import { continueHookRun } from "./HookContinuation.ts";
+import * as CoreHandoff from "./CoreHandoff.ts";
+import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as ActivityLedger from "../activity/ActivityLedger.ts";
 
 const isProviderTurnControlError = Schema.is(ProviderTurnControlService.ProviderTurnControlError);
 
@@ -46,6 +51,7 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
 ) {}
 
 const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecutionError);
+const isHandoffParked = Schema.is(CoreHandoff.HandoffParked);
 
 /**
  * Do not apply this to `provider-turn.restart`: that compound effect also runs
@@ -118,6 +124,11 @@ export const layerExecutor: Layer.Layer<
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const handoffLaunch = yield* Effect.serviceOption(ThreadLaunch.ThreadLaunchService);
+    const handoffReceipts = yield* Effect.serviceOption(HandoffReceipts.CommandReceiptStoreV2);
+    const handoffOutbox = yield* Effect.serviceOption(EffectOutbox.EffectOutboxV2);
+    const handoffProducer = yield* Effect.serviceOption(HandoffProducer.HandoffApprovalProducer);
+    const handoffLedger = yield* Effect.serviceOption(ActivityLedger.ActivityLedger);
     const startRun = (
       effect: EffectOutbox.OrchestrationEffectV2,
       runId: RunId,
@@ -159,6 +170,57 @@ export const layerExecutor: Layer.Layer<
       execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "thread.handoff": {
+            const request = effect.request;
+            return Effect.gen(function* () {
+              if (
+                (Option.isNone(handoffLaunch) && Option.isNone(handoffReceipts)) ||
+                Option.isNone(handoffLedger)
+              )
+                return yield* Effect.fail(
+                  "Core handoff dependencies are unavailable; source retained.",
+                );
+              if (Option.isSome(handoffProducer))
+                yield* handoffProducer.value.requestIfReady(request.sourceThreadId);
+              yield* CoreHandoff.deliverHandoff(request).pipe(
+                Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+                (effect) =>
+                  Option.isSome(handoffLaunch)
+                    ? Effect.provideService(
+                        effect,
+                        ThreadLaunch.ThreadLaunchService,
+                        handoffLaunch.value,
+                      )
+                    : effect,
+                (effect) =>
+                  Option.isSome(handoffOutbox)
+                    ? Effect.provideService(
+                        effect,
+                        EffectOutbox.EffectOutboxV2,
+                        handoffOutbox.value,
+                      )
+                    : effect,
+                (effect) =>
+                  Option.isSome(handoffReceipts)
+                    ? Effect.provideService(
+                        effect,
+                        HandoffReceipts.CommandReceiptStoreV2,
+                        handoffReceipts.value,
+                      )
+                    : effect,
+                Effect.provideService(ActivityLedger.ActivityLedger, handoffLedger.value),
+              );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
+          }
           case "hook.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueHookRun({
@@ -916,11 +978,13 @@ export const layerWithOptions = (
         effect: EffectOutbox.OrchestrationEffectV2,
         cause: Cause.Cause<unknown>,
       ) =>
-        EffectOutbox.REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS.some(
-          (effectType) => effectType === effect.request.type,
-        )
-          ? requeueClaim(effect, cause)
-          : terminalizeClaim(effect, cause);
+        effect.request.type === "thread.handoff" && effect.attemptCount >= maxAttempts
+          ? terminalizeClaim(effect, cause)
+          : EffectOutbox.REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS.some(
+                (effectType) => effectType === effect.request.type,
+              )
+            ? requeueClaim(effect, cause)
+            : terminalizeClaim(effect, cause);
 
       // The worker probes for work repeatedly, including when the outbox is empty.
       const runOnce = Effect.fnUntraced(
@@ -998,12 +1062,20 @@ export const layerWithOptions = (
             nonRetryable,
             error,
           });
+          const parkedHandoff =
+            effect.request.type === "thread.handoff" &&
+            Option.exists(
+              Cause.findErrorOption(exit.cause),
+              (failure) =>
+                isOrchestrationEffectExecutionError(failure) && isHandoffParked(failure.cause),
+            );
           const updated = nonRetryable
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts &&
-                (!ownsStartingRun(effect.request.type) || cannotSettleRun(exit.cause))
+            : parkedHandoff ||
+                (effect.attemptCount >= maxAttempts &&
+                  (!ownsStartingRun(effect.request.type) || cannotSettleRun(exit.cause)))
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))

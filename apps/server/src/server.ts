@@ -228,6 +228,7 @@ import * as IdleCompactionService from "./orchestration-v2/IdleCompactionService
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
 import * as RunFinalizationService from "./orchestration-v2/RunFinalizationService.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
+import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
 import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
 import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import { acceptsPrivateNetworkConnection, loopbackUrlHostForAddress } from "./startupAccess.ts";
@@ -526,6 +527,7 @@ const layerTerminal = TerminalManager.layer(
   ProviderInstanceRegistryHydration.deriveProviderInstanceConfigMap,
 ).pipe(
   Layer.provide(layerPtyAdapter),
+  Layer.provide(Layer.merge(ProjectionStoreV2.layer, ThreadCommandExecutor.layer)),
   Layer.provide(layerPortScanner),
   Layer.provide(layerNativeTelemetry),
 );

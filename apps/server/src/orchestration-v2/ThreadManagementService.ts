@@ -415,6 +415,8 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
+  readonly readHandoffRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
+  readonly readHandoffChildIds: Orchestrator.OrchestratorV2["Service"]["listAppOwnedChildThreadIds"];
   readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
   readonly getThreadProjection: (
     threadId: ThreadId,
@@ -1699,6 +1701,10 @@ const make = Effect.gen(function* () {
   });
 
   return ThreadManagementService.of({
+    readHandoffRecords: orchestrator.getThreadRecords,
+    readHandoffChildIds: Effect.fn("ThreadManagementService.readHandoffChildIds")((threadId) =>
+      orchestrator.listAppOwnedChildThreadIds(threadId, true),
+    ),
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(

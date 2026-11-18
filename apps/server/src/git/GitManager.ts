@@ -136,6 +136,10 @@ export class GitManager extends Context.Service<
     readonly status: (
       input: VcsStatusInput,
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
+    readonly observeHandoffWorkspace: (
+      cwd: string,
+      checkpointRef: string | null,
+    ) => Effect.Effect<import("@t3tools/contracts").HandoffWorkspace, GitCommandError>;
     readonly localStatus: (
       input: VcsStatusInput,
       options?: GitLocalStatusOptions,
@@ -3758,6 +3762,9 @@ export const make = Effect.gen(function* () {
   );
 
   return GitManager.of({
+    observeHandoffWorkspace: Effect.fn("GitManager.observeHandoffWorkspace")((cwd, checkpointRef) =>
+      observeHandoffWorkspace(gitCore, cwd, checkpointRef),
+    ),
     createWorktree,
     localStatus,
     remoteStatus,
@@ -3777,3 +3784,85 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(GitManager, make);
+
+/** Fresh local reads only. Exported for deterministic integration at the actual Git owner seam. */
+export const observeHandoffWorkspace = Effect.fn("GitManager.observeHandoffWorkspace")(function* (
+  git: Pick<GitVcsDriver.GitVcsDriver["Service"], "execute">,
+  cwd: string,
+  checkpointRef: string | null,
+) {
+  const read = (args: ReadonlyArray<string>) =>
+    git
+      .execute({
+        operation: "GitManager.observeHandoffWorkspace",
+        cwd,
+        args,
+        env: { GIT_OPTIONAL_LOCKS: "0" },
+        maxOutputBytes: 10_000_000,
+      })
+      .pipe(
+        Effect.flatMap((result) =>
+          result.stdoutTruncated
+            ? Effect.fail(
+                new GitCommandError({
+                  operation: "GitManager.observeHandoffWorkspace",
+                  command: "git",
+                  cwd,
+                  detail: "Incomplete Git observation",
+                }),
+              )
+            : Effect.succeed(result.stdout),
+        ),
+      );
+  const root = (yield* read(["rev-parse", "--show-toplevel"])).replace(/\r?\n$/, "");
+  const branchValue = (yield* read(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+  const head = (yield* read(["rev-parse", "--verify", "HEAD"])).trim();
+  const status = yield* read(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const indexDiff = yield* read(["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"]);
+  const worktreeDiff = yield* read(["diff", "--binary", "--no-ext-diff", "--no-textconv"]);
+  const untracked = yield* read(["ls-files", "--others", "--exclude-standard", "-z"]);
+  const submodules = yield* read(["ls-files", "--stage"]);
+  const hasSubmodules = submodules.split("\n").some((line) => line.startsWith("160000 "));
+  let checkpointError: string | null = null;
+  const checkpoint =
+    checkpointRef === null
+      ? null
+      : yield* Effect.gen(function* () {
+          const commit = (yield* read([
+            "rev-parse",
+            "--verify",
+            `${checkpointRef}^{commit}`,
+          ])).trim();
+          const diff = yield* read([
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            commit,
+            "--",
+          ]);
+          return { commit, diff };
+        }).pipe(
+          Effect.catchCause(() => {
+            checkpointError = "Checkpoint verification read failed";
+            return Effect.succeed(null);
+          }),
+        );
+  const checkpointCommit = checkpoint?.commit ?? null;
+  const checkpointDiff = checkpoint?.diff ?? null;
+  return {
+    root,
+    branch: branchValue === "HEAD" ? null : branchValue,
+    head,
+    status,
+    indexDiff,
+    worktreeDiff,
+    untracked,
+    submodules,
+    checkpointRef,
+    checkpointCommit,
+    checkpointError,
+    checkpointMatches:
+      checkpointDiff === null ? null : checkpointDiff === "" && untracked === "" && !hasSubmodules,
+  };
+});
