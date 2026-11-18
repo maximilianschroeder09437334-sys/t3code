@@ -12,6 +12,13 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Projects from "./ProjectStore.ts";
+import * as ManagedFolders from "../project/ManagedProjectFolders.ts";
+import {
+  contextRolloverLimitMessage,
+  contextRolloverInstructions,
+  contextHandoffNudgeMessage,
+} from "./ContextRollover.ts";
 import * as CoreHandoff from "./CoreHandoff.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as Threads from "./ThreadManagementService.ts";
@@ -294,4 +301,112 @@ it.effect.each(["none", "rejected", "mismatched", "accepted-bad-ack", "read-fail
         assert.equal((yield* (yield* ActivityLedger.ActivityLedger).list({ limit: 10 })).length, 0);
       }).pipe(Effect.provide(dependencies));
     }).pipe(Effect.provide(storage)),
+);
+
+it("names the handoff tool explicitly", () => {
+  const instructions = contextRolloverInstructions("cap-run", "feature");
+  assert.include(instructions, 'contextLimitWork.capRunId="cap-run"');
+  assert.include(instructions, 'state.branch="feature"');
+  for (const notice of [contextRolloverLimitMessage, contextHandoffNudgeMessage]) {
+    assert.include(
+      notice,
+      "Before submitting, commit and push your work to GitHub where the project allows it, and record the pushed SHA in state.commits.",
+    );
+  }
+  assert.include(contextHandoffNudgeMessage, "the successor starts automatically");
+  assert.include(
+    contextRolloverLimitMessage,
+    "call the t3_handoff_submit tool (not a thread message)",
+  );
+});
+it.effect("explains the expected handoff branch", () =>
+  CoreHandoff.submitHandoff(sourceId, {
+    ...handoff,
+    state: { ...handoff.state, branch: "wrong" },
+  }).pipe(
+    Effect.flip,
+    Effect.tap((error) => Effect.sync(() => assert.include(error.message, '"feature"'))),
+    Effect.provide(
+      Layer.merge(
+        storage,
+        Layer.mock(Threads.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(source()),
+        }),
+      ),
+    ),
+  ),
+);
+it.effect.each(["project", "scratch", "missing"] as const)(
+  "resolves a %s target without changing source guards",
+  (kind) =>
+    Effect.gen(function* () {
+      const target =
+        kind === "scratch"
+          ? { type: "scratch" as const }
+          : {
+              type: "project" as const,
+              projectId: ProjectId.make(kind === "missing" ? "missing" : "other"),
+            };
+      const result = yield* CoreHandoff.submitHandoff(sourceId, {
+        ...handoff,
+        target,
+      } as HandoffInput).pipe(Effect.result);
+      if (kind === "missing") {
+        assert.equal(result._tag, "Failure");
+        return;
+      }
+      assert.equal(result._tag, "Success");
+      const row = Option.getOrThrow(
+        yield* (yield* EffectOutbox.EffectOutboxV2).get(CoreHandoff.handoffId(sourceId)),
+      );
+      if (row.request.type !== "thread.handoff") return assert.fail();
+      assert.equal(row.request.projectId, projectId);
+      assert.equal(row.request.branch, "feature");
+      assert.deepEqual((row.request as HandoffRequest & { target?: unknown }).target, {
+        projectId: ProjectId.make(kind === "scratch" ? "scratch" : "other"),
+        workspaceRoot: "/target",
+        branch: null,
+      });
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          storage,
+          Layer.mock(Threads.ThreadManagementService)({
+            getThreadRecords: () => Effect.succeed(source()),
+          }),
+          Layer.mock(Projects.ProjectStoreV2)({
+            get: (id) =>
+              Effect.succeed(
+                id === "missing"
+                  ? Option.none()
+                  : Option.some({ projectId: id, workspaceRoot: "/target" } as never),
+              ),
+          }),
+          Layer.mock(ManagedFolders.ManagedProjectFolders)({
+            namedProjectsRoot: "/unused",
+            ensureScratchProject: Effect.succeed({
+              projectId: ProjectId.make("scratch") as ProjectId,
+            }),
+          }),
+        ),
+      ),
+    ),
+);
+
+it.effect("accepts an untracked source with no known Git branch", () =>
+  CoreHandoff.submitHandoff(sourceId, {
+    ...handoff,
+    state: { ...handoff.state, branch: null },
+  }).pipe(
+    Effect.tap((result) => Effect.sync(() => assert.isTrue(result.accepted))),
+    Effect.provide(
+      Layer.merge(
+        storage,
+        Layer.mock(Threads.ThreadManagementService)({
+          getThreadRecords: () =>
+            Effect.succeed({ ...source(), thread: { ...source().thread, branch: null } }),
+        }),
+      ),
+    ),
+  ),
 );

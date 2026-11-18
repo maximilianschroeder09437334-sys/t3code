@@ -1,3 +1,4 @@
+import * as ManagedFolders from "../../../project/ManagedProjectFolders.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as Git from "../../../git/GitManager.ts";
 import * as Sessions from "../../../orchestration-v2/ProviderSessionManager.ts";
@@ -62,6 +63,7 @@ const layer = McpHttpServer.layerHandoffToolkit.pipe(
   Layer.provide(
     Layer.mergeAll(
       NodeCrypto.layer,
+      Layer.mock(ManagedFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
       Projects.layer,
       Layer.mock(Git.GitManager)({}),
       Layer.mock(Sessions.ProviderSessionManagerV2)({}),

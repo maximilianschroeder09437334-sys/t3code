@@ -1,3 +1,5 @@
+import * as Projects from "./ProjectStore.ts";
+import * as ManagedFolders from "../project/ManagedProjectFolders.ts";
 import * as Receipts from "./CommandReceiptStore.ts";
 import { isContextRolloverLimitNotice } from "./ContextRollover.ts";
 import {
@@ -94,14 +96,37 @@ export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
     thread.linkOrigin !== undefined
   )
     return yield* refuse("This source thread cannot submit a local core handoff.");
-  if (thread.branch === null || thread.branch !== handoff.state.branch)
-    return yield* refuse("The handoff branch must match the source thread's known branch.");
+  if (thread.branch !== handoff.state.branch)
+    return yield* refuse(
+      `The handoff branch must match the source thread's known branch; expected "${thread.branch}".`,
+    );
+  let target: HandoffRequest["target"];
+  if (handoff.target !== undefined && handoff.target.type !== "same") {
+    const projectsOwner = yield* Effect.serviceOption(Projects.ProjectStoreV2);
+    if (Option.isNone(projectsOwner)) return yield* refuse("Target project owner unavailable.");
+    const projects = projectsOwner.value;
+    const managed = yield* Effect.serviceOption(ManagedFolders.ManagedProjectFolders);
+    if (handoff.target.type === "scratch" && Option.isNone(managed))
+      return yield* refuse("Scratch workspace is unavailable.");
+    const targetId =
+      handoff.target.type === "project"
+        ? handoff.target.projectId
+        : (yield* Option.getOrThrow(managed).ensureScratchProject.pipe(
+            Effect.mapError(() => refuse("Scratch workspace is unavailable.")),
+          )).projectId;
+    const project = yield* projects
+      .get(targetId)
+      .pipe(Effect.mapError(() => refuse("Target project could not be read.")));
+    if (Option.isNone(project)) return yield* refuse("Target project does not exist.");
+    target = { projectId: targetId, workspaceRoot: project.value.workspaceRoot, branch: null };
+  }
   const barrier = contextLimitWorkBarrier(turnItems, handoff.contextLimitWork);
   if (barrier?.blocker) return yield* refuse(barrier.blocker);
   const id = handoffId(sourceThreadId);
   const request: HandoffRequest = {
     type: "thread.handoff",
     handoff,
+    ...(target === undefined ? {} : { target }),
     projectId: thread.projectId,
     sourceThreadId,
     successorThreadId: ThreadId.make(`${id}:successor`),

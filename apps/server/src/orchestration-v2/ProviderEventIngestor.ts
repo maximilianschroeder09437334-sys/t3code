@@ -57,7 +57,7 @@ import {
   CONTEXT_HANDOFF_NUDGE,
   CONTEXT_ROLLOVER_LIMIT,
   contextHandoffNudgeMessage,
-  contextRolloverLimitMessage,
+  contextRolloverInstructions,
   contextRolloverNoticeId,
 } from "./ContextRollover.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -466,7 +466,12 @@ export const layer: Layer.Layer<
               updatedAt: now,
               type: "system_notice",
               level: "warning",
-              message: capped ? contextRolloverLimitMessage : contextHandoffNudgeMessage,
+              message: capped
+                ? contextRolloverInstructions(
+                    run.id,
+                    (yield* projections.getThread(input.threadId)).branch,
+                  )
+                : contextHandoffNudgeMessage,
             },
           }),
         );

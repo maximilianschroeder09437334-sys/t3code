@@ -1,4 +1,8 @@
-import { contextRolloverNoticeId, contextRolloverFollowupId } from "./ContextRollover.ts";
+import {
+  CONTEXT_HANDOFF_NUDGE,
+  contextRolloverNoticeId,
+  contextRolloverFollowupId,
+} from "./ContextRollover.ts";
 import { OrchestrationV2Run as OrchestrationV2RunSchema } from "@t3tools/contracts";
 import * as HandoffIds from "@t3tools/provider-core/server/IdAllocator";
 import * as TransferAdmission from "./HandoffTransferAdmission.ts";
@@ -15856,7 +15860,22 @@ it.layer(Layer.empty)(
         }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
     );
 
-    it.effect.each(["manual", "automatic", "tracked-background-task", "lost-coverage"] as const)(
+    it.effect.each([
+      "manual",
+      "automatic",
+      "tracked-background-task",
+      "lost-coverage",
+      "untracked-workspace",
+      "project-target",
+      "scratch-target",
+      "settled-stale",
+      "archived-stale",
+      "newer-run-stale",
+      "taken-successor",
+      "voluntary-nudge",
+      "below-nudge",
+      "voluntary-busy",
+    ] as const)(
       "guarded context handoff completion worker uses %s release without another source turn",
       (mode) =>
         Effect.gen(function* () {
@@ -15983,8 +16002,95 @@ it.layer(Layer.empty)(
               },
             ],
           });
-          yield* CoreHandoff.submitHandoff(sourceId, {
+          if (mode === "voluntary-nudge" || mode === "below-nudge" || mode === "voluntary-busy") {
+            const current = yield* f.orchestrator.getThreadProjection(sourceId);
+            const p = current.providerThreads[0]!;
+            const native = {
+              ...p,
+              nativeThreadRef: {
+                driver: p.driver,
+                nativeId: "voluntary-native",
+                strength: "strong" as const,
+              },
+              pendingBackgroundTasks:
+                mode === "voluntary-busy"
+                  ? [{ kind: "command" as const, taskId: "busy", description: "Active work" }]
+                  : [],
+            };
+            const cap = current.turnItems.find((item) => item.type === "system_notice")!;
+            yield* f.sink.write({
+              events: [
+                {
+                  id: EventId.make("voluntary-provider"),
+                  type: "provider-thread.updated",
+                  threadId: sourceId,
+                  occurredAt: now,
+                  payload: native,
+                },
+                {
+                  id: EventId.make("voluntary-notice"),
+                  type: "turn-item.updated",
+                  threadId: sourceId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: {
+                    ...cap,
+                    id: cap.id,
+                    type: "system_notice",
+                    level: "warning",
+                    message: "Nudge",
+                    runId: null,
+                  },
+                },
+              ],
+            });
+            if (mode !== "below-nudge")
+              yield* f.sink.write({
+                events: [
+                  {
+                    id: EventId.make("nudge-notice"),
+                    type: "turn-item.updated",
+                    threadId: sourceId,
+                    runId: run.id,
+                    occurredAt: now,
+                    payload: {
+                      ...cap,
+                      id: contextRolloverNoticeId(native, CONTEXT_HANDOFF_NUDGE)!,
+                      type: "system_notice",
+                      level: "warning",
+                      message: "Nudge",
+                    },
+                  },
+                ],
+              });
+          }
+          const targetId = ProjectId.make("handoff-target");
+          const targetRoot = f.cwd + "/target";
+          const crossTarget = mode === "project-target" || mode === "scratch-target";
+          if (crossTarget) {
+            yield* seedProject({
+              projectId: targetId,
+              title: "Target",
+              workspaceRoot: targetRoot,
+              defaultModelSelection: f.selection,
+              createdAt: DateTime.formatIso(now),
+            });
+          }
+          if (mode === "untracked-workspace") {
+            f.workspace.tracking = "untracked workspace";
+            f.workspace.branch = null;
+            f.workspace.head = "";
+          }
+          const submission = CoreHandoff.submitHandoff(sourceId, {
             ...f.request.handoff,
+            ...(crossTarget
+              ? {
+                  target:
+                    mode === "scratch-target"
+                      ? { type: "scratch" as const }
+                      : { type: "project" as const, projectId: targetId },
+                }
+              : {}),
             contextLimitWork: {
               capRunId: run.id,
               results: [
@@ -15996,6 +16102,66 @@ it.layer(Layer.empty)(
               ],
             },
           });
+          yield* submission.pipe(
+            Effect.provide(
+              Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                namedProjectsRoot: "/unused",
+                ensureScratchProject: Effect.succeed({ projectId: targetId }),
+              }),
+            ),
+          );
+          if (mode === "settled-stale" || mode === "archived-stale") {
+            const source = (yield* f.orchestrator.getThreadProjection(sourceId)).thread;
+            yield* f.sink.write({
+              events: [
+                {
+                  id: EventId.make("stale-source"),
+                  type: "thread.metadata-updated",
+                  threadId: sourceId,
+                  occurredAt: now,
+                  payload: {
+                    ...source,
+                    ...(mode === "settled-stale"
+                      ? { settledOverride: "settled" as const }
+                      : { archivedAt: now }),
+                  },
+                },
+              ],
+            });
+          }
+          if (mode === "newer-run-stale")
+            yield* f.sink.write({
+              events: [
+                {
+                  id: EventId.make("newer-source"),
+                  type: "run.created",
+                  threadId: sourceId,
+                  occurredAt: now,
+                  payload: {
+                    ...run,
+                    id: RunId.make("newer-source"),
+                    ordinal: 2,
+                    status: "completed",
+                    startedAt: DateTime.add(now, { seconds: 1 }),
+                    completedAt: DateTime.add(now, { seconds: 1 }),
+                  },
+                },
+              ],
+            });
+          if (mode === "taken-successor") {
+            const source = (yield* f.orchestrator.getThreadProjection(sourceId)).thread;
+            yield* f.sink.write({
+              events: [
+                {
+                  id: EventId.make("taken-successor"),
+                  type: "thread.metadata-updated",
+                  threadId: ThreadId.make(`core-handoff:${sourceId}:successor`),
+                  occurredAt: now,
+                  payload: { ...source, id: ThreadId.make(`core-handoff:${sourceId}:successor`) },
+                },
+              ],
+            });
+          }
           yield* f.worker.drain();
           assert.isEmpty((yield* f.orchestrator.getThreadProjection(sourceId)).runtimeRequests);
           yield* f.sink.write({
@@ -16011,6 +16177,20 @@ it.layer(Layer.empty)(
           });
           yield* f.worker.drain();
           const pending = yield* f.orchestrator.getThreadProjection(sourceId);
+          if (
+            [
+              "settled-stale",
+              "archived-stale",
+              "newer-run-stale",
+              "taken-successor",
+              "voluntary-busy",
+            ].includes(mode)
+          ) {
+            assert.isEmpty(pending.runtimeRequests);
+            assert.isUndefined(pending.thread.handoffTransfer);
+            assert.isEmpty(f.starts);
+            return;
+          }
           if (mode === "tracked-background-task") {
             const snapshot = yield* queryHandoffReadiness(sourceId);
             assert.equal(snapshot.classification, "known_blocked");
@@ -16028,7 +16208,7 @@ it.layer(Layer.empty)(
           assert.isEmpty(pending.messages);
           const review = pending.runtimeRequests[0]!.responseCapability;
           assert.equal(review.type, "handoff");
-          if (mode !== "manual") {
+          if (mode !== "manual" && mode !== "below-nudge") {
             assert.equal(pending.runtimeRequests[0]!.decision, "accept");
           } else {
             assert.isTrue(
@@ -16068,8 +16248,13 @@ it.layer(Layer.empty)(
           assert.lengthOf(successor.runs, 1);
           assert.lengthOf(successor.messages, 1);
           assert.deepEqual(successor.thread.modelSelection, f.selection);
-          assert.equal(successor.thread.worktreePath, f.cwd);
-          assert.equal(successor.thread.branch, "feature");
+          if (crossTarget) {
+            assert.equal(successor.thread.projectId, targetId);
+            assert.isNull(successor.thread.worktreePath);
+            assert.include(successor.messages[0]!.text, '"target"');
+          }
+          assert.equal(successor.thread.worktreePath, crossTarget ? null : f.cwd);
+          assert.equal(successor.thread.branch, crossTarget ? null : "feature");
           yield* f.sink.write({
             events: [
               {

@@ -255,6 +255,29 @@ const make = Effect.gen(function* () {
         parked.value.request.type !== "thread.handoff"
       )
         return yield* failed(sourceId, "accepted-decision");
+      if (
+        source.archivedAt !== null ||
+        (!["released", "started"].includes(source.handoffTransfer?.state ?? "") &&
+          (source.settledOverride === "settled" || source.settledAt !== null)) ||
+        (source.handoffTransfer === undefined &&
+          (yield* projections.getThreadShell(parked.value.request.successorThreadId)) !== null)
+      )
+        return yield* failed(sourceId, "stale-source-or-successor");
+      const sourceRuns = yield* projections.getThreadRecords(sourceId, ["runs"]);
+      if (
+        sourceRuns.runs.some(
+          (run) =>
+            run.startedAt !== null &&
+            DateTime.toEpochMillis(run.startedAt) > Date.parse(parked.value.createdAt),
+        )
+      )
+        return yield* failed(sourceId, "newer-source-run");
+      if (parked.value.request.target !== undefined) {
+        const target = parked.value.request.target;
+        const project = yield* projects.get(target.projectId);
+        if (Option.isNone(project) || project.value.workspaceRoot !== target.workspaceRoot)
+          return yield* failed(sourceId, "target-project-changed");
+      }
       const review = decision.responseCapability;
       const request = parked.value.request;
       if (
@@ -580,9 +603,11 @@ const make = Effect.gen(function* () {
         ]);
         if (
           successor.thread.handoffSourceThreadId !== sourceId ||
-          successor.thread.projectId !== request.projectId ||
-          successor.thread.branch !== request.branch ||
-          successor.thread.worktreePath !== request.worktreePath ||
+          successor.thread.projectId !== (request.target?.projectId ?? request.projectId) ||
+          successor.thread.branch !==
+            (request.target === undefined ? request.branch : request.target.branch) ||
+          successor.thread.worktreePath !==
+            (request.target === undefined ? request.worktreePath : null) ||
           !modelSelectionsEqual(successor.thread.modelSelection, request.modelSelection) ||
           successor.thread.runtimeMode !== request.runtimeMode ||
           successor.thread.interactionMode !== request.interactionMode ||

@@ -6,12 +6,19 @@ import { RuntimeMode, ProviderInteractionMode } from "./providerPolicy.ts";
 
 /** The serialized payload, including field names, must fit in 6000 UTF-16 characters. */
 export const HandoffInput = Schema.Struct({
+  target: Schema.optionalKey(
+    Schema.Union([
+      Schema.Struct({ type: Schema.Literal("same") }),
+      Schema.Struct({ type: Schema.Literal("project"), projectId: ProjectId }),
+      Schema.Struct({ type: Schema.Literal("scratch") }),
+    ]),
+  ),
   goal: TrimmedNonEmptyString,
   decisions: Schema.Array(
     Schema.Struct({ decision: TrimmedNonEmptyString, why: TrimmedNonEmptyString }),
   ),
   state: Schema.Struct({
-    branch: TrimmedNonEmptyString,
+    branch: Schema.NullOr(TrimmedNonEmptyString),
     commits: Schema.Array(TrimmedNonEmptyString),
     verified: Schema.Array(TrimmedNonEmptyString),
   }),
@@ -39,6 +46,13 @@ export type HandoffInput = typeof HandoffInput.Type;
 
 export const HandoffRequest = Schema.Struct({
   type: Schema.Literal("thread.handoff"),
+  target: Schema.optionalKey(
+    Schema.Struct({
+      projectId: ProjectId,
+      workspaceRoot: Schema.String,
+      branch: Schema.NullOr(Schema.String),
+    }),
+  ),
   handoff: HandoffInput,
   projectId: ProjectId,
   sourceThreadId: ThreadId,
@@ -47,12 +61,13 @@ export const HandoffRequest = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   worktreePath: Schema.NullOr(Schema.String),
-  branch: Schema.String,
+  branch: Schema.NullOr(Schema.String),
 });
 export type HandoffRequest = typeof HandoffRequest.Type;
 
 // Handoff-only observational contract; never an execution authorization.
 export const HandoffWorkspace = Schema.Struct({
+  tracking: Schema.optionalKey(Schema.Literal("untracked workspace")),
   root: Schema.String,
   branch: Schema.NullOr(Schema.String),
   head: Schema.String,

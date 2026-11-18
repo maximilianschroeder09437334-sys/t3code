@@ -212,6 +212,8 @@ import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffB
 import {
   CONTEXT_ROLLOVER_LIMIT,
   contextRolloverLimitMessage,
+  contextRolloverInstructions,
+  hasVoluntaryHandoffNudge,
   contextRolloverFollowupId,
   contextRolloverNoticeId,
 } from "./ContextRollover.ts";
@@ -6931,8 +6933,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           id: forcedItemId,
           ordinal: yield* nextTurnItemOrdinal(projection),
           title: "Relay handoff required",
-          message:
-            "One automatic Relay follow-up was issued for this native session. Submit the handoff now; if no handoff is submitted, this source remains parked for manual follow-up.",
+          message: contextRolloverInstructions(cap.runId, projection.thread.branch),
           updatedAt: now,
         },
       });
@@ -15691,15 +15692,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         if (source.handoffSourceThreadId !== undefined) {
           const own = yield* projectionStore
-            .getThreadRecords(source.id, ["providerThreads", "providerTurns", "runs", "attempts"])
+            .getThreadRecords(source.id, [
+              "providerThreads",
+              "providerTurns",
+              "runs",
+              "attempts",
+              "turnItems",
+            ])
             .pipe(mapDispatchError(command));
           const provider = own.providerThreads.find(
             (value) => value.id === source.activeProviderThreadId,
           );
           if (
             provider === undefined ||
-            (latestNativeContextUsage(own, provider)?.usage.usedTokens ?? 0) <
-              CONTEXT_ROLLOVER_LIMIT
+            ((latestNativeContextUsage(own, provider)?.usage.usedTokens ?? 0) <
+              CONTEXT_ROLLOVER_LIMIT &&
+              !hasVoluntaryHandoffNudge(own))
           )
             return yield* new OrchestratorDispatchError({
               commandId: command.commandId,
@@ -15724,13 +15732,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           type: "thread.create",
           commandId: command.commandId,
           threadId: request.successorThreadId,
-          projectId: request.projectId,
+          projectId: request.target?.projectId ?? request.projectId,
           title: source.title,
           modelSelection: request.modelSelection,
           runtimeMode: request.runtimeMode,
           interactionMode: request.interactionMode,
-          branch: request.branch,
-          worktreePath: request.worktreePath,
+          branch: request.target === undefined ? request.branch : request.target.branch,
+          worktreePath: request.target === undefined ? request.worktreePath : null,
           createdBy: "agent",
           creationSource: "mcp",
           agentExecutionIntent: {
@@ -15743,13 +15751,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             text: yield* encodeCoreHandoff(request.handoff).pipe(mapDispatchError(command)),
             attachments: [],
             workspaceStrategy:
-              request.worktreePath === null
-                ? { type: "root", branch: request.branch }
-                : {
-                    type: "existing_worktree",
-                    worktreePath: request.worktreePath,
-                    branch: request.branch,
-                  },
+              request.target !== undefined
+                ? {
+                    type: "root",
+                    ...(request.target.branch === null ? {} : { branch: request.target.branch }),
+                  }
+                : request.worktreePath === null
+                  ? { type: "root", ...(request.branch === null ? {} : { branch: request.branch }) }
+                  : {
+                      type: "existing_worktree",
+                      worktreePath: request.worktreePath,
+                      ...(request.branch === null ? {} : { branch: request.branch }),
+                    },
           },
         };
         yield* dispatchThreadCreate(create, events);
@@ -16890,7 +16903,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             messageId: MessageId.make(String(itemId)),
             createdBy: "agent",
             creationSource: "server",
-            text: "Submit the Relay handoff now. This native session reached 250,000 context tokens and tracked work has finished. Save the results in the handoff; do not resume implementation or start delegates.",
+            text: contextRolloverInstructions(
+              (yield* projectionStore.getTurnItem({ threadId, itemId: capId }))?.runId ?? run.id,
+              current.thread.branch,
+            ),
             attachments: [],
             modelSelection: run.modelSelection,
             dispatchMode: { type: "start_immediately" },

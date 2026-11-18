@@ -71,7 +71,7 @@ import {
   CONTEXT_HANDOFF_NUDGE,
   CONTEXT_ROLLOVER_LIMIT,
   contextHandoffNudgeMessage,
-  contextRolloverLimitMessage,
+  contextRolloverInstructions,
   contextRolloverNoticeId,
 } from "./ContextRollover.ts";
 import { unsentManualContinuationSource } from "./manualContinuation.ts";
@@ -1979,7 +1979,10 @@ export const layer: Layer.Layer<
                 itemId: capId,
               });
         if (cap !== null || (measured?.usage.usedTokens ?? 0) >= CONTEXT_ROLLOVER_LIMIT) {
-          rolloverContext = contextRolloverLimitMessage;
+          rolloverContext = contextRolloverInstructions(
+            cap?.runId ?? run.id,
+            projection.thread.branch,
+          );
         } else {
           const nudgeId = contextRolloverNoticeId(runningProviderThread, CONTEXT_HANDOFF_NUDGE);
           const previousRun = projection.runs.findLast(

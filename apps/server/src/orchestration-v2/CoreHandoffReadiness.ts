@@ -1,5 +1,6 @@
 import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffBudget";
-import { CONTEXT_ROLLOVER_LIMIT } from "./ContextRollover.ts";
+import { CONTEXT_ROLLOVER_LIMIT, hasVoluntaryHandoffNudge } from "./ContextRollover.ts";
+import * as DateTime from "effect/DateTime";
 import * as Digest from "effect/crypto/Digest";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import {
@@ -133,10 +134,10 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       if (sourceRecords.thread.handoffStopCommandId !== undefined)
         blockers.push("The handoff was explicitly stopped");
       if (
-        sourceRecords.thread.handoffTransfer === undefined &&
-        (sourceRecords.thread.archivedAt !== null ||
-          sourceRecords.thread.settledOverride === "settled" ||
-          sourceRecords.thread.settledAt !== null)
+        sourceRecords.thread.archivedAt !== null ||
+        (!["released", "started"].includes(sourceRecords.thread.handoffTransfer?.state ?? "") &&
+          (sourceRecords.thread.settledOverride === "settled" ||
+            sourceRecords.thread.settledAt !== null))
       )
         blockers.push("The source was explicitly archived or settled");
     }
@@ -189,10 +190,11 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       );
       if (
         provider === undefined ||
-        (latestNativeContextUsage(sourceRecords, provider)?.usage.usedTokens ?? 0) <
-          CONTEXT_ROLLOVER_LIMIT
+        ((latestNativeContextUsage(sourceRecords, provider)?.usage.usedTokens ?? 0) <
+          CONTEXT_ROLLOVER_LIMIT &&
+          !hasVoluntaryHandoffNudge(sourceRecords))
       )
-        blockers.push("Successor must reach the cap on its own native session");
+        blockers.push("Successor must reach the nudge on its own native session");
       const predecessor = yield* readRecords(sourceRecords.thread.handoffSourceThreadId);
       if (
         predecessor?.thread.handoffTransfer?.state !== "started" ||
@@ -206,6 +208,17 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
         : null;
     if (row !== null && Option.isSome(row) && parkedRequest === null)
       blockers.push("Durable request has the wrong effect type");
+    if (
+      row !== null &&
+      Option.isSome(row) &&
+      sourceRecords !== null &&
+      sourceRecords.runs.some(
+        (run) =>
+          run.startedAt !== null &&
+          DateTime.toEpochMillis(run.startedAt) > Date.parse(row.value.createdAt),
+      )
+    )
+      blockers.push("Source started a newer run after the handoff request");
     const cap =
       sourceRecords === null
         ? null
@@ -227,7 +240,7 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
             "physical Git/checkpoint",
             git.observeHandoffWorkspace(cwd, checkpoint?.ref ?? null),
           );
-    if (workspace !== null) {
+    if (workspace !== null && workspace.tracking !== "untracked workspace") {
       if (workspace.checkpointError !== null) unknowns.push(workspace.checkpointError);
       if (workspace.branch !== sourceRecords?.thread.branch)
         blockers.push("Physical branch differs from source metadata");
@@ -350,10 +363,20 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
         manualReview.push(...limitations.map((item) => `${provider.id}: ${item}`));
       }
     }
-    // Automatic context-limit release accepts the risk of detached OS processes outside T3's observations.
-    if (cap === null) {
-      manualReview.push("Automatic release is limited to context-limit handoffs.");
+    // Automatic release after the nudge accepts detached OS work outside T3's observations.
+    if (
+      cap === null &&
+      !hasVoluntaryHandoffNudge(
+        sourceRecords ?? {
+          thread: { activeProviderThreadId: null },
+          providerThreads: [],
+          turnItems: [],
+        },
+      )
+    ) {
+      manualReview.push("Automatic release requires the 150k nudge or a context-limit handoff.");
     } else if (
+      cap !== null &&
       !sourceRecords?.runs.some(
         (run) =>
           run.id === parkedRequest?.handoff.contextLimitWork?.capRunId &&

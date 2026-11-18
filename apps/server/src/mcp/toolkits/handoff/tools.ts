@@ -1,3 +1,4 @@
+import * as ManagedFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Digest from "effect/crypto/Digest";
 import { HandoffReadiness } from "@t3tools/contracts";
 import * as Git from "../../../git/GitManager.ts";
@@ -90,7 +91,7 @@ export const HandoffToolkit = Toolkit.make(
   }).annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients),
   Tool.make("t3_handoff_submit", {
     description:
-      "Submit a durable handoff for your own authenticated thread. Include goal, decisions with why, state (branch, commits, verified), deadEnds, next, and pointers; the complete JSON must be at most 6000 characters. After a context-limit notice, wait for all foreground, background and detached work and save the results first. Include contextLimitWork with the run ID from the cap notice and a result for each job, including the commandItemId when visible. Use an empty results list only after verifying there were no outstanding jobs. The first submission wins. The request is parked awaiting authoritative ownership transfer; no new successor is created or started. The source remains open. Acceptance preserves the request only and is not delivery or ownership transfer.",
+      "Submit a durable handoff for your own authenticated thread. Include goal, decisions with why, state (branch, commits, verified), deadEnds, next, and pointers; the complete JSON must be at most 6000 characters. After a context-limit notice, wait for all foreground, background and detached work and save the results first. Include contextLimitWork with the run ID from the cap notice and a result for each job, including the commandItemId when visible. Use an empty results list only after verifying there were no outstanding jobs. Optional target: omit or {type: same} for this project; {type: project, projectId} for an existing project root; {type: scratch} for No project. The brief includes this target. After the 150k nudge, voluntary handoffs start automatically under the same readiness guards; below 150k, manual approval remains required. Before submitting, commit and push your work to GitHub where the project allows it, and record the pushed SHA in state.commits. The first submission wins. Once source guards pass, the successor starts automatically in the target workspace. Untracked workspace observation and untracked detached OS processes are accepted risks. The source remains open. Acceptance preserves the request only and is not delivery or ownership transfer.",
     parameters: HandoffInput,
     success: Schema.Struct({
       accepted: Schema.Boolean,
@@ -104,6 +105,8 @@ export const HandoffToolkit = Toolkit.make(
       McpInvocationContext.McpInvocationContext,
       ThreadManagement.ThreadManagementService,
       EffectOutbox.EffectOutboxV2,
+      Projects.ProjectStoreV2,
+      ManagedFolders.ManagedProjectFolders,
     ],
   }).annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients),
 );

@@ -3791,6 +3791,22 @@ export const observeHandoffWorkspace = Effect.fn("GitManager.observeHandoffWorks
   cwd: string,
   checkpointRef: string | null,
 ) {
+  const untrackedWorkspace = {
+    tracking: "untracked workspace" as const,
+    root: cwd,
+    branch: null,
+    head: "",
+    status: "",
+    indexDiff: "",
+    worktreeDiff: "",
+    untracked: "",
+    submodules: "",
+    checkpointRef,
+    checkpointCommit: null,
+    checkpointMatches: null,
+    checkpointError: null,
+  };
+  let bytes = 0;
   const read = (args: ReadonlyArray<string>) =>
     git
       .execute({
@@ -3798,71 +3814,107 @@ export const observeHandoffWorkspace = Effect.fn("GitManager.observeHandoffWorks
         cwd,
         args,
         env: { GIT_OPTIONAL_LOCKS: "0" },
-        maxOutputBytes: 10_000_000,
+        maxOutputBytes: 1_000_000,
+        allowNonZeroExit: true,
       })
       .pipe(
-        Effect.flatMap((result) =>
-          result.stdoutTruncated
-            ? Effect.fail(
-                new GitCommandError({
-                  operation: "GitManager.observeHandoffWorkspace",
-                  command: "git",
-                  cwd,
-                  detail: "Incomplete Git observation",
-                }),
-              )
-            : Effect.succeed(result.stdout),
+        Effect.flatMap(
+          (
+            result,
+          ): Effect.Effect<
+            string,
+            GitCommandError | { readonly _tag: "UntrackedHandoffWorkspace" }
+          > => {
+            bytes += Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr);
+            if (result.stdoutTruncated || result.stderrTruncated || bytes > 1_000_000)
+              return Effect.fail({ _tag: "UntrackedHandoffWorkspace" as const });
+            if (
+              result.exitCode !== 0 &&
+              ((args[0] === "rev-parse" &&
+                args[1] === "--show-toplevel" &&
+                /not a git repository/i.test(result.stderr)) ||
+                (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "HEAD"))
+            )
+              return Effect.fail({ _tag: "UntrackedHandoffWorkspace" as const });
+            return result.exitCode !== 0
+              ? Effect.fail(
+                  new GitCommandError({
+                    operation: "GitManager.observeHandoffWorkspace",
+                    command: "git",
+                    cwd,
+                    detail: "Incomplete Git observation",
+                  }),
+                )
+              : Effect.succeed(result.stdout);
+          },
         ),
       );
-  const root = (yield* read(["rev-parse", "--show-toplevel"])).replace(/\r?\n$/, "");
-  const branchValue = (yield* read(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
-  const head = (yield* read(["rev-parse", "--verify", "HEAD"])).trim();
-  const status = yield* read(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  const indexDiff = yield* read(["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"]);
-  const worktreeDiff = yield* read(["diff", "--binary", "--no-ext-diff", "--no-textconv"]);
-  const untracked = yield* read(["ls-files", "--others", "--exclude-standard", "-z"]);
-  const submodules = yield* read(["ls-files", "--stage"]);
-  const hasSubmodules = submodules.split("\n").some((line) => line.startsWith("160000 "));
-  let checkpointError: string | null = null;
-  const checkpoint =
-    checkpointRef === null
-      ? null
-      : yield* Effect.gen(function* () {
-          const commit = (yield* read([
-            "rev-parse",
-            "--verify",
-            `${checkpointRef}^{commit}`,
-          ])).trim();
-          const diff = yield* read([
-            "diff",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            commit,
-            "--",
-          ]);
-          return { commit, diff };
-        }).pipe(
-          Effect.catchCause(() => {
-            checkpointError = "Checkpoint verification read failed";
-            return Effect.succeed(null);
-          }),
-        );
-  const checkpointCommit = checkpoint?.commit ?? null;
-  const checkpointDiff = checkpoint?.diff ?? null;
-  return {
-    root,
-    branch: branchValue === "HEAD" ? null : branchValue,
-    head,
-    status,
-    indexDiff,
-    worktreeDiff,
-    untracked,
-    submodules,
-    checkpointRef,
-    checkpointCommit,
-    checkpointError,
-    checkpointMatches:
-      checkpointDiff === null ? null : checkpointDiff === "" && untracked === "" && !hasSubmodules,
-  };
+  const observed = Effect.gen(function* () {
+    const root = (yield* read(["rev-parse", "--show-toplevel"])).replace(/\r?\n$/, "");
+    const head = (yield* read(["rev-parse", "--verify", "HEAD"])).trim();
+    const branchValue = (yield* read(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+    const status = yield* read(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const indexDiff = yield* read([
+      "diff",
+      "--cached",
+      "--binary",
+      "--no-ext-diff",
+      "--no-textconv",
+    ]);
+    const worktreeDiff = yield* read(["diff", "--binary", "--no-ext-diff", "--no-textconv"]);
+    const untracked = yield* read(["ls-files", "--others", "--exclude-standard", "-z"]);
+    const submodules = yield* read(["ls-files", "--stage"]);
+    const hasSubmodules = submodules.split("\n").some((line) => line.startsWith("160000 "));
+    let checkpointError: string | null = null;
+    const checkpoint =
+      checkpointRef === null
+        ? null
+        : yield* Effect.gen(function* () {
+            const commit = (yield* read([
+              "rev-parse",
+              "--verify",
+              `${checkpointRef}^{commit}`,
+            ])).trim();
+            const diff = yield* read([
+              "diff",
+              "--binary",
+              "--no-ext-diff",
+              "--no-textconv",
+              commit,
+              "--",
+            ]);
+            return { commit, diff };
+          }).pipe(
+            Effect.catch(
+              (error): Effect.Effect<null, { readonly _tag: "UntrackedHandoffWorkspace" }> => {
+                if (error._tag === "UntrackedHandoffWorkspace") return Effect.fail(error);
+                checkpointError = "Checkpoint verification read failed";
+                return Effect.succeed(null);
+              },
+            ),
+          );
+    const checkpointCommit = checkpoint?.commit ?? null;
+    const checkpointDiff = checkpoint?.diff ?? null;
+    return {
+      root,
+      branch: branchValue === "HEAD" ? null : branchValue,
+      head,
+      status,
+      indexDiff,
+      worktreeDiff,
+      untracked,
+      submodules,
+      checkpointRef,
+      checkpointCommit,
+      checkpointError,
+      checkpointMatches:
+        checkpointDiff === null
+          ? null
+          : checkpointDiff === "" && untracked === "" && !hasSubmodules,
+    };
+  });
+  // Non-Git, unborn and oversized workspaces are an accepted untracked risk, like detached OS work; observable Git retains its guards.
+  return yield* observed.pipe(
+    Effect.catchTags({ UntrackedHandoffWorkspace: () => Effect.succeed(untrackedWorkspace) }),
+  );
 });

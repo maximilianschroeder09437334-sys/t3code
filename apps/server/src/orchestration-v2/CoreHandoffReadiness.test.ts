@@ -1,3 +1,4 @@
+import * as TestClock from "effect/testing/TestClock";
 import * as SourceControlProviders from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -213,6 +214,11 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
   );
 
   it.effect.each([
+    "unborn",
+    "non-repo",
+    "oversized",
+    "settled-stale",
+    "newer-run",
     "fork",
     "subagent",
     "side-chat",
@@ -255,6 +261,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         sequences = 0,
         indexReads = 0;
       if (
+        ["unborn", "non-repo", "oversized", "settled-stale", "newer-run"].includes(scenario) ||
         scenario === "cap-missing-proof" ||
         scenario === "cap-reconciled" ||
         scenario === "cap-run-missing"
@@ -340,10 +347,40 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         checkpointId: null,
         contextHandoffId: null,
       });
-      if (scenario === "cap-reconciled")
+      if (
+        [
+          "cap-reconciled",
+          "unborn",
+          "non-repo",
+          "oversized",
+          "settled-stale",
+          "newer-run",
+        ].includes(scenario)
+      )
         records = {
           ...records,
           runs: [{ ...run, id: capRunId, status: "completed", startedAt: now, completedAt: now }],
+        };
+      if (scenario === "unborn")
+        yield* (yield* FileSystem.FileSystem).remove(fixture.cwd + "/.git/refs/heads/physical");
+      if (scenario === "non-repo")
+        yield* (yield* FileSystem.FileSystem).remove(fixture.cwd + "/.git", { recursive: true });
+      if (scenario === "settled-stale")
+        records = { ...records, thread: { ...records.thread, settledOverride: "settled" } };
+      if (scenario === "newer-run")
+        records = {
+          ...records,
+          runs: [
+            ...records.runs,
+            {
+              ...run,
+              id: RunId.make("newer"),
+              ordinal: 2,
+              status: "completed",
+              startedAt: DateTime.makeUnsafe("2099-01-01T00:00:00Z"),
+              completedAt: DateTime.makeUnsafe("2099-01-01T00:00:00Z"),
+            },
+          ],
         };
       if (scenario === "chain-ready" || scenario === "chain-pending") {
         records = decodeRecords({
@@ -415,7 +452,11 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           deadEnds: [],
           next: "Review",
           pointers: [],
-          ...(scenario === "cap-reconciled" || scenario === "cap-run-missing"
+          ...(["unborn", "non-repo", "oversized", "settled-stale", "newer-run"].includes(
+            scenario,
+          ) ||
+          scenario === "cap-reconciled" ||
+          scenario === "cap-run-missing"
             ? { contextLimitWork: { capRunId, results: [] } }
             : {}),
         },
@@ -428,6 +469,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         worktreePath: fixture.cwd,
         branch: "physical",
       } satisfies HandoffRequest;
+      yield* TestClock.setTime(DateTime.toEpochMillis(now));
       yield* outbox.enqueue([
         {
           id: handoffId(threadId),
@@ -495,7 +537,24 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
               Layer.mock(Projects.ProjectStoreV2)({}),
               Layer.mock(Git.GitManager)({
                 observeHandoffWorkspace: Effect.fnUntraced(function* (cwd, ref) {
-                  const result = yield* Git.observeHandoffWorkspace(driver, cwd, ref);
+                  const result = yield* Git.observeHandoffWorkspace(
+                    scenario === "oversized"
+                      ? {
+                          execute: (input) =>
+                            input.args[0] === "status"
+                              ? Effect.succeed({
+                                  exitCode: 0,
+                                  stdout: "",
+                                  stderr: "",
+                                  stdoutTruncated: true,
+                                  stderrTruncated: false,
+                                } as never)
+                              : driver.execute(input),
+                        }
+                      : driver,
+                    cwd,
+                    ref,
+                  );
                   if (scenario === "head-change" && reads === 1)
                     yield* fixture
                       .write(".git/refs/heads/physical", fixture.checkpoint + "\n")
@@ -515,6 +574,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
                           instanceId: selection.instanceId,
                           driver: "codex",
                           handoffReadinessCoverage:
+                            ["unborn", "non-repo", "oversized"].includes(scenario) ||
                             scenario === "non-context-handoff" ||
                             scenario === "cap-reconciled" ||
                             scenario === "cap-run-missing"
@@ -555,10 +615,15 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         yield* sql`SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads`,
         successorCount,
       );
-      if (result.before.sourceRecords !== null)
+      if (
+        result.before.sourceRecords !== null &&
+        !["unborn", "non-repo", "oversized"].includes(scenario)
+      )
         assert.equal(result.before.workspace?.head, fixture.head);
       if (
         [
+          "settled-stale",
+          "newer-run",
           "subagent",
           "side-chat",
           "successor",
@@ -595,7 +660,9 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       else
         assert.equal(
           result.classification,
-          scenario === "cap-reconciled" ? "automatically_eligible" : "manual_review",
+          ["cap-reconciled", "unborn", "non-repo", "oversized"].includes(scenario)
+            ? "automatically_eligible"
+            : "manual_review",
           result.after.blockers.join(" | "),
         );
       if (["head-change", "run-change", "child-change"].includes(scenario))

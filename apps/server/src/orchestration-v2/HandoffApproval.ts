@@ -22,7 +22,6 @@ export const requestHandoffApproval = Effect.fn("HandoffApproval.request")(funct
     !snapshot.expectedGenerationMatches ||
     snapshot.classification !==
       (mode === "automatic" ? "automatically_eligible" : "manual_review") ||
-    (mode === "automatic" && parked?.handoff.contextLimitWork === undefined) ||
     !parked ||
     !source ||
     source.id !== parked.sourceThreadId ||
