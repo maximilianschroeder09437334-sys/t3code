@@ -10,6 +10,10 @@ module.exports = async ({ appOutDir, electronPlatformName, arch, packager }) => 
     console.log(`[server-compile-cache] Skipping unsupported target ${electronPlatformName}`);
     return;
   }
+  if (process.env.T3CODE_DESKTOP_SKIP_SERVER_COMPILE_CACHE === "true") {
+    console.log("[server-compile-cache] Skipping optional server prewarm");
+    return;
+  }
   // Generating the cache runs the bundle, and a PR preview's bundle must never run next to signing secrets.
   if (process.env.T3CODE_DESKTOP_UNTRUSTED_BUNDLE === "true") {
     console.log("[server-compile-cache] Skipping untrusted bundle");
