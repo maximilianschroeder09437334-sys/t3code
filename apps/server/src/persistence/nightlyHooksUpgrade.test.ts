@@ -10,6 +10,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { SqlError, SqlSyntaxError } from "effect/sql/SqlError";
 
 import { validateMigrationSchema } from "./migrationSchemaValidation.ts";
+import schemaCatalog from "./migrationSchemaCatalog.json" with { type: "json" };
 import { ensureCustomMigrationTables, legacyCustomPrefix } from "./customMigrationLedger.ts";
 import {
   hasPendingMigrations,
@@ -885,6 +886,38 @@ describe("repair round 2 supported no-FTS history", () => {
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
   );
+  it.effect.each([true, false])(
+    "accepts only the exact legacy hook FTS update trigger (exact: %s)",
+    (exact) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* buildLegacy(4);
+        yield* populate(4);
+        const variant = schemaCatalog.histories.legacyHooks80
+          .map((id) => schemaCatalog.objects[id]!)
+          .find((row) => row.name === "orchestration_v2_message_search_update")!;
+        yield* sql`DROP TRIGGER orchestration_v2_message_search_update`;
+        yield* sql.unsafe(
+          exact ? variant.sql! : variant.sql!.replace("new.streaming = 0", "new.streaming = 1"),
+        );
+        const original = yield* officialLedger;
+        const rows = yield* rowsOfPreserved;
+        if (exact) {
+          assert.deepStrictEqual(yield* runMigrations(), officialExecutedFrom(81));
+          yield* expectPreserved(rows);
+          assert.deepStrictEqual(
+            yield* sql`SELECT migration_id,name,created_at FROM t3_custom_migration_legacy_ledger ORDER BY migration_id`,
+            original,
+          );
+          assert.deepStrictEqual(yield* runMigrations(), []);
+          yield* integrity;
+        } else {
+          const before = yield* dump;
+          yield* Effect.flip(runMigrations());
+          assert.deepStrictEqual(yield* dump, before);
+        }
+      }).pipe(Effect.provide(memory)),
+  );
   it.effect.each([1, 2, 3, 4])(
     "converts no-FTS legacy custom prefix %s preserving data and archive",
     (count) =>
@@ -1041,7 +1074,7 @@ it.effect.each([
     const before = yield* sql`SELECT * FROM provider_session_runtime`;
     for (const change of changes) yield* sql.unsafe(change);
     yield* runMigrations();
-    yield* validateMigrationSchema("96", [], false);
+    yield* validateMigrationSchema("96", [], { allowPendingRepairs: false });
     const after = yield* sql`SELECT * FROM provider_session_runtime`;
     assert.deepInclude(after[0], before[0]);
     yield* expectCurrent;

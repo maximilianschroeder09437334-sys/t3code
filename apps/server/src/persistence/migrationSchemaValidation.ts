@@ -12,7 +12,10 @@ const normalize = (sql: string | null) =>
 export const validateMigrationSchema = Effect.fn("validateMigrationSchema")(function* (
   history: string,
   customIds: readonly number[],
-  allowPendingRepairs = true,
+  options: {
+    readonly allowPendingRepairs?: boolean;
+    readonly acceptLegacyHooks80?: boolean;
+  } = {},
 ) {
   const sql = yield* SqlClient.SqlClient;
   const actual = yield* sql<{
@@ -31,9 +34,12 @@ export const validateMigrationSchema = Effect.fn("validateMigrationSchema")(func
     });
   // Exact whole-schema variants supported by pending official modules 27/28, 51, 74, 87, 92.
   const variants =
-    allowPendingRepairs && key === history
+    options.allowPendingRepairs !== false && key === history
       ? Object.keys(histories).filter((key) => key.startsWith(`repair${history}-`))
       : [];
+  // The verified four-entry legacy hook ledger used the pre-81 FTS update trigger.
+  // Migration 81 replaces it. No other history can select this exact variant.
+  if (key === "80" && options.acceptLegacyHooks80 === true) variants.push("legacyHooks80");
   const candidates = [ids, ...variants.map((key) => histories[key]!)].map((ids) =>
     [...ids, ...customIds.flatMap((id) => histories[`custom${id}`] ?? [])].map(
       (id) => catalog.objects[id]!,

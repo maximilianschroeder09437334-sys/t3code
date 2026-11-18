@@ -387,7 +387,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const peerTail =
     effective.length === 69 &&
     (yield* sql`SELECT 1 FROM sqlite_master WHERE name='peer_environment_links'`).length > 0;
-  yield* validateMigrationSchema(peerTail ? "72" : schemaKey, []);
+  yield* validateMigrationSchema(peerTail ? "72" : schemaKey, [], {
+    acceptLegacyHooks80: customPrefix === 4,
+  });
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
   const upgrade = Effect.gen(function* () {
     if (customPrefix !== undefined) yield* convertLegacyCustomLedger(customPrefix);
@@ -396,7 +398,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     const [completed] = yield* sql<{
       readonly id: number;
     }>`SELECT MAX(migration_id) AS id FROM effect_sql_migrations`;
-    yield* validateMigrationSchema(String(completed?.id ?? 0), [], false);
+    yield* validateMigrationSchema(String(completed?.id ?? 0), [], {
+      allowPendingRepairs: false,
+    });
     const custom = toMigrationInclusive === undefined ? yield* runCustomMigrations() : [];
     return { official, custom };
   });
