@@ -2,6 +2,8 @@ import { OrchestrationV2Run as OrchestrationV2RunSchema } from "@t3tools/contrac
 import * as HandoffIds from "@t3tools/provider-core/server/IdAllocator";
 import * as TransferAdmission from "./HandoffTransferAdmission.ts";
 import * as CoreHandoff from "./CoreHandoff.ts";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Exercise a real detached child independently of the runtime layer's process services.
+import * as NodeChildProcess from "node:child_process";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
 import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
@@ -7154,7 +7156,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           modelSelection,
           runtimeMode: "full-access",
           interactionMode: "default",
-          branch: null,
+          branch: "fixture",
           worktreePath: "/tmp/hook-context",
         });
         yield* orchestrator.dispatch({
@@ -7177,12 +7179,72 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         )!;
         const nativeId = `${key}-native`;
         const turnId = ProviderTurnId.make(`${key}-turn`);
+        const detachedCommand = {
+          id: TurnItemId.make(`${key}-detached-command`),
+          threadId,
+          runId: source.id,
+          nodeId: attempt.rootNodeId,
+          providerThreadId: provider.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 9000,
+          type: "command_execution" as const,
+          title: "Fixture detached command",
+          input: "Synthetic command that waits for completion",
+          status: "running" as const,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        };
+        const child =
+          name === "at-limit"
+            ? yield* Effect.acquireRelease(
+                Effect.sync(() =>
+                  NodeChildProcess.spawn(
+                    process.execPath,
+                    [
+                      "-e",
+                      "process.stdin.resume(); process.stdin.once('end', () => console.log('detached result'));",
+                    ],
+                    { detached: true, windowsHide: true, stdio: ["pipe", "pipe", "ignore"] },
+                  ),
+                ),
+                (child) =>
+                  Effect.sync(() => {
+                    if (child.exitCode === null && child.signalCode === null) child.kill();
+                  }),
+              )
+            : undefined;
+        const childResult =
+          child === undefined
+            ? undefined
+            : new Promise<{ code: number | null; output: string }>((resolve) => {
+                let output = "";
+                child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+                  output += chunk;
+                });
+                child.once("error", () => resolve({ code: null, output }));
+                child.once("close", (code) => resolve({ code, output }));
+              });
         yield* eventSink.commitCommand({
           commandId: CommandId.make(`${key}-complete`),
           threadId,
           commandType: "provider-runtime.reconcile",
           acceptedAt: now,
           events: [
+            ...(child === undefined
+              ? []
+              : [
+                  {
+                    id: EventId.make(`${key}-detached-start`),
+                    type: "turn-item.updated" as const,
+                    threadId,
+                    runId: source.id,
+                    occurredAt: now,
+                    payload: detachedCommand,
+                  },
+                ]),
             {
               id: EventId.make(`${key}-provider`),
               type: "provider-thread.updated",
@@ -7261,6 +7323,66 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         if (notice !== null) {
           assert.equal(notices[0]?.title, "Automatic continuation paused");
           assert.include(notices[0]?.message, notice);
+        }
+        if (child !== undefined && childResult !== undefined) {
+          const handoff = {
+            goal: "Resume after the detached fixture finishes",
+            decisions: [],
+            state: { branch: "fixture", commits: [], verified: [] },
+            deadEnds: [],
+            next: "Read the saved fixture result",
+            pointers: [],
+            contextLimitWork: { capRunId: source.id, results: [] },
+          };
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const held = yield* CoreHandoff.submitHandoff(threadId, handoff).pipe(Effect.flip);
+          assert.include(held.message, "still active");
+          assert.isNull(child.exitCode);
+          assert.isTrue(Option.isNone(yield* outbox.get(CoreHandoff.handoffId(threadId))));
+          child.stdin.end();
+          const collected = yield* Effect.promise(() => childResult);
+          assert.deepEqual(collected, { code: 0, output: "detached result\n" });
+          const completedAt = yield* DateTime.now;
+          yield* eventSink.commitCommand({
+            commandId: CommandId.make(`${key}-collect-result`),
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: completedAt,
+            events: [
+              {
+                id: EventId.make(`${key}-detached-completed`),
+                type: "turn-item.updated",
+                threadId,
+                runId: source.id,
+                occurredAt: completedAt,
+                payload: {
+                  ...detachedCommand,
+                  status: "completed",
+                  output: collected.output,
+                  exitCode: 0,
+                  completedAt,
+                  updatedAt: completedAt,
+                },
+              },
+            ],
+            effects: [],
+          });
+          const missing = yield* CoreHandoff.submitHandoff(threadId, handoff).pipe(Effect.flip);
+          assert.include(missing.message, "Include the saved result");
+          const result = {
+            commandItemId: detachedCommand.id,
+            outcome: collected.output.trim(),
+            evidence: "Captured output on the source command timeline",
+          };
+          const accepted = yield* CoreHandoff.submitHandoff(threadId, {
+            ...handoff,
+            contextLimitWork: { ...handoff.contextLimitWork, results: [result] },
+          });
+          assert.isTrue(accepted.sourceRetained);
+          assert.equal(accepted.status, "awaiting_transfer");
+          const parked = Option.getOrThrow(yield* outbox.get(CoreHandoff.handoffId(threadId)));
+          assert(parked.request.type === "thread.handoff");
+          assert.deepEqual(parked.request.handoff.contextLimitWork?.results, [result]);
         }
       }
     }),

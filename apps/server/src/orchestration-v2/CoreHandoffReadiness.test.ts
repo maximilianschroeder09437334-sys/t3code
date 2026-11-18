@@ -16,8 +16,10 @@ import {
   OrchestrationV2RuntimeRequest,
   ThreadId,
   CommandId,
+  RunId,
   type HandoffRequest,
 } from "@t3tools/contracts";
+import { derive } from "@t3tools/provider-core/server/IdAllocator";
 import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -213,6 +215,8 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
   it.effect.each([
     "contradictory",
     "eligible",
+    "cap-missing-proof",
+    "cap-reconciled",
     "manual",
     "metadata",
     "dirty",
@@ -237,10 +241,37 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
     Effect.gen(function* () {
       const fixture = yield* gitFixture();
       const driver = yield* Driver.GitVcsDriver;
-      let records = recordsFor(fixture.cwd),
+      const capRunId = RunId.make("readiness-cap");
+      const threadId = ThreadId.make(`readiness-source-${scenario}`);
+      let records = recordsFor(fixture.cwd, threadId),
         reads = 0,
         sequences = 0,
         indexReads = 0;
+      if (scenario === "cap-missing-proof" || scenario === "cap-reconciled")
+        records = decodeRecords({
+          ...records,
+          turnItems: [
+            {
+              id: derive.runSignalTurnItem({ runId: capRunId, signal: "hook-context-limit" }),
+              threadId,
+              runId: capRunId,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "completed",
+              title: "Automatic continuation paused",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "system_notice",
+              level: "warning",
+              message: "Context limit reached.",
+            },
+          ],
+        });
       if (scenario === "metadata")
         records = { ...records, thread: { ...records.thread, branch: "thread-metadata" } };
       if (scenario === "dirty" || scenario === "checkpoint")
@@ -267,7 +298,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         };
       const run = yield* decodeRun({
         id: "queued-run",
-        threadId: sourceId,
+        threadId,
         ordinal: 1,
         providerInstanceId: "codex",
         modelSelection: selection,
@@ -311,9 +342,10 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           deadEnds: [],
           next: "Review",
           pointers: [],
+          ...(scenario === "cap-reconciled" ? { contextLimitWork: { capRunId, results: [] } } : {}),
         },
         projectId: records.thread.projectId,
-        sourceThreadId: sourceId,
+        sourceThreadId: threadId,
         successorThreadId: ThreadId.make("reserved-only"),
         modelSelection: records.thread.modelSelection,
         runtimeMode: "full-access",
@@ -323,13 +355,13 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       } satisfies HandoffRequest;
       yield* outbox.enqueue([
         {
-          id: handoffId(sourceId),
-          commandId: CommandId.make(handoffId(sourceId)),
-          threadId: sourceId,
+          id: handoffId(threadId),
+          commandId: CommandId.make(handoffId(threadId)),
+          threadId,
           request,
         },
       ]);
-      const beforeRow = yield* outbox.get(handoffId(sourceId));
+      const beforeRow = yield* outbox.get(handoffId(threadId));
       const sql = yield* SqlClient.SqlClient;
       const successorCount =
         yield* sql`SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads`;
@@ -350,7 +382,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         });
       let observedSequence = 1;
       const observe = (expected = "older-generation") =>
-        queryHandoffReadiness(sourceId, expected).pipe(
+        queryHandoffReadiness(threadId, expected).pipe(
           Effect.provide(
             Layer.mergeAll(
               Layer.mock(Threads.ThreadManagementService)({
@@ -393,7 +425,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
                           instanceId: selection.instanceId,
                           driver: "codex",
                           handoffReadinessCoverage:
-                            scenario === "eligible"
+                            scenario === "eligible" || scenario === "cap-reconciled"
                               ? {
                                   scope: "all-app-owned-work",
                                   nativeSubagents: true,
@@ -426,7 +458,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       assert.isFalse(result.transferAuthorized);
       assert.isTrue(result.observationalOnly);
       assert.isTrue(Object.isFrozen(result.before.children));
-      assert.deepEqual(yield* outbox.get(handoffId(sourceId)), beforeRow);
+      assert.deepEqual(yield* outbox.get(handoffId(threadId)), beforeRow);
       assert.deepEqual(
         yield* sql`SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads`,
         successorCount,
@@ -436,6 +468,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       if (
         [
           "contradictory",
+          "cap-missing-proof",
           "metadata",
           "dirty",
           "active-child",
@@ -467,9 +500,12 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         assert.equal(
           result.classification,
           scenario === "eligible" ? "automatically_eligible" : "manual_review",
+          result.after.blockers.join(" | "),
         );
       if (["head-change", "run-change", "child-change"].includes(scenario))
         assert.isFalse(result.stable);
+      if (scenario === "cap-reconciled")
+        assert.isTrue(result.after.manualReview.some((reason) => reason.includes("saved outcome")));
       if (scenario === "checkpoint") {
         assert.isTrue(result.before.workspace?.checkpointMatches);
         assert.equal(result.before.workspace?.checkpointCommit, fixture.checkpoint);

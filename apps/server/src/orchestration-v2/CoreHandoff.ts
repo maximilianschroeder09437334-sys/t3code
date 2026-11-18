@@ -6,8 +6,11 @@ import {
   OrchestratorMcpFailure,
   ThreadId,
   RuntimeRequestId,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { derive } from "@t3tools/provider-core/server/IdAllocator";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -28,6 +31,48 @@ const refuse = (message: string) =>
   new OrchestratorMcpFailure({ code: "invalid_request", message });
 export const handoffId = (id: ThreadId) => `core-handoff:${id}`;
 
+const activeCommand = (item: OrchestrationV2TurnItem) =>
+  item.type === "command_execution" && ["pending", "running", "waiting"].includes(item.status);
+
+export function contextLimitWorkBarrier(
+  items: ReadonlyArray<OrchestrationV2TurnItem>,
+  proof: HandoffInput["contextLimitWork"],
+) {
+  const cap = items.findLast(
+    (item) =>
+      item.type === "system_notice" &&
+      item.runId !== null &&
+      (item.id === derive.runSignalTurnItem({ runId: item.runId, signal: "hook-context-limit" }) ||
+        (item.id ===
+          derive.runSignalTurnItem({ runId: item.runId, signal: "hook-continuation-paused" }) &&
+          item.message.startsWith("This native session reached 250,000 context tokens."))),
+  );
+  if (cap === undefined) return null;
+  const active = items.find(activeCommand);
+  if (active !== undefined)
+    return { blocker: `Command ${active.id} is still active at the context limit.` };
+  if (proof === undefined || proof.capRunId !== cap.runId)
+    return {
+      blocker:
+        "Confirm foreground, background and detached work and include its saved results for the context-limit run.",
+    };
+  const captured = new Set(proof.results.map((result) => result.commandItemId));
+  const missing = items.find(
+    (item) =>
+      item.type === "command_execution" &&
+      item.completedAt !== null &&
+      DateTime.Order(item.completedAt, cap.updatedAt) >= 0 &&
+      (item.startedAt === null || DateTime.Order(item.startedAt, cap.updatedAt) <= 0) &&
+      !captured.has(item.id),
+  );
+  return {
+    blocker:
+      missing === undefined
+        ? null
+        : `Include the saved result of command ${missing.id} before rotating at the context limit.`,
+  };
+}
+
 /** The first request wins for a source thread, even if competing submissions have different text. */
 export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
   sourceThreadId: ThreadId,
@@ -40,7 +85,7 @@ export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
   );
   const threads = yield* ThreadManagement.ThreadManagementService;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
-  const { thread } = yield* threads.getThreadRecords(sourceThreadId, []);
+  const { thread, turnItems } = yield* threads.getThreadRecords(sourceThreadId, ["turnItems"]);
   if (
     thread.deletedAt !== null ||
     thread.agentExecutionIntent?.restrictedTools !== undefined ||
@@ -49,6 +94,8 @@ export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
     return yield* refuse("This source thread cannot submit a local core handoff.");
   if (thread.branch === null || thread.branch !== handoff.state.branch)
     return yield* refuse("The handoff branch must match the source thread's known branch.");
+  const barrier = contextLimitWorkBarrier(turnItems, handoff.contextLimitWork);
+  if (barrier?.blocker) return yield* refuse(barrier.blocker);
   const id = handoffId(sourceThreadId);
   const request: HandoffRequest = {
     type: "thread.handoff",

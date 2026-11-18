@@ -1,6 +1,6 @@
 import { OrchestrationV2ThreadProjection } from "./orchestrationV2.ts";
 import * as Schema from "effect/Schema";
-import { ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProjectId, RunId, ThreadId, TrimmedNonEmptyString, TurnItemId } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { RuntimeMode, ProviderInteractionMode } from "./providerPolicy.ts";
 
@@ -18,6 +18,18 @@ export const HandoffInput = Schema.Struct({
   deadEnds: Schema.Array(TrimmedNonEmptyString),
   next: TrimmedNonEmptyString,
   pointers: Schema.Array(TrimmedNonEmptyString),
+  contextLimitWork: Schema.optionalKey(
+    Schema.Struct({
+      capRunId: RunId,
+      results: Schema.Array(
+        Schema.Struct({
+          commandItemId: Schema.optionalKey(TurnItemId),
+          outcome: TrimmedNonEmptyString,
+          evidence: TrimmedNonEmptyString,
+        }),
+      ),
+    }),
+  ),
 }).check(
   Schema.makeFilter((value) => JSON.stringify(value).length <= 6000, {
     expected: "a complete serialized handoff of at most 6000 characters",

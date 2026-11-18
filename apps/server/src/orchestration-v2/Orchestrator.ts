@@ -6946,7 +6946,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: {
             id: idAllocator.derive.runSignalTurnItem({
               runId: hookSource.id,
-              signal: "hook-continuation-paused",
+              signal: atContextLimit ? "hook-context-limit" : "hook-continuation-paused",
             }),
             threadId: command.threadId,
             runId: hookSource.id,
@@ -6964,7 +6964,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "system_notice",
             level: "warning",
             message: atContextLimit
-              ? "This native session reached 250,000 context tokens. Check the saved work and confirm a safe handoff before continuing in a fresh context."
+              ? "This native session reached 250,000 context tokens. Keep this thread as owner until every command and detached job has finished and its result is saved. Include those results in the handoff before requesting review."
               : "Review the completed turn's next steps. Continue explicitly or review a Relay handoff before transferring ownership.",
           },
         });

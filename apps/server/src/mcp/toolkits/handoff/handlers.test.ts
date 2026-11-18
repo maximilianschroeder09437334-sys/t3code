@@ -75,6 +75,7 @@ const layer = McpHttpServer.layerHandoffToolkit.pipe(
       getThreadRecords: (id) =>
         Effect.succeed({
           thread: { ...shells.get(id), branch: "feature", worktreePath: "/workspace" },
+          turnItems: [],
         } as never),
     }),
   ),

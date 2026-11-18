@@ -90,7 +90,7 @@ export const HandoffToolkit = Toolkit.make(
   }).annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients),
   Tool.make("t3_handoff_submit", {
     description:
-      "Submit a durable handoff for your own authenticated thread. Include goal, decisions with why, state (branch, commits, verified), deadEnds, next, and pointers; the complete JSON must be at most 6000 characters. The first submission wins. The request is parked awaiting authoritative ownership transfer; no new successor is created or started. The source remains open. Acceptance preserves the request only and is not delivery or ownership transfer.",
+      "Submit a durable handoff for your own authenticated thread. Include goal, decisions with why, state (branch, commits, verified), deadEnds, next, and pointers; the complete JSON must be at most 6000 characters. After a context-limit notice, wait for all foreground, background and detached work and save the results first. Include contextLimitWork with the run ID from the cap notice and a result for each job, including the commandItemId when visible. Use an empty results list only after verifying there were no outstanding jobs. The first submission wins. The request is parked awaiting authoritative ownership transfer; no new successor is created or started. The source remains open. Acceptance preserves the request only and is not delivery or ownership transfer.",
     parameters: HandoffInput,
     success: Schema.Struct({
       accepted: Schema.Boolean,

@@ -16,7 +16,7 @@ import * as Sessions from "./ProviderSessionManager.ts";
 import * as Git from "../git/GitManager.ts";
 import * as Terminals from "../terminal/Manager.ts";
 import * as Outbox from "./EffectOutbox.ts";
-import { handoffId } from "./CoreHandoff.ts";
+import { contextLimitWorkBarrier, handoffId } from "./CoreHandoff.ts";
 import type {
   ProjectionRecordField,
   ProjectionRecords,
@@ -187,6 +187,17 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
         : null;
     if (row !== null && Option.isSome(row) && parkedRequest === null)
       blockers.push("Durable request has the wrong effect type");
+    if (sourceRecords !== null) {
+      const cap = contextLimitWorkBarrier(
+        sourceRecords.turnItems,
+        parkedRequest?.handoff.contextLimitWork,
+      );
+      if (cap?.blocker) blockers.push(cap.blocker);
+      if (cap !== null)
+        manualReview.push(
+          "Context limit: verify every foreground, background and detached job has finished and its saved outcome is included in the handoff.",
+        );
+    }
     let cwd = sourceRecords?.thread.worktreePath ?? null;
     if (sourceRecords !== null && cwd === null) {
       const project = yield* read("project", projects.get(sourceRecords.thread.projectId));
