@@ -16299,12 +16299,14 @@ it.layer(Layer.empty)(
         const fs = yield* FileSystem.FileSystem;
         const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "relay-followup-" });
         const key = "forced-followup";
-        const { now, availability } = yield* configureGuardedHandoffOwners(
+        const { now, availability, workspace } = yield* configureGuardedHandoffOwners(
           key,
           cwd,
           modelSelection,
         );
         availability.completeAppOwnedCoverage = true;
+        workspace.status = " M unfinished-source.ts";
+        workspace.untracked = "new-source.ts";
         const threadId = ThreadId.make(key);
         const projectId = ProjectId.make(key);
         yield* seedProject({

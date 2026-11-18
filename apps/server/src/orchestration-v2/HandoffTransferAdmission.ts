@@ -142,6 +142,7 @@ export class HandoffTransferAdmission extends Context.Service<
   }
 >()("t3/orchestration-v2/HandoffTransferAdmission") {}
 
+const encodeFollowupObservation = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeHandoff = Schema.encodeEffect(Schema.fromJsonString(HandoffInput));
 const inertCommands = new Set([
   "thread.visit",
@@ -746,33 +747,128 @@ const make = Effect.gen(function* () {
     ),
   );
   return HandoffTransferAdmission.of({
-    canForceFollowup: Effect.fn("HandoffTransferAdmission.canForceFollowup")(function* (sourceId) {
-      if (Option.isNone(git) || Option.isNone(terminals)) return false;
-      const snapshot = yield* queryHandoffReadinessWithReaders(sourceId, undefined, {
-        readHandoffRecords: projections.getThreadRecords,
-        readHandoffChildIds: (id) => projections.listAppOwnedChildThreadIds(id, true),
-        getThreadEventSequence: (id) => events.latestSequence({ threadId: id }),
-      }).pipe(
-        Effect.provideService(Digest.Digest, digest),
-        Effect.provideService(Outbox.EffectOutboxV2, outbox),
-        Effect.provideService(Projects.ProjectStoreV2, projects),
-        Effect.provideService(Sessions.ProviderSessionManagerV2, sessions),
-        Effect.provideService(Git.GitManager, git.value),
-        Effect.provideService(Terminals.TerminalManager, terminals.value),
-        Effect.mapError(() => failed(sourceId, "forced-followup-observation")),
-      );
-      return (
-        snapshot.stable &&
-        snapshot.after.blockers.every(
-          (reason) =>
-            reason ===
-            "Confirm foreground, background and detached work and include its saved results for the context-limit run.",
-        ) &&
-        snapshot.after.unknowns.every((reason) => reason === "No durable handoff request") &&
-        snapshot.after.providers.every((provider) => provider.completeAppOwnedCoverage) &&
-        snapshot.after.parkedRequest === null
-      );
-    }),
+    canForceFollowup: Effect.fn("HandoffTransferAdmission.canForceFollowup")(
+      function* (sourceId) {
+        if (
+          Option.isNone(terminals) ||
+          Option.isSome(yield* outbox.get(`core-handoff:${sourceId}`))
+        )
+          return false;
+        // This is another turn on the same owner, not a transfer: dirty files do not prevent it.
+        const observe = Effect.fnUntraced(function* () {
+          const childIds = yield* projections.listAppOwnedChildThreadIds(sourceId, true);
+          const owners = yield* Effect.forEach([sourceId, ...childIds], (id) =>
+            projections.getThreadRecords(id, [
+              "runs",
+              "runtimeRequests",
+              "subagents",
+              "nodes",
+              "providerTurns",
+              "providerThreads",
+              "turnItems",
+            ]),
+          );
+          const source = owners[0]!;
+          if (
+            source.thread.lineage.relationshipToParent === "subagent" ||
+            source.thread.lineage.sideChat === true ||
+            source.thread.handoffTransfer !== undefined
+          )
+            return null;
+          const project = yield* projects.get(source.thread.projectId);
+          const cwd =
+            source.thread.worktreePath ??
+            (Option.isSome(project) ? project.value.workspaceRoot : null);
+          if (cwd === null) return null;
+          const active = new Set([
+            "preparing",
+            "pending",
+            "queued",
+            "starting",
+            "running",
+            "waiting",
+          ]);
+          const observations = [];
+          for (const owner of owners) {
+            if (
+              owner.thread.archivedAt !== null ||
+              owner.thread.deletedAt !== null ||
+              owner.thread.linkOrigin !== undefined ||
+              owner.thread.agentExecutionIntent?.restrictedTools !== undefined ||
+              owner.runs.some((run) => active.has(run.status)) ||
+              owner.runtimeRequests.some((request) => request.status === "pending") ||
+              owner.subagents.some((task) => active.has(task.status)) ||
+              owner.nodes.some((node) => active.has(node.status)) ||
+              owner.providerTurns.some((turn) => active.has(turn.status)) ||
+              owner.turnItems.some(
+                (item) => item.type === "command_execution" && active.has(item.status),
+              )
+            )
+              return null;
+            for (const provider of owner.providerThreads) {
+              if (
+                provider.status !== "idle" ||
+                !Array.isArray(provider.pendingBackgroundTasks) ||
+                provider.pendingBackgroundTasks.length > 0 ||
+                provider.providerSessionId === null
+              )
+                return null;
+              const entry = yield* sessions.observeHandoffSession(provider.providerSessionId);
+              if (Option.isNone(entry) || entry.value.busyTurns.length > 0) return null;
+              const runtime = entry.value.runtime;
+              if (
+                runtime.handoffReadinessCoverage?.scope !== "all-app-owned-work" ||
+                !runtime.handoffReadinessCoverage.nativeSubagents ||
+                !runtime.handoffReadinessCoverage.detachedTasks ||
+                runtime.hasPendingBackgroundWork === undefined ||
+                runtime.hasPendingBackgroundWorkForThread === undefined
+              )
+                return null;
+              if (
+                (yield* runtime.hasPendingBackgroundWork) ||
+                (yield* runtime.hasPendingBackgroundWorkForThread(provider, {
+                  includeSubagents: true,
+                }))
+              )
+                return null;
+              observations.push({
+                id: provider.id,
+                session: provider.providerSessionId,
+                generation: entry.value.idleGeneration,
+              });
+            }
+          }
+          const terminalRows = yield* terminals.value.observeHandoff([sourceId, ...childIds], cwd);
+          if (
+            !Array.isArray(terminalRows) ||
+            terminalRows.some(
+              (terminal) =>
+                terminal.status === "starting" ||
+                terminal.running !== false ||
+                terminal.cachedRunning ||
+                terminal.error !== null,
+            )
+          )
+            return null;
+          return yield* encodeFollowupObservation({
+            owners,
+            observations,
+            terminalRows,
+          });
+        });
+        const before = yield* observe();
+        const after = yield* observe();
+        return before !== null && before === after;
+      },
+      Effect.mapError(
+        (cause) =>
+          new HandoffTransferError({
+            sourceThreadId: "unknown",
+            stage: "forced-followup-observation",
+            cause,
+          }),
+      ),
+    ),
     inspect,
     inspectRecovery: Effect.fn("HandoffTransferAdmission.inspectRecovery")(
       (sourceId, requestId, generation, lostReplacement) =>
