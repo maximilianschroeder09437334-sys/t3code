@@ -1,3 +1,4 @@
+import { automaticHandoffDeclaration } from "@t3tools/contracts";
 import {
   CommandId,
   RuntimeRequestId,
@@ -11,6 +12,7 @@ import { ThreadManagementService } from "./ThreadManagementService.ts";
 export const requestHandoffApproval = Effect.fn("HandoffApproval.request")(function* (
   sourceThreadId: ThreadId,
   expectedGeneration: string,
+  mode: "manual" | "automatic" = "manual",
 ) {
   const snapshot = yield* queryHandoffReadiness(sourceThreadId, expectedGeneration);
   const parked = snapshot.after.parkedRequest;
@@ -18,7 +20,9 @@ export const requestHandoffApproval = Effect.fn("HandoffApproval.request")(funct
   if (
     !snapshot.stable ||
     !snapshot.expectedGenerationMatches ||
-    snapshot.classification !== "manual_review" ||
+    snapshot.classification !==
+      (mode === "automatic" ? "automatically_eligible" : "manual_review") ||
+    (mode === "automatic" && parked?.handoff.contextLimitWork === undefined) ||
     !parked ||
     !source ||
     source.id !== parked.sourceThreadId ||
@@ -37,7 +41,7 @@ export const requestHandoffApproval = Effect.fn("HandoffApproval.request")(funct
   ) {
     return yield* new OrchestratorMcpFailure({
       code: "invalid_request",
-      message: "A stable, otherwise ready manual review generation is required.",
+      message: "A stable, otherwise ready handoff generation of the requested kind is required.",
     });
   }
   const requestId = RuntimeRequestId.make(
@@ -56,7 +60,9 @@ export const requestHandoffApproval = Effect.fn("HandoffApproval.request")(funct
       successorThreadId: parked.successorThreadId,
       generation: snapshot.generation,
       declaration:
-        "I reviewed native and detached work manually. This supplies only manual coverage; guarded transfer must still revalidate all app-owned work.",
+        mode === "automatic"
+          ? automaticHandoffDeclaration
+          : "I reviewed native and detached work manually. This supplies only manual coverage; guarded transfer must still revalidate all app-owned work.",
       blockers: [],
       unknowns: [],
       manualReview: snapshot.after.manualReview,

@@ -67,6 +67,13 @@ import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDeliv
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import {
+  CONTEXT_HANDOFF_NUDGE,
+  CONTEXT_ROLLOVER_LIMIT,
+  contextHandoffNudgeMessage,
+  contextRolloverLimitMessage,
+  contextRolloverNoticeId,
+} from "./ContextRollover.ts";
 import { unsentManualContinuationSource } from "./manualContinuation.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import {
@@ -1956,6 +1963,42 @@ export const layer: Layer.Layer<
           ],
         });
       });
+      let rolloverContext = "";
+      if (
+        !goalCommand &&
+        runningProviderThread.id === providerThread.id &&
+        runningProviderThread.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId
+      ) {
+        const measured = latestNativeContextUsage(projection, runningProviderThread);
+        const capId = contextRolloverNoticeId(runningProviderThread, CONTEXT_ROLLOVER_LIMIT);
+        const cap =
+          capId === undefined
+            ? null
+            : yield* projectionStore.getTurnItem({
+                threadId: input.threadId,
+                itemId: capId,
+              });
+        if (cap !== null || (measured?.usage.usedTokens ?? 0) >= CONTEXT_ROLLOVER_LIMIT) {
+          rolloverContext = contextRolloverLimitMessage;
+        } else {
+          const nudgeId = contextRolloverNoticeId(runningProviderThread, CONTEXT_HANDOFF_NUDGE);
+          const previousRun = projection.runs.findLast(
+            (previous) =>
+              previous.ordinal < run.ordinal &&
+              previous.providerThreadId === runningProviderThread.id &&
+              previous.startedAt !== null,
+          );
+          const nudge =
+            nudgeId === undefined || previousRun === undefined
+              ? null
+              : yield* projectionStore.getTurnItem({
+                  threadId: input.threadId,
+                  itemId: nudgeId,
+                });
+          if (nudge?.runId === previousRun?.id && nudge !== null)
+            rolloverContext = contextHandoffNudgeMessage;
+        }
+      }
       const startWithHandoffs = Effect.fn("ProviderTurnStartService.startWithHandoffs")(
         function* (turnInput: Parameters<typeof session.startTurn>[0], compact = false) {
           const delivery = yield* deliverContextHandoffs({
@@ -1982,7 +2025,12 @@ export const layer: Layer.Layer<
             sideChatHandoff === undefined || compact || goalCommand
               ? ""
               : sideChatHandoff.summaryText;
-          const context = [delivery.context, sideChatContext, restartNote]
+          const context = [
+            delivery.context,
+            sideChatContext,
+            restartNote,
+            compact ? "" : rolloverContext,
+          ]
             .filter((part) => part !== "")
             .join("\n\n");
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
@@ -2109,6 +2157,7 @@ export const layer: Layer.Layer<
         effectiveHandoffs.length === 0 &&
         retryHandoff.length === 0 &&
         sideChatHandoff === undefined &&
+        rolloverContext === "" &&
         restartNote === "" &&
         !noteContinuation
           ? session

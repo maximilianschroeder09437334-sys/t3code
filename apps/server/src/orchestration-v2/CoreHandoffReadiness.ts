@@ -187,17 +187,11 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
         : null;
     if (row !== null && Option.isSome(row) && parkedRequest === null)
       blockers.push("Durable request has the wrong effect type");
-    if (sourceRecords !== null) {
-      const cap = contextLimitWorkBarrier(
-        sourceRecords.turnItems,
-        parkedRequest?.handoff.contextLimitWork,
-      );
-      if (cap?.blocker) blockers.push(cap.blocker);
-      if (cap !== null)
-        manualReview.push(
-          "Context limit: verify every foreground, background and detached job has finished and its saved outcome is included in the handoff.",
-        );
-    }
+    const cap =
+      sourceRecords === null
+        ? null
+        : contextLimitWorkBarrier(sourceRecords.turnItems, parkedRequest?.handoff.contextLimitWork);
+    if (cap?.blocker) blockers.push(cap.blocker);
     let cwd = sourceRecords?.thread.worktreePath ?? null;
     if (sourceRecords !== null && cwd === null) {
       const project = yield* read("project", projects.get(sourceRecords.thread.projectId));
@@ -336,6 +330,19 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
           unknowns.push(`${provider.id}: incomplete live probe coverage`);
         manualReview.push(...limitations.map((item) => `${provider.id}: ${item}`));
       }
+    }
+    // Automatic context-limit release accepts the risk of detached OS processes outside T3's observations.
+    if (cap === null) {
+      manualReview.push("Automatic release is limited to context-limit handoffs.");
+    } else if (
+      !sourceRecords?.runs.some(
+        (run) =>
+          run.id === parkedRequest?.handoff.contextLimitWork?.capRunId &&
+          run.completedAt !== null &&
+          !active.has(run.status),
+      )
+    ) {
+      manualReview.push("The context-limit run's completion could not be confirmed.");
     }
     const observedTerminals =
       cwd === null

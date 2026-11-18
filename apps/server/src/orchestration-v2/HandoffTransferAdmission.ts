@@ -1,3 +1,4 @@
+import { automaticHandoffDeclaration } from "@t3tools/contracts";
 import { ProviderTurnStartModels } from "./ProviderTurnStartService.ts";
 import { agentModelPolicy } from "./AgentModelPolicy.ts";
 import {
@@ -536,7 +537,10 @@ const make = Effect.gen(function* () {
         );
         if (
           !snapshot.stable ||
-          snapshot.classification !== "manual_review" ||
+          snapshot.classification !==
+            (review.declaration === automaticHandoffDeclaration
+              ? "automatically_eligible"
+              : "manual_review") ||
           snapshot.releaseEvidence !== review.releaseEvidence ||
           snapshot.after.blockers.length ||
           snapshot.after.unknowns.length ||

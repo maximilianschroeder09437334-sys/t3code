@@ -180,8 +180,11 @@ export const layerExecutor: Layer.Layer<
                 return yield* Effect.fail(
                   "Core handoff dependencies are unavailable; source retained.",
                 );
-              if (Option.isSome(handoffProducer))
-                yield* handoffProducer.value.requestIfReady(request.sourceThreadId);
+              if (
+                Option.isSome(handoffProducer) &&
+                (yield* handoffProducer.value.requestIfReady(request.sourceThreadId)) === "accepted"
+              )
+                return; // The accepted request queued its own release effect.
               yield* CoreHandoff.deliverHandoff(request).pipe(
                 Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
                 (effect) =>

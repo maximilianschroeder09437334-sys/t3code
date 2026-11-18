@@ -8187,20 +8187,73 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         dispatchMode: { type: "start_immediately" },
       });
       const parentRun = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
-      yield* orchestrator.dispatch({
-        type: "delegated_task.request",
-        createdBy: "agent",
-        creationSource: "mcp",
+      const delegate = {
+        type: "delegated_task.request" as const,
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
         commandId: CommandId.make("archive-delegated-request"),
         parentThreadId: threadId,
         parentRunId: parentRun.id,
         parentNodeId: parentRun.rootNodeId!,
         task: "Keep working after the parent finishes.",
         modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        completionWake: "always",
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        completionWake: "always" as const,
+      };
+      yield* orchestrator.dispatch(delegate);
+      const owner = yield* orchestrator.getThreadProjection(threadId);
+      const attempt = owner.attempts.find(({ id }) => id === parentRun.activeAttemptId)!;
+      const provider = owner.providerThreads.find(({ id }) => id === parentRun.providerThreadId)!;
+      const child = owner.subagents[0]!;
+      const observedAt = yield* DateTime.now;
+      const nativeId = "archive-delegated-native";
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("archive-delegated-native"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: observedAt,
+            payload: { ...provider, nativeThreadRef: { driver, nativeId, strength: "strong" } },
+          },
+          {
+            id: EventId.make("archive-delegated-attempt"),
+            type: "run-attempt.updated",
+            threadId,
+            runId: parentRun.id,
+            occurredAt: observedAt,
+            payload: { ...attempt, nativeThreadId: nativeId },
+          },
+          {
+            id: EventId.make("archive-delegated-at-cap"),
+            type: "provider-turn.updated",
+            threadId,
+            runId: parentRun.id,
+            occurredAt: observedAt,
+            payload: {
+              id: ProviderTurnId.make("archive-delegated-turn"),
+              providerThreadId: provider.id,
+              nodeId: attempt.rootNodeId,
+              runAttemptId: attempt.id,
+              nativeTurnRef: null,
+              ordinal: 1,
+              status: "running",
+              startedAt: observedAt,
+              completedAt: null,
+              tokenUsage: { usedTokens: 252_960, updatedAt: DateTime.formatIso(observedAt) },
+            },
+          },
+        ],
       });
+      const blocked = yield* orchestrator
+        .dispatch({
+          ...delegate,
+          commandId: CommandId.make("archive-delegated-request-at-cap"),
+        })
+        .pipe(Effect.flip);
+      assert.include(userFacingDispatchErrorMessage(blocked), "250,000 context tokens");
+      assert.deepEqual((yield* orchestrator.getThreadProjection(threadId)).subagents, [child]);
       const delegatedParentRun = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
       const now = yield* DateTime.now;
       yield* sink.write({
@@ -13694,7 +13747,11 @@ const configureGuardedHandoffOwners = Effect.fn("test.configureGuardedHandoffOwn
     checkpointMatches: null,
     checkpointError: null,
   };
-  const availability = { cold: false };
+  const availability = {
+    cold: false,
+    completeAppOwnedCoverage: false,
+    loseAppOwnedCoverageOnOpen: false,
+  };
   yield* Effect.acquireRelease(
     Effect.sync(() =>
       vi
@@ -13726,6 +13783,15 @@ const configureGuardedHandoffOwners = Effect.fn("test.configureGuardedHandoffOwn
                     driver,
                     hasPendingBackgroundWork: Effect.succeed(false),
                     hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+                    ...(availability.completeAppOwnedCoverage
+                      ? {
+                          handoffReadinessCoverage: {
+                            scope: "all-app-owned-work",
+                            nativeSubagents: true,
+                            detachedTasks: true,
+                          },
+                        }
+                      : {}),
                   } as never,
                 }),
           ),
@@ -13757,6 +13823,15 @@ const configureGuardedHandoffOwners = Effect.fn("test.configureGuardedHandoffOwn
           events: Stream.never,
           hasPendingBackgroundWork: Effect.succeed(false),
           hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+          ...(availability.completeAppOwnedCoverage && !availability.loseAppOwnedCoverageOnOpen
+            ? {
+                handoffReadinessCoverage: {
+                  scope: "all-app-owned-work",
+                  nativeSubagents: true,
+                  detachedTasks: true,
+                },
+              }
+            : {}),
           ensureThread: (ensure: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) =>
             Effect.succeed({
               ...ensure.existingProviderThread!,
@@ -13816,11 +13891,8 @@ const setupGuardedHandoff = Effect.fn("test.setupGuardedHandoff")(function* (
   const sourceId = ThreadId.make(`guarded-${key}-source`);
   const projectId = ProjectId.make(`guarded-${key}-project`);
   const selection = { ...modelSelection, options: [{ id: "reasoningEffort", value: "high" }] };
-  const { sessions, git, now, workspace, starts } = yield* configureGuardedHandoffOwners(
-    key,
-    cwd,
-    selection,
-  );
+  const { sessions, git, now, workspace, starts, availability } =
+    yield* configureGuardedHandoffOwners(key, cwd, selection);
   yield* seedProject({
     projectId,
     title: "Guarded fixture",
@@ -14025,6 +14097,7 @@ const setupGuardedHandoff = Effect.fn("test.setupGuardedHandoff")(function* (
     selection,
     workspace,
     starts,
+    availability,
     submitted,
     snapshot,
     review,
@@ -15746,11 +15819,13 @@ it.layer(Layer.empty)(
         }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
     );
 
-    it.effect(
-      "guarded handoff completion worker produces one inert review without another agent turn",
-      () =>
+    it.effect.each(["manual", "automatic", "tracked-background-task", "lost-coverage"] as const)(
+      "guarded context handoff completion worker uses %s release without another source turn",
+      (mode) =>
         Effect.gen(function* () {
           const f = yield* setupGuardedHandoff("worker-producer", false);
+          f.availability.completeAppOwnedCoverage = mode !== "manual";
+          f.availability.loseAppOwnedCoverageOnOpen = mode === "lost-coverage";
           const sourceId = ThreadId.make("guarded-worker-real-source");
           const now = f.now;
           yield* f.orchestrator.dispatch({
@@ -15797,6 +15872,16 @@ it.layer(Layer.empty)(
                   ...provider,
                   id: ProviderThreadId.make("worker-source-provider"),
                   appThreadId: sourceId,
+                  pendingBackgroundTasks:
+                    mode === "tracked-background-task"
+                      ? [
+                          {
+                            kind: "command",
+                            taskId: "tracked-task",
+                            description: "Tracked background task",
+                          },
+                        ]
+                      : [],
                 },
               },
               {
@@ -15806,9 +15891,74 @@ it.layer(Layer.empty)(
                 occurredAt: now,
                 payload: run,
               },
+              {
+                id: EventId.make("worker-source-saved-command"),
+                type: "turn-item.updated",
+                threadId: sourceId,
+                runId: run.id,
+                occurredAt: now,
+                payload: {
+                  id: TurnItemId.make("worker-source-command"),
+                  threadId: sourceId,
+                  runId: run.id,
+                  nodeId: null,
+                  providerThreadId: null,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 1,
+                  type: "command_execution",
+                  title: "Fixture command",
+                  input: "Capture the result",
+                  output: "Saved result",
+                  exitCode: 0,
+                  status: "completed",
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                },
+              },
+              {
+                id: EventId.make("worker-source-context-cap"),
+                type: "turn-item.updated",
+                threadId: sourceId,
+                runId: run.id,
+                occurredAt: now,
+                payload: {
+                  id: TurnItemId.make("context-rollover:250000:worker-source"),
+                  threadId: sourceId,
+                  runId: run.id,
+                  nodeId: null,
+                  providerThreadId: null,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 2,
+                  status: "completed",
+                  title: "Context rollover required",
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  type: "system_notice",
+                  level: "warning",
+                  message: "Context limit",
+                },
+              },
             ],
           });
-          yield* CoreHandoff.submitHandoff(sourceId, f.request.handoff);
+          yield* CoreHandoff.submitHandoff(sourceId, {
+            ...f.request.handoff,
+            contextLimitWork: {
+              capRunId: run.id,
+              results: [
+                {
+                  commandItemId: TurnItemId.make("worker-source-command"),
+                  outcome: "Saved result",
+                  evidence: "Source command output",
+                },
+              ],
+            },
+          });
           yield* f.worker.drain();
           assert.isEmpty((yield* f.orchestrator.getThreadProjection(sourceId)).runtimeRequests);
           yield* f.sink.write({
@@ -15824,35 +15974,56 @@ it.layer(Layer.empty)(
           });
           yield* f.worker.drain();
           const pending = yield* f.orchestrator.getThreadProjection(sourceId);
+          if (mode === "tracked-background-task") {
+            const snapshot = yield* queryHandoffReadiness(sourceId);
+            assert.equal(snapshot.classification, "known_blocked");
+            assert.include(
+              snapshot.after.blockers,
+              "worker-source-provider: active provider or background tasks",
+            );
+            assert.isEmpty(pending.runtimeRequests);
+            assert.isUndefined(pending.thread.handoffTransfer);
+            assert.isEmpty(f.starts);
+            return;
+          }
           assert.lengthOf(pending.runtimeRequests, 1);
           assert.lengthOf(pending.runs, 1);
           assert.isEmpty(pending.messages);
           const review = pending.runtimeRequests[0]!.responseCapability;
           assert.equal(review.type, "handoff");
-          assert.isTrue(
-            Option.isNone(
-              yield* f.orchestrator
-                .getThreadProjection(ThreadId.make(`core-handoff:${sourceId}:successor`))
-                .pipe(Effect.option),
-            ),
-          );
-          assert.isEmpty(f.starts);
-          if (review.type !== "handoff") return yield* Effect.die("Expected handoff review");
-          yield* withAuthenticatedHandoffResponse(
-            f.session,
-            f.orchestrator.dispatch({
-              type: "runtime-request.respond",
-              commandId: CommandId.make("worker-producer-trusted-accept"),
-              threadId: sourceId,
-              requestId: pending.runtimeRequests[0]!.id,
-              decision: "accept",
-              handoffGeneration: review.generation,
-            }),
-          );
-          yield* f.worker.drain();
+          if (mode !== "manual") {
+            assert.equal(pending.runtimeRequests[0]!.decision, "accept");
+          } else {
+            assert.isTrue(
+              Option.isNone(
+                yield* f.orchestrator
+                  .getThreadProjection(ThreadId.make(`core-handoff:${sourceId}:successor`))
+                  .pipe(Effect.option),
+              ),
+            );
+            assert.isEmpty(f.starts);
+            if (review.type !== "handoff") return yield* Effect.die("Expected handoff review");
+            yield* withAuthenticatedHandoffResponse(
+              f.session,
+              f.orchestrator.dispatch({
+                type: "runtime-request.respond",
+                commandId: CommandId.make("worker-producer-trusted-accept"),
+                threadId: sourceId,
+                requestId: pending.runtimeRequests[0]!.id,
+                decision: "accept",
+                handoffGeneration: review.generation,
+              }),
+            );
+            yield* f.worker.drain();
+          }
           const transferred = yield* f.orchestrator.getThreadProjection(sourceId);
-          assert.equal(transferred.thread.handoffTransfer?.state, "started");
           assert.lengthOf(transferred.runs, 1);
+          if (mode === "lost-coverage") {
+            assert.equal(transferred.thread.handoffTransfer?.state, "released");
+            assert.isEmpty(f.starts);
+            return;
+          }
+          assert.equal(transferred.thread.handoffTransfer?.state, "started");
           assert.lengthOf(f.starts, 1);
           const successor = yield* f.orchestrator.getThreadProjection(
             ThreadId.make(`core-handoff:${sourceId}:successor`),

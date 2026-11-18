@@ -1,5 +1,7 @@
+import { automaticHandoffDeclaration } from "@t3tools/contracts";
 import * as HandoffAdmission from "./HandoffTransferAdmission.ts";
 import { hasHandoffResponseAuthority } from "../auth/HandoffResponseAuthority.ts";
+import { automaticHandoffAuthority } from "./AutomaticHandoffAuthority.ts";
 import * as HandoffEvents from "./EventStore.ts";
 import type {
   OrchestrationV2ThreadLinkMetadata,
@@ -207,6 +209,11 @@ import {
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffBudget";
+import {
+  CONTEXT_ROLLOVER_LIMIT,
+  contextRolloverLimitMessage,
+  contextRolloverNoticeId,
+} from "./ContextRollover.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const encodeCoreHandoff = Schema.encodeEffect(Schema.fromJsonString(HandoffInput));
@@ -6931,7 +6938,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               },
               providerThread,
             )?.usage;
-      const atContextLimit = usage !== undefined && usage.usedTokens >= 250_000;
+      const capNoticeId =
+        providerThread === undefined
+          ? undefined
+          : contextRolloverNoticeId(providerThread, CONTEXT_ROLLOVER_LIMIT);
+      if (
+        capNoticeId !== undefined &&
+        (yield* projectionStore
+          .getTurnItem({ threadId: command.threadId, itemId: capNoticeId })
+          .pipe(
+            Effect.mapError(
+              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+            ),
+          ))
+      )
+        return;
+      const atContextLimit = usage !== undefined && usage.usedTokens >= CONTEXT_ROLLOVER_LIMIT;
       if (atContextLimit || command.hookStageWorkspaceRoot === undefined) {
         const now = yield* DateTime.now;
         yield* emit(
@@ -9579,6 +9601,44 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
   });
 
+  const assertContextAllowsDelegation = Effect.fn("orchestrationV2.assertContextAllowsDelegation")(
+    function* (
+      command: {
+        readonly type: "delegated_task.request";
+        readonly commandId: CommandId;
+        readonly parentThreadId: ThreadId;
+      },
+      projection: Pick<
+        OrchestrationV2ThreadProjection,
+        "thread" | "providerThreads" | "providerTurns" | "runs" | "attempts"
+      >,
+    ) {
+      const provider = projection.providerThreads.find(
+        (thread) => thread.id === projection.thread.activeProviderThreadId,
+      );
+      if (provider === undefined) return;
+      const itemId = contextRolloverNoticeId(provider, CONTEXT_ROLLOVER_LIMIT);
+      const usage = latestNativeContextUsage(projection, provider)?.usage.usedTokens ?? 0;
+      const notice =
+        itemId === undefined
+          ? null
+          : yield* projectionStore
+              .getTurnItem({ threadId: command.parentThreadId, itemId })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
+                ),
+              );
+      if (usage >= CONTEXT_ROLLOVER_LIMIT || notice !== null)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: contextRolloverLimitMessage,
+        });
+    },
+  );
+
   const dispatchDelegatedTaskRequest = Effect.fn("orchestrationV2.dispatch.delegatedTaskRequest")(
     function* (
       command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>,
@@ -9633,6 +9693,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Parent node ${command.parentNodeId} is not part of active run ${parentRun.id}.`,
         });
       }
+
+      yield* assertContextAllowsDelegation(command, parentProjection);
 
       const targetAdapter = yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
         Effect.mapError(
@@ -11040,7 +11102,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       if (runtimeRequest.responseCapability.type === "handoff") {
         const review = runtimeRequest.responseCapability;
-        const authorized = yield* hasHandoffResponseAuthority;
+        const authenticated = yield* hasHandoffResponseAuthority;
+        const automatic = yield* automaticHandoffAuthority;
+        const authorized =
+          authenticated ||
+          (automatic !== undefined &&
+            command.decision === "accept" &&
+            automatic.threadId === command.threadId &&
+            automatic.requestId === command.requestId &&
+            automatic.generation === review.generation &&
+            review.releaseEvidence !== undefined &&
+            review.declaration === automaticHandoffDeclaration &&
+            review.manualReview.length === 0);
         const store = handoffEventStore;
         const later = yield* store
           .read({ threadId: command.threadId, afterSequence: review.sourceSequence })

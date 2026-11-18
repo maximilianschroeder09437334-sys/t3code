@@ -580,6 +580,7 @@ function makeLocalCommandHarness(input: {
   readonly gitWorkflow?: GitWorkflow.GitWorkflowService["Service"];
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
+  readonly previousContextTokens?: number;
   readonly previousMessages?: ReadonlyArray<string>;
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
@@ -665,7 +666,14 @@ function makeLocalCommandHarness(input: {
     providerSessionId: input.missingProviderSession === true ? null : providerSessionId,
     appThreadId: threadId,
     ownerNodeId: null,
-    nativeThreadRef: null,
+    nativeThreadRef:
+      input.previousContextTokens === undefined
+        ? null
+        : {
+            driver: ProviderDriverKind.make("codex"),
+            nativeId: "existing-native-conversation",
+            strength: "strong",
+          },
     nativeConversationHeadRef: null,
     status: "not_loaded",
     firstRunOrdinal: 2,
@@ -1078,6 +1086,9 @@ function makeLocalCommandHarness(input: {
       attempts: [
         {
           id: previousAttemptId,
+          ...(input.previousContextTokens === undefined
+            ? {}
+            : { nativeThreadId: "existing-native-conversation" }),
           runId: previousRunId,
           attemptOrdinal: 1,
           rootNodeId: NodeId.make("previous-root"),
@@ -1161,6 +1172,14 @@ function makeLocalCommandHarness(input: {
           ordinal: 1,
           nativeTurnRef: null,
           status: input.previousTurn.turnStatus,
+          ...(input.previousContextTokens === undefined
+            ? {}
+            : {
+                tokenUsage: {
+                  usedTokens: input.previousContextTokens,
+                  updatedAt: DateTime.formatIso(now),
+                },
+              }),
           startedAt: now,
           completedAt: input.previousTurn.turnStatus === "running" ? null : now,
         },
@@ -1294,21 +1313,27 @@ function makeLocalCommandHarness(input: {
                     ),
                   ),
                 )
-              : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+              : input.previousContextTokens !== undefined
                 ? Effect.succeed({
-                    driver: providerThread.driver,
-                    providerSession,
+                    ...sideChatSession,
                     ensureThread: () => Effect.succeed(providerThread),
-                    resumeThread: () => Effect.succeed(projection.providerThreads[0]),
+                    resumeThread: () => Effect.succeed(providerThread),
                   } as never)
-                : Effect.die("A local command must not open a native session."),
+                : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+                  ? Effect.succeed({
+                      driver: providerThread.driver,
+                      providerSession,
+                      ensureThread: () => Effect.succeed(providerThread),
+                      resumeThread: () => Effect.succeed(projection.providerThreads[0]),
+                    } as never)
+                  : Effect.die("A local command must not open a native session."),
   );
   const startRootRun = vi.fn<
     (
       input: RunExecutionService.RunExecutionServiceV2StartRootRunInput,
     ) => Effect.Effect<void, RunExecutionService.RunExecutionServiceV2Error>
   >((runInput) =>
-    input.sideChat !== undefined
+    input.sideChat !== undefined || input.previousContextTokens !== undefined
       ? (runInput.resume
           ? runInput.session.resumeTurn!({
               ...runInput,
@@ -1468,6 +1493,9 @@ function makeLocalCommandHarness(input: {
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThreadRecords,
           getTurnStartContext,
+          getThread: () => Effect.succeed(projection.thread),
+          getTurnItem: ({ itemId }) =>
+            Effect.succeed(projection.turnItems.find(({ id }) => id === itemId) ?? null),
           getRuntimeRecoveryProjection,
           getRun,
           getTurnStartHistory: () =>
@@ -2650,6 +2678,24 @@ effectIt.effect.each([
     expect(harness.interruptTurn).not.toHaveBeenCalled();
     expect(harness.projection().runs.at(-1)?.status).toBe("running");
   }),
+);
+
+effectIt.effect(
+  "tells a continuing native session to hand off even without a prior timeline notice",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue after the delegate returned",
+        previousTurn: { runStatus: "completed", turnStatus: "completed" },
+        previousContextTokens: 252_960,
+      });
+      yield* harness.start;
+      const message = harness.startTurn.mock.calls[0]?.[0].message.text;
+      expect(message).toContain("reached 250,000 context tokens");
+      expect(message).toContain("Do not compact");
+      expect(message).toContain("Continue after the delegate returned");
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+    }),
 );
 
 effectIt.effect("leaves delegated children to their own runs when the parent starts a turn", () =>

@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { CommandId, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -13,11 +13,14 @@ import * as Threads from "./ThreadManagementService.ts";
 import { HandoffParked } from "./CoreHandoff.ts";
 import { queryHandoffReadiness } from "./CoreHandoffReadiness.ts";
 import { requestHandoffApproval } from "./HandoffApproval.ts";
+import { withAutomaticHandoffAuthority } from "./AutomaticHandoffAuthority.ts";
 
 export class HandoffApprovalProducer extends Context.Service<
   HandoffApprovalProducer,
   {
-    readonly requestIfReady: (sourceId: ThreadId) => Effect.Effect<void, HandoffParked>;
+    readonly requestIfReady: (
+      sourceId: ThreadId,
+    ) => Effect.Effect<"accepted" | void, HandoffParked>;
   }
 >()("t3/orchestration-v2/HandoffApprovalProducer") {}
 
@@ -46,13 +49,33 @@ const make = Effect.gen(function* () {
         ThreadId.make(`core-handoff:${sourceId}:successor`),
       );
       if (successor !== null) return;
-      yield* Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
         const observed = yield* queryHandoffReadiness(sourceId);
-        if (!observed.stable || observed.classification !== "manual_review")
+        if (
+          !observed.stable ||
+          (observed.classification !== "manual_review" &&
+            observed.classification !== "automatically_eligible")
+        )
           return yield* new HandoffParked({
-            message: "Source is not ready for bounded manual review; request remains parked.",
+            message: "Source is not ready for handoff; the request remains parked.",
           });
-        yield* requestHandoffApproval(sourceId, observed.generation);
+        if (observed.classification === "manual_review") {
+          yield* requestHandoffApproval(sourceId, observed.generation);
+          return;
+        }
+        const review = yield* requestHandoffApproval(sourceId, observed.generation, "automatic");
+        yield* withAutomaticHandoffAuthority(
+          { threadId: sourceId, requestId: review.requestId, generation: review.generation },
+          threads.dispatch({
+            type: "runtime-request.respond",
+            commandId: CommandId.make(`${review.requestId}:automatic-accept`),
+            threadId: sourceId,
+            requestId: review.requestId,
+            decision: "accept",
+            handoffGeneration: review.generation,
+          }),
+        );
+        return "accepted" as const;
       }).pipe(
         Effect.provideService(Threads.ThreadManagementService, threads),
         Effect.provideService(Projects.ProjectStoreV2, projects),

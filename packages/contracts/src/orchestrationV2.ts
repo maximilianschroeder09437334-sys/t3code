@@ -1323,6 +1323,9 @@ export function isQueuedProviderThreadPlaceholder(
   );
 }
 
+export const automaticHandoffDeclaration =
+  "Readiness verified tracked native and managed work. Transfer will verify the same evidence again.";
+
 export const HandoffApprovalCapability = Schema.Struct({
   releaseEvidence: Schema.optional(Schema.String),
   type: Schema.Literal("handoff"),
@@ -1333,6 +1336,7 @@ export const HandoffApprovalCapability = Schema.Struct({
   declaration: Schema.Literals([
     "I reviewed native and detached work manually. This decision records review only; transfer remains parked.",
     "I reviewed native and detached work manually. This supplies only manual coverage; guarded transfer must still revalidate all app-owned work.",
+    automaticHandoffDeclaration,
   ]),
   blockers: Schema.Array(Schema.String),
   unknowns: Schema.Array(Schema.String),

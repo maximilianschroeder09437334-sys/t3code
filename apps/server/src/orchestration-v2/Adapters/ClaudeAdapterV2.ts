@@ -13778,6 +13778,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           getModelContextWindow: (selection) => claudeContextWindow(selection) ?? undefined,
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
+          handoffReadinessCoverage: {
+            scope: "all-app-owned-work",
+            nativeSubagents: true,
+            detachedTasks: true,
+          },
           hasPendingBackgroundWork: Effect.gen(function* () {
             // A wakeup can be up to an hour out, past the idle timeout, and dies with the process.
             if (scheduledWakeupsByNativeThread.size > 0) {

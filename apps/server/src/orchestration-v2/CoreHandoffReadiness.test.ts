@@ -214,7 +214,8 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
 
   it.effect.each([
     "contradictory",
-    "eligible",
+    "non-context-handoff",
+    "cap-run-missing",
     "cap-missing-proof",
     "cap-reconciled",
     "manual",
@@ -247,7 +248,11 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         reads = 0,
         sequences = 0,
         indexReads = 0;
-      if (scenario === "cap-missing-proof" || scenario === "cap-reconciled")
+      if (
+        scenario === "cap-missing-proof" ||
+        scenario === "cap-reconciled" ||
+        scenario === "cap-run-missing"
+      )
         records = decodeRecords({
           ...records,
           turnItems: [
@@ -313,6 +318,11 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         checkpointId: null,
         contextHandoffId: null,
       });
+      if (scenario === "cap-reconciled")
+        records = {
+          ...records,
+          runs: [{ ...run, id: capRunId, status: "completed", startedAt: now, completedAt: now }],
+        };
       if (scenario === "queued" || scenario === "contradictory")
         records = { ...records, runs: [run] };
       if (scenario === "approval")
@@ -342,7 +352,9 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           deadEnds: [],
           next: "Review",
           pointers: [],
-          ...(scenario === "cap-reconciled" ? { contextLimitWork: { capRunId, results: [] } } : {}),
+          ...(scenario === "cap-reconciled" || scenario === "cap-run-missing"
+            ? { contextLimitWork: { capRunId, results: [] } }
+            : {}),
         },
         projectId: records.thread.projectId,
         sourceThreadId: threadId,
@@ -425,7 +437,9 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
                           instanceId: selection.instanceId,
                           driver: "codex",
                           handoffReadinessCoverage:
-                            scenario === "eligible" || scenario === "cap-reconciled"
+                            scenario === "non-context-handoff" ||
+                            scenario === "cap-reconciled" ||
+                            scenario === "cap-run-missing"
                               ? {
                                   scope: "all-app-owned-work",
                                   nativeSubagents: true,
@@ -499,13 +513,16 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       else
         assert.equal(
           result.classification,
-          scenario === "eligible" ? "automatically_eligible" : "manual_review",
+          scenario === "cap-reconciled" ? "automatically_eligible" : "manual_review",
           result.after.blockers.join(" | "),
         );
       if (["head-change", "run-change", "child-change"].includes(scenario))
         assert.isFalse(result.stable);
-      if (scenario === "cap-reconciled")
-        assert.isTrue(result.after.manualReview.some((reason) => reason.includes("saved outcome")));
+      if (scenario === "cap-run-missing")
+        assert.include(
+          result.after.manualReview,
+          "The context-limit run's completion could not be confirmed.",
+        );
       if (scenario === "checkpoint") {
         assert.isTrue(result.before.workspace?.checkpointMatches);
         assert.equal(result.before.workspace?.checkpointCommit, fixture.checkpoint);
@@ -531,7 +548,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       assert.isBelow(Buffer.byteLength(JSON.stringify(summary), "utf8"), 8192);
       assert.notInclude(JSON.stringify(summary), "PRIVATE_HISTORY");
       assert.notInclude(JSON.stringify(summary), "BINARY_DIFF");
-      if (scenario === "eligible") {
+      if (scenario === "cap-reconciled") {
         const repeated = yield* observe(result.generation);
         assert.equal(repeated.generation, result.generation);
         assert.isTrue(repeated.expectedGenerationMatches);

@@ -7932,6 +7932,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           events: Stream.fromEffectRepeat(Queue.take(events)),
           canReuseContextUsage: canReuseCodexContextUsage,
           normalizeThreadLoadModelSelection: normalizeCodexThreadLoadModelSelection,
+          handoffReadinessCoverage: {
+            scope: "all-app-owned-work",
+            nativeSubagents: true,
+            detachedTasks: true,
+          },
           // Idle release can beat delayed subagent resumes: Codex reports them completed between turns with no resume-expected signal.
           hasPendingBackgroundWork: Effect.gen(function* () {
             for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {

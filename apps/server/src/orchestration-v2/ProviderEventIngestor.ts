@@ -53,6 +53,13 @@ import {
 } from "../hooks/HandoffNextStep.ts";
 import { UsageLimitResetFallback } from "../usage/UsageLimitSources.ts";
 import * as EventSink from "./EventSink.ts";
+import {
+  CONTEXT_HANDOFF_NUDGE,
+  CONTEXT_ROLLOVER_LIMIT,
+  contextHandoffNudgeMessage,
+  contextRolloverLimitMessage,
+  contextRolloverNoticeId,
+} from "./ContextRollover.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -386,6 +393,87 @@ export const layer: Layer.Layer<
         );
       });
 
+    const contextRolloverNotices = Effect.fnUntraced(function* (
+      input: ProviderEventIngestInput,
+      turn: Extract<
+        ProviderAdapter.ProviderAdapterV2Event,
+        { type: "provider_turn.updated" }
+      >["providerTurn"],
+    ) {
+      const usage = turn.tokenUsage;
+      if (
+        usage === undefined ||
+        usage.usedTokens < CONTEXT_HANDOFF_NUDGE ||
+        input.runId === undefined ||
+        turn.runAttemptId === null ||
+        turn.nodeId === null
+      )
+        return [];
+      const records = yield* projections.getRunProviderRecords(
+        input.threadId,
+        input.runId,
+        turn.nodeId,
+      );
+      const run = records.runs[0];
+      const provider = records.providerThreads[0];
+      const attempt = records.attempts[0];
+      if (
+        run === undefined ||
+        provider === undefined ||
+        attempt === undefined ||
+        records.thread.activeProviderThreadId !== provider.id ||
+        provider.id !== turn.providerThreadId ||
+        provider.providerSessionId !== input.providerSessionId ||
+        attempt.id !== turn.runAttemptId ||
+        attempt.rootNodeId !== turn.nodeId ||
+        attempt.nativeThreadId !== provider.nativeThreadRef?.nativeId
+      )
+        return [];
+      const prior = records.providerTurns.find((candidate) => candidate.id === turn.id);
+      if (prior?.tokenUsage && usage.updatedAt < prior.tokenUsage.updatedAt) return [];
+      const notices: Array<OrchestrationV2DomainEvent> = [];
+      const now = yield* DateTime.now;
+      for (const threshold of [CONTEXT_HANDOFF_NUDGE, CONTEXT_ROLLOVER_LIMIT] as const) {
+        if (usage.usedTokens < threshold) continue;
+        const id = contextRolloverNoticeId(provider, threshold);
+        if (
+          id === undefined ||
+          (yield* projections.getTurnItem({ threadId: input.threadId, itemId: id }))
+        )
+          continue;
+        const ordinal =
+          (yield* projections.getNextTurnItemOrdinal(input.threadId)) + notices.length;
+        const capped = threshold === CONTEXT_ROLLOVER_LIMIT;
+        notices.push(
+          yield* makeDomainEvent(input, {
+            type: "turn-item.updated",
+            runId: run.id,
+            nodeId: turn.nodeId,
+            payload: {
+              id,
+              threadId: input.threadId,
+              runId: run.id,
+              nodeId: turn.nodeId,
+              providerThreadId: provider.id,
+              providerTurnId: turn.id,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal,
+              status: "completed",
+              title: capped ? "Context rollover required" : "Context is getting large",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "system_notice",
+              level: "warning",
+              message: capped ? contextRolloverLimitMessage : contextHandoffNudgeMessage,
+            },
+          }),
+        );
+      }
+      return notices;
+    });
+
     const dismissNativeUserInputs = Effect.fn("ProviderEventIngestor.dismissNativeUserInputs")(
       function* (
         input: ProviderEventIngestInput,
@@ -634,6 +722,7 @@ export const layer: Layer.Layer<
                   payload: input.event.providerTurn,
                   nodeId: input.event.providerTurn.nodeId,
                 }),
+                ...(yield* contextRolloverNotices(input, input.event.providerTurn)),
               ];
             case "node.updated":
               // Adapters send an unchanged node again with each text delta. Compare with the

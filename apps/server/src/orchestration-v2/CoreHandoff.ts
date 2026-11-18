@@ -1,4 +1,5 @@
 import * as Receipts from "./CommandReceiptStore.ts";
+import { isContextRolloverLimitNotice } from "./ContextRollover.ts";
 import {
   CommandId,
   HandoffInput,
@@ -42,7 +43,8 @@ export function contextLimitWorkBarrier(
     (item) =>
       item.type === "system_notice" &&
       item.runId !== null &&
-      (item.id === derive.runSignalTurnItem({ runId: item.runId, signal: "hook-context-limit" }) ||
+      (isContextRolloverLimitNotice(item.id) ||
+        item.id === derive.runSignalTurnItem({ runId: item.runId, signal: "hook-context-limit" }) ||
         (item.id ===
           derive.runSignalTurnItem({ runId: item.runId, signal: "hook-continuation-paused" }) &&
           item.message.startsWith("This native session reached 250,000 context tokens."))),
