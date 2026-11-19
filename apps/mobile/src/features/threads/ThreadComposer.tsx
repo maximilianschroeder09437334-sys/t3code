@@ -594,6 +594,11 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     onUsageLimits:
       usageLimitsOffered && draftAttachments.length === 0 ? openUsageLimits : undefined,
     onOpenModelPicker: settingsSheetPresentation.open,
+    onOpenNotes: () =>
+      navigation.navigate("ThreadNotes", {
+        environmentId: props.environmentId,
+        threadId: props.selectedThread.id,
+      }),
     modelOptions: mentionModelOptions,
     modelProviders: props.serverConfig?.providers,
     ...(props.onFreshSession === undefined ? {} : { onFreshSession: props.onFreshSession }),

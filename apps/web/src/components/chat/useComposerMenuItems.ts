@@ -240,6 +240,17 @@ export function useComposerMenuItems({
     }
     if (composerTrigger.kind === "slash-command") {
       const builtInSlashCommandItems = [
+        ...(activeThreadId
+          ? [
+              {
+                id: "slash:notes",
+                type: "slash-command" as const,
+                command: "notes" as const,
+                label: "/notes",
+                description: "Open this thread's saved notes",
+              },
+            ]
+          : []),
         {
           id: "slash:hooks",
           type: "slash-command",
@@ -315,7 +326,8 @@ export function useComposerMenuItems({
       const visibleProviderSlashCommandItems = providerSlashCommandItems.filter(
         (item) =>
           (item.command.name !== "compact" || compactSlashCommandAvailable) &&
-          (item.command.name !== "clear" || !freshSessionAvailable),
+          (item.command.name !== "clear" || !freshSessionAvailable) &&
+          (item.command.name !== "notes" || !activeThreadId),
       );
       const slashCommandItems = slashCommandItemsForPromptPosition(
         [...builtInSlashCommandItems, ...visibleProviderSlashCommandItems, ...skillItems],

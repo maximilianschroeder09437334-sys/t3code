@@ -1,3 +1,4 @@
+import { ThreadNotesRouteScreen } from "./features/threads/ThreadNotesRouteScreen";
 import { isDraftThreadRoute } from "./features/threads/thread-route-state";
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
@@ -557,6 +558,11 @@ const RootStackConfig = createWorkspaceStackNavigator({
     PullRequestEdit: createNativeStackScreen({
       screen: PullRequestEditScreen,
       options: sheetRoute({ detent: 0.75, androidFit: true }),
+    }),
+    ThreadNotes: createNativeStackScreen({
+      screen: ThreadNotesRouteScreen,
+      linking: "notes/:environmentId/:threadId",
+      options: pageRoute(),
     }),
     Thread: createNativeStackScreen({
       screen: ThreadRouteScreen,

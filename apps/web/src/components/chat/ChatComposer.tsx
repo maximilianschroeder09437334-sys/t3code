@@ -1,3 +1,4 @@
+import { ThreadNotesDialog } from "./ThreadNotesDialog";
 import { VoiceInputSetup } from "./VoiceInputSetup";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
@@ -486,6 +487,7 @@ const NO_PROVIDER_SLASH_COMMANDS: ServerProvider["slashCommands"] = [];
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
   const navigate = useNavigate();
+  const [notesOpen, setNotesOpen] = useState(false);
   const {
     composerDraftTarget,
     environmentId,
@@ -1910,6 +1912,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return;
     }
     if (item.type === "slash-command") {
+      if (item.command === "notes") {
+        if (!routeThreadRef) return;
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          focusEditorAfterReplace: false,
+        });
+        if (applied) {
+          setComposerHighlightedItemId(null);
+          setNotesOpen(true);
+        }
+        return;
+      }
       if (item.command === "hooks") {
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
@@ -3855,6 +3869,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           </div>
         </ComposerSurface.Main>
       </div>
+      {notesOpen && routeThreadRef ? (
+        <ThreadNotesDialog threadRef={routeThreadRef} onOpenChange={setNotesOpen} />
+      ) : null}
     </form>
   );
 });

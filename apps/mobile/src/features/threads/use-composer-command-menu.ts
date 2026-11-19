@@ -123,6 +123,15 @@ export function buildComposerSlashCommandItems(input: {
 
   // Providers expand commands only at the start of a message. T3 commands
   // change local state and do not have this restriction, except `/clear`.
+  if (input.hasThread && "notes".includes(query)) {
+    items.push({
+      id: "cmd:notes",
+      type: "slash-command",
+      command: "notes",
+      label: "/notes",
+      description: "Open this thread's saved notes",
+    });
+  }
   if (!input.atMessageStart) return items;
   if (input.offersSideChat) {
     for (const [command, description] of [
@@ -151,6 +160,7 @@ export function buildComposerSlashCommandItems(input: {
   for (const command of input.selectedProviderStatus?.slashCommands ?? []) {
     if (!command.name.toLowerCase().includes(query)) continue;
     if (command.name === "clear" && input.offersFreshSession) continue;
+    if (command.name === "notes" && input.hasThread) continue;
     if (command.name === "compact" && !input.hasCompactableConversation) continue;
     if (command.name === USAGE_LIMITS_COMMAND.name && input.offersUsageLimits && !input.hasThread) {
       continue;
@@ -257,6 +267,7 @@ export function useComposerCommandMenu({
   onChangeDraftMessage,
   onUsageLimits,
   onOpenModelPicker,
+  onOpenNotes,
   modelOptions,
   modelProviders,
   onFreshSession,
@@ -283,6 +294,7 @@ export function useComposerCommandMenu({
   readonly onUsageLimits?: () => void;
   /** `/model` opens this picker instead of inserting text. */
   readonly onOpenModelPicker: () => void;
+  readonly onOpenNotes?: () => void;
   readonly modelOptions?: ReadonlyArray<ModelOption>;
   readonly modelProviders?: ReadonlyArray<ServerProvider>;
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
@@ -637,6 +649,10 @@ export function useComposerCommandMenu({
       onChangeDraftMessage(cleared.text);
       action();
     };
+    if (item.type === "slash-command" && item.command === "notes") {
+      if (onOpenNotes) clearTriggerThen(onOpenNotes);
+      return;
+    }
     if (item.type === "slash-command" && item.command === "model") {
       clearTriggerThen(onOpenModelPicker);
       return;

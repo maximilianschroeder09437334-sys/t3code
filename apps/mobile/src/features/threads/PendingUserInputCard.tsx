@@ -319,7 +319,8 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                         onPress={() => {
                           setLocalAnswerState((current) => {
                             if (!(question.id in current.answers)) return current;
-                            const { [question.id]: _cleared, ...answers } = current.answers;
+                            const answers = { ...current.answers };
+                            delete answers[question.id];
                             return { ...current, answers };
                           });
                           props.onSelectOption(
