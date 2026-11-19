@@ -47,6 +47,7 @@ import {
 } from "../hooks/HandoffThreadRouting.ts";
 import * as HookStagingManager from "../hooks/HookStagingManager.ts";
 import {
+  handoffFirstStepIsOwnWork,
   handoffFirstStepOwner,
   handoffNeedsUser,
   userRequestedFullStopHold,
@@ -968,6 +969,16 @@ export const layer: Layer.Layer<
           readonly continueWork?: boolean;
           readonly repair?: HookDecision["repair"];
         };
+        const currentRun = context.runs.find((run) => run.id === input.runId);
+        const parentRunId = currentRun?.hookContinuationOfRunId;
+        // Only a turn-end block (a failed run) creates a continuation of a failed run.
+        const isHookRewrite =
+          parentRunId !== undefined &&
+          (yield* projections
+            .getThreadRecords(input.threadId, ["runs"], { runIds: [parentRunId] })
+            .pipe(Effect.catchCause(() => Effect.succeed(null))))?.runs.find(
+            (run) => run.id === parentRunId,
+          )?.status === "failed";
         const references = handoffThreadReferences(finalText);
         const handoffThreads = yield* readHandoffThreadStates(
           references,
@@ -976,7 +987,7 @@ export const layer: Layer.Layer<
             .flatMap((message) => message.context?.records ?? [])
             .filter(isThreadContextRecord),
         ).pipe(Effect.provideService(ProjectionStore.ProjectionStoreV2, projections));
-        const decision: TurnEndDecision = yield* turnEndHooks
+        const hookDecision: TurnEndDecision = yield* turnEndHooks
           .runEvent({
             projectId: context.thread.projectId,
             event: "turn_end",
@@ -990,6 +1001,7 @@ export const layer: Layer.Layer<
                 handoffFirstStepOwner(finalText) === "codex" &&
                 !handoffIsThreadWait(finalText) &&
                 !handoffNeedsUser(finalText),
+              ...(parentRunId === undefined ? {} : { isHookContinuation: true, isHookRewrite }),
               ...(references.length === 0 ? {} : { handoffThreadStateVersion: 1, handoffThreads }),
             },
           })
@@ -1007,6 +1019,15 @@ export const layer: Layer.Layer<
               ),
             ),
           );
+        // A rewrite only fixed the report; resume the agent-owned work the block interrupted.
+        const decision: TurnEndDecision =
+          isHookRewrite &&
+          hookDecision.allowed &&
+          hookDecision.action === undefined &&
+          handoffFirstStepIsOwnWork(finalText) &&
+          !handoffNeedsUser(finalText)
+            ? { ...hookDecision, continueWork: true }
+            : hookDecision;
         if (!decision.allowed) {
           HookStagingManager.forgetActiveHookStageSession(input.threadId, input.runId);
           return rememberTurnHookResult(key, {

@@ -1,5 +1,18 @@
 /** Extract the owner of the first explicit handoff step without interpreting its meaning. */
 export function handoffFirstStepOwner(text: string): "codex" | "maxi" | "other" | null {
+  return firstStep(text)?.owner ?? null;
+}
+
+/** The first step is agent-owned work in this thread, not a wait or another thread's task. */
+export function handoffFirstStepIsOwnWork(text: string): boolean {
+  const step = firstStep(text);
+  return step?.owner === "codex" && !/^(?:\[|WAIT\b)/i.test(step.body);
+}
+
+// "T3" is the agent owner label in T3-hosted reports; "codex" stays the payload value hooks match.
+const AGENT_OWNERS = new Set(["codex", "t3"]);
+
+function firstStep(text: string): { owner: "codex" | "maxi" | "other"; body: string } | null {
   let inFence = false;
   let inSteps = false;
   for (const raw of text.split(/\r?\n/)) {
@@ -19,7 +32,10 @@ export function handoffFirstStepOwner(text: string): "codex" | "maxi" | "other" 
     const step = /^(?:1[.)]|[-*])\s+(?:\*\*)?([^:\n*]+?)(?:\*\*)?:(?:\*\*)?(?:\s|$)/.exec(line);
     if (!step) return null;
     const owner = step[1]!.trim().toLowerCase();
-    return owner === "codex" || owner === "maxi" ? owner : "other";
+    return {
+      owner: AGENT_OWNERS.has(owner) ? "codex" : owner === "maxi" ? "maxi" : "other",
+      body: line.slice(step[0].length).trim(),
+    };
   }
   return null;
 }

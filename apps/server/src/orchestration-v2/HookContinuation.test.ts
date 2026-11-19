@@ -9,7 +9,10 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import { continueHookRun } from "./HookContinuation.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 
 it.effect("dispatches one replay-safe continuation and carries its staged workspace", () =>
@@ -359,9 +362,111 @@ it.effect("steers a hook-blocked report with the hook rule and correction", () =
       assert.include(command.text, "Correct it to follow the hook's rule");
       assert.include(command.text, "What went wrong:");
       assert.include(command.text, "Read the applicable AGENTS.md and fix the output");
-      assert.include(command.text, "Agent steps start with Codex:");
+      assert.include(command.text, "Rewrite only that reply");
+      assert.notInclude(command.text, "Codex:");
       assert.notInclude(command.text, "Your first next step is assigned to you");
       assert.equal(command.hookContinuationOfRunId, sourceRunId);
+    }
+  }),
+);
+
+const chainLayer = (
+  threadId: ThreadId,
+  runs: ReadonlyArray<Record<string, unknown>>,
+  dispatched: Array<RunId>,
+) =>
+  Layer.mock(ThreadManagementService.ThreadManagementService)({
+    getThreadRecords: (_thread, _fields, filter) =>
+      Effect.succeed({
+        runs:
+          filter?.runIds === undefined
+            ? []
+            : runs.filter((run) => filter.runIds!.includes(run.id as RunId)),
+        messages: filter?.messageIds?.includes(MessageId.make(`${threadId}:original`))
+          ? [{ id: MessageId.make(`${threadId}:original`), text: "Please build this." }]
+          : [],
+        turnItems: runs
+          .filter((run) => run.status === "failed")
+          .map((run) => ({
+            type: "error",
+            status: "failed",
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            failure: { code: "hook_blocked", message: "Keep it short." },
+          })),
+      } as unknown as OrchestrationV2ThreadProjection),
+    dispatch: (command) => {
+      if (command.type === "message.dispatch") dispatched.push(command.hookContinuationOfRunId!);
+      return Effect.succeed({} as never);
+    },
+  });
+
+const chainRun = (
+  threadId: ThreadId,
+  id: string,
+  status: "completed" | "failed",
+  parent?: string,
+) => ({
+  id: RunId.make(id),
+  threadId,
+  status,
+  rootNodeId: NodeId.make(`${id}:root`),
+  startedAt: DateTime.makeUnsafe("2026-11-19T21:00:00.000Z"),
+  userMessageId: MessageId.make(parent === undefined ? `${threadId}:original` : `${id}:message`),
+  modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-5-5" },
+  ...(parent === undefined ? {} : { hookContinuationOfRunId: RunId.make(parent) }),
+});
+
+it.effect("rewrites each blocked report once but rewrites again after resumed work", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("hook-rewrite-chain");
+    const runs = [
+      chainRun(threadId, "blocked", "failed"),
+      chainRun(threadId, "rewrite", "failed", "blocked"),
+      chainRun(threadId, "rewrite-ok", "completed", "blocked"),
+      chainRun(threadId, "resumed", "failed", "rewrite-ok"),
+    ];
+    const dispatched: Array<RunId> = [];
+    const layer = chainLayer(threadId, runs, dispatched);
+    const repair = { maxAttempts: 1, deadlineSeconds: 120 };
+    yield* continueHookRun({ threadId, sourceRunId: RunId.make("blocked"), repair }).pipe(
+      Effect.provide(layer),
+    );
+    yield* continueHookRun({ threadId, sourceRunId: RunId.make("rewrite"), repair }).pipe(
+      Effect.provide(layer),
+    );
+    yield* continueHookRun({ threadId, sourceRunId: RunId.make("resumed"), repair }).pipe(
+      Effect.provide(layer),
+    );
+    assert.deepEqual(dispatched, [RunId.make("blocked"), RunId.make("resumed")]);
+  }),
+);
+
+it.effect("does not resume work while this chain's handoff waits for its successor", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("hook-handoff-chain");
+    const runs = [
+      chainRun(threadId, "blocked-report", "failed"),
+      chainRun(threadId, "rewritten-report", "completed", "blocked-report"),
+    ];
+    const outbox = (createdAt: string) =>
+      Layer.mock(EffectOutbox.EffectOutboxV2)({
+        get: (id) =>
+          Effect.succeed(
+            id === `core-handoff:${threadId}`
+              ? Option.some({ status: "failed", createdAt } as never)
+              : Option.none(),
+          ),
+      });
+    for (const [createdAt, expected] of [
+      ["2026-11-19T21:01:00.000Z", 0],
+      ["2026-11-19T20:00:00.000Z", 1],
+    ] as const) {
+      const dispatched: Array<RunId> = [];
+      yield* continueHookRun({ threadId, sourceRunId: RunId.make("rewritten-report") }).pipe(
+        Effect.provide(Layer.merge(chainLayer(threadId, runs, dispatched), outbox(createdAt))),
+      );
+      assert.lengthOf(dispatched, expected);
     }
   }),
 );

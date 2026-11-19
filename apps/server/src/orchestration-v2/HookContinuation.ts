@@ -7,12 +7,23 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import { userRequestedPauseOrWait } from "../hooks/HandoffNextStep.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 
 const MAX_HOOK_CONTINUATIONS = 2;
+const MAX_CHAIN_RUNS = 8;
 const CONTINUE_PROMPT =
   "Your first next step is assigned to you. Continue the user's requested work now when possible. A Full Stop permits preparation and validation in staging only: do not install staged files, make live project edits, or deliver. Honor an explicit user Stop or pause, pending approvals, the selected permission mode, and genuine blockers. If you cannot proceed without the user, explain the concrete blocker. Keep staged changes and validate them before installation.";
+
+/** A rewrite after a turn-end block only corrects the report; it is not new work. */
+export const isHookRewriteRun = (
+  run: Pick<OrchestrationV2Run, "hookContinuationOfRunId">,
+  runs: ReadonlyArray<Pick<OrchestrationV2Run, "id" | "status">>,
+) =>
+  run.hookContinuationOfRunId !== undefined &&
+  runs.find((parent) => parent.id === run.hookContinuationOfRunId)?.status === "failed";
 
 /** Durable effects may replay: the message and command IDs are tied to the source run. */
 export const continueHookRun = Effect.fn("HookContinuation.continueHookRun")(
@@ -48,33 +59,54 @@ export const continueHookRun = Effect.fn("HookContinuation.continueHookRun")(
           )
         : undefined;
     if (source.status !== "completed" && hookFailure === undefined) return;
-    let root: OrchestrationV2Run = source;
-    const maxAttempts = Math.min(
-      MAX_HOOK_CONTINUATIONS,
-      Math.max(1, input.repair?.maxAttempts ?? MAX_HOOK_CONTINUATIONS),
-    );
+    const rewrite = hookFailure !== undefined;
+    // Rewrites are capped per block; resumed work is capped across the whole chain.
+    const limit = rewrite
+      ? Math.min(
+          MAX_HOOK_CONTINUATIONS,
+          Math.max(1, input.repair?.maxAttempts ?? MAX_HOOK_CONTINUATIONS),
+        )
+      : MAX_HOOK_CONTINUATIONS;
     const deadline = Math.min(300, Math.max(1, input.repair?.deadlineSeconds ?? 300)) * 1000;
-    let continuationCount = 0;
+    let root: OrchestrationV2Run = source;
+    let counted = 0;
+    let consecutive = true;
     const visited = new Set<RunId>([source.id]);
     while (root.hookContinuationOfRunId !== undefined) {
       const parentRunId = root.hookContinuationOfRunId;
-      if (visited.has(parentRunId) || continuationCount >= maxAttempts) return;
+      if (visited.has(parentRunId) || counted >= limit || visited.size > MAX_CHAIN_RUNS) return;
       const parentProjection = yield* threads.getThreadRecords(input.threadId, ["runs"], {
         runIds: [parentRunId],
       });
       const previous = parentProjection.runs.find((run) => run.id === parentRunId);
       if (!previous || previous.threadId !== input.threadId) return;
       visited.add(previous.id);
-      continuationCount += 1;
+      // Only a turn-end block (a failed run) is continued by a rewrite.
+      const linkIsRewrite = previous.status === "failed";
+      if (linkIsRewrite === rewrite && consecutive) counted += 1;
+      else if (rewrite) consecutive = false;
       root = previous;
     }
-    if (continuationCount >= maxAttempts) return;
+    if (counted >= limit) return;
     if (
-      root.completedAt != null &&
-      DateTime.toEpochMillis(yield* DateTime.now) - DateTime.toEpochMillis(root.completedAt) >
+      source.completedAt != null &&
+      DateTime.toEpochMillis(yield* DateTime.now) - DateTime.toEpochMillis(source.completedAt) >
         deadline
     )
       return;
+    if (!rewrite && root.startedAt != null) {
+      // Work after a handoff request would invalidate it; the successor owns the next step.
+      const outbox = yield* Effect.serviceOption(EffectOutbox.EffectOutboxV2);
+      const handoff = Option.isSome(outbox)
+        ? yield* outbox.value.get(`core-handoff:${input.threadId}`)
+        : Option.none();
+      if (
+        Option.isSome(handoff) &&
+        handoff.value.status !== "cancelled" &&
+        Date.parse(handoff.value.createdAt) >= DateTime.toEpochMillis(root.startedAt)
+      )
+        return;
+    }
     const original = yield* threads.getThreadRecords(input.threadId, ["messages"], {
       messageIds: [root.userMessageId],
     });
@@ -88,7 +120,7 @@ export const continueHookRun = Effect.fn("HookContinuation.continueHookRun")(
       text:
         hookFailure === undefined
           ? `${input.messages?.filter(Boolean).length ? `Hook feedback:\n${input.messages.filter(Boolean).join("\n")}\n\n` : ""}${CONTINUE_PROMPT}`
-          : `A turn-end hook blocked the previous output. Correct it to follow the hook's rule below.\n\nWhat went wrong:\n${input.messages?.filter(Boolean).join("\n") || (hookFailure.type === "error" ? hookFailure.failure.message : "")}\n\nRead the applicable AGENTS.md and fix the output. Agent steps start with Codex:. Route another chat as Codex: followed by its exact thread reference and task; use Codex: WAIT on for a real wait. Do not perform another thread's task, bypass approvals or resume stopped work.`,
+          : `A turn-end hook blocked the previous output. Correct it to follow the hook's rule below.\n\nWhat went wrong:\n${input.messages?.filter(Boolean).join("\n") || (hookFailure.type === "error" ? hookFailure.failure.message : "")}\n\nRead the applicable AGENTS.md and fix the output. Rewrite only that reply; T3 resumes your remaining work afterwards when its first next step is yours. Do not perform another thread's task, bypass approvals or resume stopped work.`,
       notification: {
         source: { kind: "system" },
         outcome: "updated",

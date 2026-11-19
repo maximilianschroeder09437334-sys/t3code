@@ -125,6 +125,7 @@ function startWithMissingWorktree(
   },
   actor: "agent" | "user" = "agent",
   messageCreatedBy?: "agent" | "user",
+  hookContinuationOfRunId?: string,
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -174,6 +175,9 @@ function startWithMissingWorktree(
         providerThreadId,
         userMessageId: messageId,
         ordinal: 2,
+        ...(hookContinuationOfRunId === undefined
+          ? {}
+          : { hookContinuationOfRunId: RunId.make(hookContinuationOfRunId) }),
       },
     ],
     nodes: [{ id: rootNodeId, checkpointScopeId }],
@@ -408,6 +412,26 @@ it("starts a person's follow-up in an agent-created thread without recorded prov
     undefined,
     "agent",
     "user",
+  );
+  await expect(fixture.start).resolves.toBeDefined();
+  expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+});
+
+it("starts T3's hook continuation in an agent-created thread whose selection changed", async () => {
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    {
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "high" }],
+      },
+    },
+    "agent",
+    "agent",
+    "run_blocked_by_turn_end_hook",
   );
   await expect(fixture.start).resolves.toBeDefined();
   expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();

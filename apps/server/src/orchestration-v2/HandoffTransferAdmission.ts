@@ -37,6 +37,7 @@ import * as Receipts from "./CommandReceiptStore.ts";
 import * as Executor from "./ThreadCommandExecutor.ts";
 import { queryHandoffReadinessWithReaders } from "./CoreHandoffReadiness.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { isHookRewriteRun } from "./HookContinuation.ts";
 
 export class HandoffTransferError extends Schema.TaggedError<HandoffTransferError>()(
   "HandoffTransferError",
@@ -299,7 +300,8 @@ const make = Effect.gen(function* () {
         sourceRuns.runs.some(
           (run) =>
             run.startedAt !== null &&
-            DateTime.toEpochMillis(run.startedAt) > Date.parse(parked.value.createdAt),
+            DateTime.toEpochMillis(run.startedAt) > Date.parse(parked.value.createdAt) &&
+            !isHookRewriteRun(run, sourceRuns.runs),
         )
       )
         return yield* failed(sourceId, "newer-source-run");

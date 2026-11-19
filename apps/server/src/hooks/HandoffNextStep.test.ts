@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  handoffFirstStepIsOwnWork,
   handoffFirstStepOwner,
   handoffNeedsUser,
   userRequestedFullStopHold,
@@ -23,8 +24,24 @@ describe("handoffFirstStepOwner", () => {
     ["**Next steps in order**\nWaiting for approval.\n1. Codex: Continue.", null],
     ["**Next steps in order**\n2. Codex: Continue.", null],
     ["Codex: Continue.", null],
+    ["**Next steps in order**\n1. T3: Continue the build.\n2. Maxi: nothing needed.", "codex"],
   ] as const)("parses only an explicit first step", (text, expected) => {
     expect(handoffFirstStepOwner(text)).toBe(expected);
+  });
+
+  it.each([
+    ["**Next steps in order**\n1. T3: Continue the build.", true],
+    [
+      "**Next steps in order**\n1. T3: WAIT on [Worker](https://app.t3.codes/threads/e/w) to end.",
+      false,
+    ],
+    [
+      "**Next steps in order**\n1. T3: [Worker](https://app.t3.codes/threads/e/w): build it.",
+      false,
+    ],
+    ["**Next steps in order**\n1. Maxi: Approve the install.", false],
+  ] as const)("knows when the first step is this agent's own work", (text, expected) => {
+    expect(handoffFirstStepIsOwnWork(text)).toBe(expected);
   });
 });
 

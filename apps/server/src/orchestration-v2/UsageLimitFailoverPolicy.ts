@@ -102,11 +102,7 @@ export function usageLimitFailoverIntent(
       provider.availability !== "available" ||
       !provider.supportedRuntimeModes?.includes(thread.runtimeMode) ||
       /opus/i.test(binding.selection.model) ||
-      agentModelPolicy({
-        selection: binding.selection,
-        provider,
-        interactionMode: thread.interactionMode,
-      }) !== null
+      agentModelPolicy({ selection: binding.selection, provider }) !== null
     )
       return null;
     const model = provider.models.find((model) => model.slug === binding.selection.model);

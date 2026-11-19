@@ -220,6 +220,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
     "oversized",
     "settled-stale",
     "newer-run",
+    "rewrite-run",
     "fork",
     "subagent",
     "side-chat",
@@ -271,6 +272,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           "oversized",
           "settled-stale",
           "newer-run",
+          "rewrite-run",
           "checkpoint-timeout",
           "untracked-timeout",
           "unborn-checkpoint-change",
@@ -371,6 +373,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           "unborn-checkpoint-change",
           "settled-stale",
           "newer-run",
+          "rewrite-run",
         ].includes(scenario)
       )
         records = {
@@ -393,6 +396,22 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
               id: RunId.make("newer"),
               ordinal: 2,
               status: "completed",
+              startedAt: DateTime.makeUnsafe("2099-01-01T00:00:00Z"),
+              completedAt: DateTime.makeUnsafe("2099-01-01T00:00:00Z"),
+            },
+          ],
+        };
+      if (scenario === "rewrite-run")
+        records = {
+          ...records,
+          runs: [
+            ...records.runs.map((existing) => ({ ...existing, status: "failed" as const })),
+            {
+              ...run,
+              id: RunId.make("report-rewrite"),
+              ordinal: 2,
+              status: "completed",
+              hookContinuationOfRunId: capRunId,
               startedAt: DateTime.makeUnsafe("2099-01-01T00:00:00Z"),
               completedAt: DateTime.makeUnsafe("2099-01-01T00:00:00Z"),
             },
@@ -474,6 +493,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
             "oversized",
             "settled-stale",
             "newer-run",
+            "rewrite-run",
             "checkpoint-timeout",
             "untracked-timeout",
             "unborn-checkpoint-change",
@@ -649,6 +669,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
                             ].includes(scenario) ||
                             scenario === "non-context-handoff" ||
                             scenario === "cap-reconciled" ||
+                            scenario === "rewrite-run" ||
                             scenario === "cap-run-missing"
                               ? {
                                   scope: "all-app-owned-work",
@@ -741,6 +762,7 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           result.classification,
           [
             "cap-reconciled",
+            "rewrite-run",
             "unborn",
             "non-repo",
             "oversized",

@@ -617,8 +617,10 @@ export const layer: Layer.Layer<
         return;
       }
       // A person's own message never needs agent provenance, even in an agent-started thread.
+      // T3's hook continuation reuses the selection of a run that was already admitted.
       if (
         message.createdBy !== "user" &&
+        run.hookContinuationOfRunId === undefined &&
         (projection.thread.createdBy === "agent" ||
           projection.thread.delegatedFrom !== undefined ||
           projection.thread.lineage.relationshipToParent === "subagent")

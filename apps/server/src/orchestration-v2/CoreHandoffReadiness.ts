@@ -5,6 +5,7 @@ import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffB
 import { CONTEXT_ROLLOVER_LIMIT, hasVoluntaryHandoffNudge } from "./ContextRollover.ts";
 import * as DateTime from "effect/DateTime";
 import * as Digest from "effect/crypto/Digest";
+import { isHookRewriteRun } from "./HookContinuation.ts";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import {
   HandoffReadiness,
@@ -218,7 +219,8 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       sourceRecords.runs.some(
         (run) =>
           run.startedAt !== null &&
-          DateTime.toEpochMillis(run.startedAt) > Date.parse(row.value.createdAt),
+          DateTime.toEpochMillis(run.startedAt) > Date.parse(row.value.createdAt) &&
+          !isHookRewriteRun(run, sourceRecords!.runs),
       )
     )
       blockers.push("Source started a newer run after the handoff request");
