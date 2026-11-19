@@ -1,3 +1,5 @@
+import * as Terminals from "../terminal/Manager.ts";
+import type { TerminalMetadataStreamEvent } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import { ThreadId, type HandoffRequest, type OrchestrationV2DomainEvent } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -24,6 +26,9 @@ it.effect(
       const refreshes = yield* Queue.unbounded<void>();
       const evaluated = yield* Queue.unbounded<ThreadId>();
       const release = yield* Deferred.make<void>();
+      const terminalListener =
+        yield* Deferred.make<(event: TerminalMetadataStreamEvent) => Effect.Effect<void>>();
+      let workspaceRead = false;
       let count = 0;
       const request = {
         type: "thread.handoff",
@@ -50,9 +55,38 @@ it.effect(
         lastError: "HandoffParked: old generic error",
       };
       const owners = Layer.mergeAll(
+        Layer.mock(Terminals.TerminalManager)({
+          subscribeMetadata: (listener) =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(terminalListener, listener);
+              yield* listener({
+                type: "snapshot",
+                terminals: [
+                  {
+                    threadId: "other-owner",
+                    terminalId: "shared-terminal",
+                    cwd: "/shared",
+                    worktreePath: null,
+                    status: "running",
+                    pid: 123,
+                    exitCode: null,
+                    exitSignal: null,
+                    hasRunningSubprocess: true,
+                    label: "Inert terminal",
+                    updatedAt: "1970-01-01T00:00:00.000Z",
+                  },
+                ],
+              } as TerminalMetadataStreamEvent);
+              return () => {};
+            }),
+        }),
         Layer.mock(Outbox.EffectOutboxV2)({
           listParkedHandoffs: (input) =>
             Effect.gen(function* () {
+              if (input.workspaceRoot !== undefined) {
+                workspaceRead = true;
+                return input.workspaceRoot === "/shared" ? [row] : [];
+              }
               if (input.threadId !== undefined) yield* Queue.offer(refreshes, undefined);
               return input.after !== undefined
                 ? []
@@ -60,7 +94,9 @@ it.effect(
                   ? [old, row]
                   : input.threadId === legacy
                     ? [old]
-                    : [row];
+                    : input.threadId === source
+                      ? [row]
+                      : [];
             }),
         }),
         Layer.mock(Projections.ProjectionStoreV2)({
@@ -96,6 +132,17 @@ it.effect(
         assert.equal(count, 2);
         yield* (yield* Reconciler.HandoffParkedReconciler).refresh(legacy);
         assert.equal(count, 2);
+        yield* (yield* Deferred.await(terminalListener))({
+          type: "remove",
+          threadId: "other-owner",
+          terminalId: "shared-terminal",
+        });
+        assert.isTrue(
+          workspaceRead,
+          "Closing another owner's terminal must invalidate the shared checkout",
+        );
+        assert.equal(yield* Queue.take(evaluated), source);
+        assert.equal(count, 3);
       }).pipe(Effect.provide(Reconciler.layer.pipe(Layer.provide(owners))));
     }).pipe(Effect.scoped),
 );

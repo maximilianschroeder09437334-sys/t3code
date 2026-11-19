@@ -17449,6 +17449,12 @@ it.effect(
       );
       assert.equal(row.status, "failed");
       assert.equal(JSON.parse(row.lastError!).category, "unknown");
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      assert.lengthOf(yield* outbox.listParkedHandoffs({ workspaceRoot: f.workspace.root }), 1);
+      assert.lengthOf(
+        yield* outbox.listParkedHandoffs({ workspaceRoot: f.workspace.root + "-unrelated" }),
+        0,
+      );
       assert.lengthOf(f.starts, 0);
       f.availability.cold = false;
       const accepted = yield* f.sink

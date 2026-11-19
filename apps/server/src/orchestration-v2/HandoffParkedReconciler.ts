@@ -72,6 +72,23 @@ const make = Effect.gen(function* () {
     },
     Effect.catchCause((cause) => Effect.logWarning("handoff.refresh-unavailable", { cause })),
   );
+  const refreshWorkspace = Effect.fn("HandoffParkedReconciler.refreshWorkspace")(
+    function* (root: string) {
+      let after: string | undefined;
+      while (true) {
+        const rows = yield* outbox.listParkedHandoffs({
+          workspaceRoot: root,
+          ...(after === undefined ? {} : { after }),
+        });
+        for (const row of rows) if (eligible(row)) yield* enqueue(row.threadId);
+        if (rows.length < 64) break;
+        after = rows.at(-1)!.id;
+      }
+    },
+    Effect.catchCause((cause) =>
+      Effect.logWarning("handoff.workspace-refresh-unavailable", { cause }),
+    ),
+  );
   yield* forkParked(
     Effect.gen(function* () {
       // Acquire subscriptions before scanning; queued transitions cannot fall into a startup gap.
@@ -84,13 +101,40 @@ const make = Effect.gen(function* () {
           ? undefined
           : yield* sessions.streamHandoffReadiness.pipe(Stream.toQueue({ capacity: 64 }));
       if (Option.isSome(terminals)) {
+        const pathsByTerminal = new Map<string, ReadonlyArray<string>>();
+        const key = (threadId: string, terminalId: string) =>
+          JSON.stringify([threadId, terminalId]);
         yield* Effect.acquireRelease(
           terminals.value.subscribeMetadata((event) =>
-            event.type === "snapshot"
-              ? Effect.void
-              : refresh(
-                  ThreadId.make(event.type === "remove" ? event.threadId : event.terminal.threadId),
-                ),
+            Effect.gen(function* () {
+              if (event.type === "snapshot") {
+                pathsByTerminal.clear();
+                for (const terminal of event.terminals)
+                  pathsByTerminal.set(key(terminal.threadId, terminal.terminalId), [
+                    terminal.cwd,
+                    ...(terminal.worktreePath === null ? [] : [terminal.worktreePath]),
+                  ]);
+                return;
+              }
+              const threadId = event.type === "remove" ? event.threadId : event.terminal.threadId;
+              const terminalId =
+                event.type === "remove" ? event.terminalId : event.terminal.terminalId;
+              const identity = key(threadId, terminalId);
+              const previous = pathsByTerminal.get(identity) ?? [];
+              const next =
+                event.type === "remove"
+                  ? []
+                  : [
+                      event.terminal.cwd,
+                      ...(event.terminal.worktreePath === null
+                        ? []
+                        : [event.terminal.worktreePath]),
+                    ];
+              if (event.type === "remove") pathsByTerminal.delete(identity);
+              else pathsByTerminal.set(identity, next);
+              yield* refresh(ThreadId.make(threadId));
+              for (const root of new Set([...previous, ...next])) yield* refreshWorkspace(root);
+            }),
           ),
           (stop) => Effect.sync(stop),
         );

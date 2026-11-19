@@ -247,6 +247,7 @@ export interface EffectOutboxV2Shape {
   readonly listParkedHandoffs: (input: {
     readonly after?: string;
     readonly threadId?: ThreadId;
+    readonly workspaceRoot?: string;
   }) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
   readonly get: (
     effectId: string,
@@ -465,6 +466,12 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             AND effect_id = 'core-handoff:' || thread_id
             AND effect_id > ${input.after ?? ""}
             AND (${input.threadId ?? null} IS NULL OR thread_id = ${input.threadId ?? null})
+            AND (${input.workspaceRoot ?? null} IS NULL OR EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_threads t
+              LEFT JOIN projection_projects p ON p.project_id = t.project_id
+              WHERE t.thread_id = orchestration_v2_effect_outbox.thread_id
+                AND COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) = ${input.workspaceRoot ?? null}
+            ))
             AND json_valid(last_error)
             AND json_extract(CASE WHEN json_valid(last_error) THEN last_error ELSE '{}' END, '$.type') = 'handoff.parked'
           ORDER BY effect_id LIMIT 64
