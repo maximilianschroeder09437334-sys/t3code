@@ -78,18 +78,27 @@ const make = Effect.gen(function* () {
   };
   const sessionGeneration = Effect.fn("HandoffParkedReconciler.sessionGeneration")(
     function* (id: ThreadId) {
-      const thread = yield* projections.getThreadRecords(id, ["providerThreads"]);
-      const entries = yield* Effect.forEach(
-        thread.providerThreads.filter((provider) => provider.providerSessionId !== null),
-        (provider) =>
-          sessions
-            .observeHandoffSession(provider.providerSessionId!)
-            .pipe(
-              Effect.map((entry) => [
-                provider.providerSessionId,
-                Option.isSome(entry) ? [entry.value.idleGeneration, entry.value.busyTurns] : null,
-              ]),
-            ),
+      const children = yield* orchestrator.listAppOwnedChildThreadIds(id);
+      // Compare the candidate's covered sessions, independent of notification origin.
+      const entries = yield* Effect.forEach([id, ...children].sort(), (owner) =>
+        Effect.gen(function* () {
+          const thread = yield* projections.getThreadRecords(owner, ["providerThreads"]);
+          const entries = yield* Effect.forEach(
+            thread.providerThreads.filter((provider) => provider.providerSessionId !== null),
+            (provider) =>
+              sessions
+                .observeHandoffSession(provider.providerSessionId!)
+                .pipe(
+                  Effect.map((entry) => [
+                    provider.providerSessionId,
+                    Option.isSome(entry)
+                      ? [entry.value.idleGeneration, entry.value.busyTurns]
+                      : null,
+                  ]),
+                ),
+          );
+          return [owner, entries];
+        }),
       );
       return yield* encode(entries);
     },
@@ -173,7 +182,11 @@ const make = Effect.gen(function* () {
           yield* enqueue(
             current,
             channel,
-            channel === "domain" ? yield* domainGeneration(current) : identity,
+            channel === "domain"
+              ? yield* domainGeneration(current)
+              : channel === "session"
+                ? yield* sessionGeneration(current)
+                : identity,
           );
         else states.delete(current);
         const owner: ThreadId = current;
@@ -301,13 +314,7 @@ const make = Effect.gen(function* () {
       if (readiness !== undefined)
         yield* forkParked(
           Effect.forever(
-            Queue.take(readiness).pipe(
-              Effect.flatMap((id) =>
-                sessionGeneration(id).pipe(
-                  Effect.flatMap((generation) => refreshInput(id, "session", generation)),
-                ),
-              ),
-            ),
+            Queue.take(readiness).pipe(Effect.flatMap((id) => refreshInput(id, "session", ""))),
           ),
         );
       if (providers !== undefined)

@@ -25,6 +25,126 @@ import * as Reconciler from "./HandoffParkedReconciler.ts";
 import { HandoffParked } from "./CoreHandoff.ts";
 import { encodeParkReason } from "./HandoffParkReason.ts";
 
+it.effect("deduplicates distinct root and child sessions during flight and after drain", () =>
+  Effect.gen(function* () {
+    const root = ThreadId.make("session-root");
+    const child = ThreadId.make("session-child");
+    const readiness = yield* Queue.unbounded<ThreadId>();
+    const handled = yield* Queue.unbounded<void>();
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const changedEntered = yield* Deferred.make<void>();
+    const changedRelease = yield* Deferred.make<void>();
+    const request = {
+      type: "thread.handoff",
+      sourceThreadId: root,
+      sourceRunId: "run",
+    } as HandoffRequest;
+    const row = {
+      id: `core-handoff:${root}`,
+      threadId: root,
+      request,
+      status: "failed",
+      lastError: encodeParkReason(request, {
+        category: "unknown",
+        generation: "g0",
+        retryable: true,
+        detail: "unknown",
+      }),
+    } as Outbox.OrchestrationEffectV2;
+    let count = 0;
+    let active = 0;
+    let maxActive = 0;
+    let childGeneration = 1;
+    let childBusy = false;
+    const owners = Layer.mergeAll(
+      Layer.succeed(ProviderTurnStartModels, { getProviders: Effect.succeed([]) }),
+      Layer.mock(Outbox.EffectOutboxV2)({
+        listParkedHandoffs: (input) =>
+          Effect.succeed(input.threadId === child || input.after !== undefined ? [] : [row]),
+      }),
+      Layer.mock(Projections.ProjectionStoreV2)({
+        getThreadRecords: (id) =>
+          Effect.succeed({ providerThreads: [{ providerSessionId: `session-${id}` }] } as never),
+        getThreadShell: () => Queue.offer(handled, undefined).pipe(Effect.as({} as never)),
+        getThread: (id) =>
+          Effect.succeed({ lineage: { parentThreadId: id === child ? root : null } } as never),
+      }),
+      Layer.mock(Orchestrator.OrchestratorV2)({
+        streamDomainEvents: Stream.empty,
+        listAppOwnedChildThreadIds: (id) => Effect.succeed(id === root ? [child] : []),
+        getThreadEventSequence: () => Effect.succeed(1),
+      }),
+      Layer.mock(Sessions.ProviderSessionManagerV2)({
+        streamHandoffReadiness: Stream.fromQueue(readiness),
+        observeHandoffSession: (id) =>
+          Effect.succeed({
+            _tag: "Some",
+            value: {
+              idleGeneration: id === `session-${child}` ? childGeneration : 1,
+              busyTurns: id === `session-${child}` && childBusy ? ["child-turn"] : [],
+            },
+          } as never),
+      }),
+      Layer.succeed(Producer.HandoffApprovalProducer, {
+        requestIfReady: () =>
+          Effect.gen(function* () {
+            count++;
+            maxActive = Math.max(maxActive, ++active);
+            if (count === 1) {
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+            } else if (count === 2) {
+              yield* Deferred.succeed(changedEntered, undefined);
+              yield* Deferred.await(changedRelease);
+            }
+            active--;
+            return yield* new HandoffParked({
+              message: "unknown",
+              category: "unknown",
+              generation: "g0",
+            });
+          }),
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const reconciler = yield* Reconciler.HandoffParkedReconciler;
+      const alternate = Effect.gen(function* () {
+        for (const id of [child, root, child, root]) {
+          yield* Queue.offer(readiness, id);
+          for (let n = 0; n < (id === child ? 2 : 1); n++) yield* Queue.take(handled);
+        }
+      });
+      yield* Deferred.await(entered);
+      yield* alternate;
+      assert.equal(count, 1);
+      yield* Deferred.succeed(release, undefined);
+      yield* reconciler.drain;
+      assert.equal(count, 1, "unchanged alternation during flight schedules no follow-up");
+      yield* alternate;
+      yield* reconciler.drain;
+      assert.equal(count, 1, "unchanged alternation after drain stays idle");
+      childGeneration++;
+      yield* Queue.offer(readiness, child);
+      yield* Deferred.await(changedEntered);
+      yield* Queue.take(handled);
+      yield* Queue.take(handled);
+      yield* alternate;
+      assert.equal(count, 2, "actual child idle generation wakes exactly once");
+      childBusy = true;
+      yield* alternate;
+      assert.equal(count, 2, "changed child busy evidence waits for the single flight");
+      yield* Deferred.succeed(changedRelease, undefined);
+      yield* reconciler.drain;
+      assert.equal(count, 3, "actual child busy generation schedules exactly one follow-up");
+      yield* alternate;
+      yield* reconciler.drain;
+      assert.equal(count, 3, "stable child busy evidence stays idle");
+      assert.equal(maxActive, 1);
+    }).pipe(Effect.provide(Reconciler.layer.pipe(Layer.provide(owners))));
+  }).pipe(Effect.scoped),
+);
+
 it.effect(
   "bounds paged startup, deduplicates generations during and after flight, and cleans removed candidates",
   () =>
