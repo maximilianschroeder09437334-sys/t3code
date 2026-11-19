@@ -5220,6 +5220,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             providerInstanceId: command.modelSelection.instanceId,
             modelSelection: command.modelSelection,
+            ...(thread.agentExecutionIntent === undefined
+              ? {}
+              : {
+                  agentExecutionIntent: {
+                    ...thread.agentExecutionIntent,
+                    modelSelection: command.modelSelection,
+                  },
+                }),
             updatedAt: now,
           };
       }

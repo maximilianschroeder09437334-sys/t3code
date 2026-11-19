@@ -1565,7 +1565,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           requestHandoffApproval(threadId, generation).pipe(Effect.provide(owners));
         const before = yield* outbox.get(`core-handoff:${threadId}`);
         const snapshot = yield* observe;
-        assert.equal(snapshot.classification, "manual_review");
+        assert.equal(snapshot.classification, "manual_review", snapshot.after.blockers.join(" | "));
         assert.equal((yield* request("stale").pipe(Effect.flip))._tag, "OrchestratorMcpFailure");
         busy = true;
         assert.equal(
@@ -7049,6 +7049,47 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
       assert.equal(first._tag, "OrchestratorProjectionError");
       assert.equal(retry._tag, "OrchestratorCommandPreviouslyRejectedError");
+    }),
+  );
+
+  it.effect("keeps configured agent provenance across provider and effort changes", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      for (const recorded of [true, false]) {
+        const threadId = ThreadId.make(`configured-agent-${recorded}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}:create`),
+          threadId,
+          projectId: ProjectId.make(`${threadId}:project`),
+          createdBy: "agent",
+          creationSource: "mcp",
+          title: "Configured agent",
+          modelSelection,
+          ...(recorded ? { agentExecutionIntent: { modelSelection } } : {}),
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        for (const [index, selection] of [
+          { ...modelSelection, options: [{ id: "reasoningEffort", value: "high" }] },
+          { instanceId: alternateInstanceId, model: "gpt-5.5" },
+        ].entries()) {
+          yield* orchestrator.dispatch({
+            type: index === 0 ? "thread.model-selection.set" : "provider.switch",
+            commandId: CommandId.make(`${threadId}:configure:${index}`),
+            threadId,
+            modelSelection: selection,
+          });
+          const configured = (yield* orchestrator.getThreadProjection(threadId)).thread;
+          assert.deepEqual(configured.modelSelection, selection);
+          // Reconfiguration updates existing provenance; it must not invent missing provenance.
+          if (recorded)
+            assert.deepEqual(configured.agentExecutionIntent?.modelSelection, selection);
+          else assert.isUndefined(configured.agentExecutionIntent);
+        }
+      }
     }),
   );
 
@@ -14158,7 +14199,7 @@ const setupGuardedHandoff = Effect.fn("test.setupGuardedHandoff")(function* (
   }
   if (beforeReview !== undefined) yield* beforeReview(sourceId, childId, cwd);
   const snapshot = yield* queryHandoffReadiness(sourceId);
-  assert.equal(snapshot.classification, "manual_review");
+  assert.equal(snapshot.classification, "manual_review", snapshot.after.blockers.join(" | "));
   const review = yield* requestHandoffApproval(sourceId, snapshot.generation);
   const session = {
     sessionId: AuthSessionId.make("guarded-client"),
@@ -16863,10 +16904,12 @@ it.layer(Layer.empty)(
       }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
     );
 
-    it.effect.each(["root", "fork"] as const)(
+    it.effect.each(["root", "fork", "rewrite"] as const)(
       "guarded handoff transfers a %s source once and recovers duplicate workers without duplicate work",
       (kind) =>
         Effect.gen(function* () {
+          const rewriteSink = yield* EventSink.EventSinkV2;
+          const rewriteOrchestrator = yield* Orchestrator.OrchestratorV2;
           const {
             orchestrator,
             worker,
@@ -16878,7 +16921,60 @@ it.layer(Layer.empty)(
             selection,
             cwd,
             ledger,
-          } = yield* setupGuardedHandoff(kind === "fork" ? "positive-fork" : "positive");
+          } = yield* setupGuardedHandoff(
+            kind === "fork" ? "positive-fork" : `positive-${kind}`,
+            true,
+            false,
+            undefined,
+            kind !== "rewrite"
+              ? undefined
+              : (sourceId) =>
+                  Effect.gen(function* () {
+                    const records = yield* rewriteOrchestrator.getThreadProjection(sourceId);
+                    const before = DateTime.makeUnsafe(
+                      DateTime.toEpochMillis(yield* DateTime.now) - 1000,
+                    );
+                    yield* TestClock.adjust("1 second");
+                    const after = yield* DateTime.now;
+                    const blocked = yield* decodeProducerFixtureRun({
+                      id: "blocked-handoff-report",
+                      threadId: sourceId,
+                      ordinal: 1,
+                      providerInstanceId: records.thread.modelSelection.instanceId,
+                      modelSelection: records.thread.modelSelection,
+                      providerThreadId: records.providerThreads[0]!.id,
+                      userMessageId: "original-handoff-request",
+                      rootNodeId: null,
+                      activeAttemptId: null,
+                      status: "failed",
+                      requestedAt: before,
+                      startedAt: before,
+                      completedAt: before,
+                      checkpointId: null,
+                      contextHandoffId: null,
+                    });
+                    const rewritten = {
+                      ...blocked,
+                      id: RunId.make("rewritten-handoff-report"),
+                      ordinal: 2,
+                      hookContinuationOfRunId: blocked.id,
+                      status: "completed" as const,
+                      requestedAt: after,
+                      startedAt: after,
+                      completedAt: after,
+                    };
+                    yield* rewriteSink.write({
+                      events: [blocked, rewritten].map((run) => ({
+                        id: EventId.make(`rewrite-fixture:${run.id}`),
+                        type: "run.updated" as const,
+                        threadId: sourceId,
+                        runId: run.id,
+                        occurredAt: after,
+                        payload: run,
+                      })),
+                    });
+                  }).pipe(Effect.orDie),
+          );
           yield* worker.drain();
           const source = (yield* orchestrator.getThreadProjection(sourceId)).thread;
           const successor = yield* orchestrator.getThreadProjection(submitted.successorThreadId);

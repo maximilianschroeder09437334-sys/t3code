@@ -3596,3 +3596,62 @@ it.effect(
     }).pipe(Effect.provide(ProviderEventIngestor.layer.pipe(Layer.provide(dependencies))));
   },
 );
+
+it.effect.each(["own-work", "user", "other-thread", "blocked", "ordinary"] as const)(
+  "resumes only agent-owned work after a permitted report rewrite: %s",
+  (scenario) => {
+    const threadId = "rewrite-current" as ThreadId;
+    const runId = RunId.make("rewrite-run");
+    const parentId = RunId.make("blocked-run");
+    const providerTurnId = ProviderTurnId.make("rewrite-turn");
+    const firstStep =
+      scenario === "user"
+        ? "Maxi: Approve the installation."
+        : scenario === "other-thread"
+          ? "T3: [Worker](https://app.t3.codes/threads/local/worker): build it."
+          : "T3: Continue preparing the change.";
+    const finalText = `**What happened**\n- T3: preparation is partly done.\n\n**Next steps in order**\n1. ${firstStep}`;
+    const dependencies = Layer.mergeAll(
+      Layer.mock(EventSink.EventSinkV2)({}),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      IdAllocator.layer,
+      Layer.mock(ThreadCommandExecutor.ThreadCommandExecutor)({}),
+      Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({}),
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getTurnStartContext: () =>
+          Effect.succeed({
+            thread: { projectId: "rewrite-project" },
+            runs: [{ id: runId, hookContinuationOfRunId: parentId }],
+            messages: [],
+            turnItems: [{ type: "assistant_message", providerTurnId, ordinal: 0, text: finalText }],
+          } as never),
+        getThreadRecords: () =>
+          Effect.succeed({
+            runs: [{ id: parentId, status: scenario === "ordinary" ? "completed" : "failed" }],
+          } as never),
+        getThreadShell: () =>
+          Effect.succeed({
+            status: "running",
+            activeRunId: "worker-run",
+            pendingRuntimeRequest: null,
+          } as never),
+      }),
+      Layer.succeed(ProviderEventIngestor.ProviderTurnEndHooks, {
+        environmentId: "local",
+        runEvent: () => Effect.succeed({ allowed: scenario !== "blocked", messages: [] }),
+      }),
+    );
+    return Effect.gen(function* () {
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const decision = yield* ingestor.finishRootTurn!({
+        threadId,
+        runId,
+        providerTurnId,
+        driver: CODEX_DRIVER,
+        status: "completed",
+      });
+      assert.equal(decision.allowed, scenario !== "blocked");
+      assert.equal(decision.continueWork, scenario === "own-work" ? true : undefined);
+    }).pipe(Effect.provide(ProviderEventIngestor.layer.pipe(Layer.provide(dependencies))));
+  },
+);
