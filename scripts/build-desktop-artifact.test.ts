@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
+import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
@@ -22,6 +23,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 
 import {
+  accountWindowsPayloadFiles,
   buildDesktopBundles,
   copyDesktopBuildArtifacts,
   DesktopBuildManifestRestoreError,
@@ -137,6 +139,7 @@ const WINDOWS_PAYLOAD_FIXTURE_VERSION = "1.2.3";
 
 const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(function* (input: {
   readonly copyUnpackedNatives: boolean;
+  readonly preparedCache?: boolean;
   readonly serverEntrySource?: string;
   readonly wslRuntime?: "valid" | "loose-server-tree" | "missing-pty" | "bad-digest";
   readonly targetArch?: "x64" | "arm64";
@@ -154,6 +157,19 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
   yield* fs.makeDirectory(path.dirname(nativePath), { recursive: true });
   yield* fs.writeFileString(serverEntryPath, input.serverEntrySource ?? "console.log('server');\n");
   yield* fs.writeFileString(nativePath, "MZ native-binary");
+
+  const cacheEntries = Array.from({ length: 22 }, (_, index) => ({
+    module: `server.asar/apps/server/dist/${index === 0 ? "binCli-fixture" : index === 1 ? "server-fixture" : `chunk-${index}`}.mjs`,
+    file: index.toString(16).padStart(8, "0"),
+  }));
+  if (input.preparedCache) {
+    for (const entry of cacheEntries) {
+      yield* fs.writeFileString(
+        path.join(sourceDir, entry.module.slice("server.asar/".length)),
+        "export {};\n",
+      );
+    }
+  }
 
   const generatedAsarPath = path.join(tempDir, WINDOWS_SERVER_ASAR_RESOURCE);
   yield* packWindowsServerAsar({ sourceDir, asarPath: generatedAsarPath, arch: "x64" });
@@ -176,6 +192,21 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
   const appExecutableName = "t3code.exe";
   yield* fs.writeFileString(path.join(packagedAppDir, appExecutableName), "electron");
   yield* fs.writeFileString(path.join(packagedAppDir, "chrome_crashpad_handler.exe"), "crashpad");
+
+  if (input.preparedCache) {
+    const prepared = path.join(resourcesDir, "server-compile-cache");
+    yield* fs.makeDirectory(prepared);
+    yield* fs.writeFileString(
+      path.join(prepared, "manifest.json"),
+      JSON.stringify({
+        format: 1,
+        runtime: "44.10.1-v24.22.1-win32-x64-3759534073",
+        entries: cacheEntries,
+      }),
+    );
+    for (const entry of cacheEntries)
+      yield* fs.writeFileString(path.join(prepared, entry.file), "bytecode");
+  }
 
   if (input.wslRuntime !== undefined) {
     const stem = wslRuntimeArchiveStem(WINDOWS_PAYLOAD_FIXTURE_VERSION, input.targetArch ?? "x64");
@@ -1364,6 +1395,128 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.deepStrictEqual(resourceMonitorError.missingFiles, [
           "resource-monitor/t3-resource-monitor.exe",
         ]);
+      }),
+    ),
+  );
+
+  it.effect.each([false, true])(
+    "accounts for the Windows base budget with prepared cache=%s",
+    (preparedCache) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const fixture = yield* makeWindowsPayloadFixture({
+            copyUnpackedNatives: true,
+            preparedCache,
+          });
+          const initial = yield* validateWindowsPackagedPayload({
+            ...fixture,
+            targetArch: "x64",
+            appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+          });
+          for (let index = initial.fileCount - (preparedCache ? 23 : 0); index < 67; index++) {
+            yield* fs.writeFileString(
+              path.join(fixture.packagedAppDir, `base-${index}`),
+              "payload",
+            );
+          }
+          const result = yield* validateWindowsPackagedPayload({
+            ...fixture,
+            targetArch: "x64",
+            appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+          });
+          assert.equal(result.baseFileCount, 67);
+          assert.equal(result.compileCacheFileCount, preparedCache ? 23 : 0);
+          assert.equal(result.fileCount, preparedCache ? 90 : 67);
+          for (let index = 67; index < 80; index++) {
+            yield* fs.writeFileString(
+              path.join(fixture.packagedAppDir, `base-${index}`),
+              "payload",
+            );
+          }
+          const boundary = yield* accountWindowsPayloadFiles(fixture.packagedAppDir);
+          assert.equal(boundary.baseFileCount, 80);
+          yield* fs.writeFileString(path.join(fixture.packagedAppDir, "base-80"), "overflow");
+          const error = yield* accountWindowsPayloadFiles(fixture.packagedAppDir).pipe(Effect.flip);
+          assert.instanceOf(error, WindowsPackagedPayloadValidationError);
+          assert.equal(error.reason, "file-limit-exceeded");
+          assert.equal(error.fileCount, preparedCache ? 104 : 81);
+          assert.equal(error.fileLimit, preparedCache ? 103 : 80);
+        }),
+      ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
+  it.effect.each([
+    "bad-json",
+    "wrong-format",
+    "empty",
+    "duplicate-module",
+    "duplicate-key",
+    "traversal",
+    "unknown-module",
+    "missing-file",
+    "extra-file",
+    "directory",
+    "empty-file",
+    "missing-manifest",
+    "missing-cli",
+    "junction-root",
+    "junction-entry",
+  ])("rejects invalid prepared cache: %s", (defect) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* makeWindowsPayloadFixture({
+          copyUnpackedNatives: true,
+          preparedCache: true,
+        });
+        const prepared = path.join(fixture.packagedAppDir, "resources/server-compile-cache");
+        const manifestPath = path.join(prepared, "manifest.json");
+        const manifest = JSON.parse(yield* fs.readFileString(manifestPath)) as {
+          format: number;
+          entries: Array<{ module: string; file: string }>;
+        };
+        const first = manifest.entries[0]!;
+        if (defect === "wrong-format") manifest.format = 2;
+        if (defect === "empty") manifest.entries = [];
+        if (defect === "duplicate-module") manifest.entries[1]!.module = first.module;
+        if (defect === "duplicate-key") manifest.entries[1]!.file = first.file;
+        if (defect === "traversal") first.file = "../outside";
+        if (defect === "unknown-module") first.module = "server.asar/apps/server/dist/missing.mjs";
+        if (defect === "missing-cli") manifest.entries.shift();
+        yield* fs.writeFileString(
+          manifestPath,
+          defect === "bad-json" ? "{" : JSON.stringify(manifest),
+        );
+        if (defect === "missing-manifest") yield* fs.remove(manifestPath);
+        if (defect === "missing-file" || defect === "directory")
+          yield* fs.remove(path.join(prepared, first.file));
+        if (defect === "directory") yield* fs.makeDirectory(path.join(prepared, first.file));
+        if (defect === "empty-file") yield* fs.writeFileString(path.join(prepared, first.file), "");
+        if (defect === "extra-file")
+          yield* fs.writeFileString(path.join(prepared, "unaccounted"), "extra");
+        if (defect === "junction-root") {
+          const outside = path.join(fixture.packagedAppDir, "outside-cache");
+          yield* fs.rename(prepared, outside);
+          yield* Effect.promise(() => NodeFSP.symlink(outside, prepared, "junction"));
+        }
+        if (defect === "junction-entry") {
+          yield* fs.remove(path.join(prepared, first.file));
+          const outside = path.join(fixture.packagedAppDir, "outside-entry");
+          yield* fs.makeDirectory(outside);
+          yield* Effect.promise(() =>
+            NodeFSP.symlink(outside, path.join(prepared, first.file), "junction"),
+          );
+        }
+        const error = yield* validateWindowsPackagedPayload({
+          ...fixture,
+          targetArch: "x64",
+          appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+        }).pipe(Effect.flip);
+        assert.instanceOf(error, WindowsPackagedPayloadValidationError);
+        assert.equal(error.reason, "compile-cache-invalid");
       }),
     ),
   );
