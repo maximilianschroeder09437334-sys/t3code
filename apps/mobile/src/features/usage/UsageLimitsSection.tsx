@@ -242,7 +242,6 @@ export function ResetCredits(props: {
   });
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  if (dense && credits.availableCount === 0 && status === null) return null;
 
   const redeem = async (choice: ResetCreditChoice) => {
     if (!readEnvironmentScope(environmentId, AuthProvidersManageScope)) return;
@@ -263,10 +262,14 @@ export function ResetCredits(props: {
 
   const confirm = (choice: ResetCreditChoice) => {
     if (!readEnvironmentScope(environmentId, AuthProvidersManageScope)) return;
-    Dialog.alert("Use a reset credit?", choice.confirmDescription, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Use credit", onPress: () => void redeem(choice) },
-    ]);
+    Dialog.alert(
+      "Use a reset credit?",
+      `${choice.confirmDescription} Credits remaining after use: ${Math.max(0, choice.availableCount - 1)}.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Use credit", onPress: () => void redeem(choice) },
+      ],
+    );
   };
 
   return (

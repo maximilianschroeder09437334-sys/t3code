@@ -14,6 +14,8 @@ import {
 import { environmentPresentations } from "../../state/presentation";
 import { useNowMinute } from "../../hooks/useNowMinute";
 
+import { SidebarResetCredits } from "../usage/SidebarResetCredits";
+
 export function SidebarUsage() {
   const presentations = useAtomValue(environmentPresentations.presentationsWithProvidersAtom);
   const now = Date.parse(`${useNowMinute()}Z`);
@@ -35,10 +37,11 @@ export function SidebarUsage() {
   useEffect(() => {
     if (now && presentations.size) autoRefresh();
   }, [now, presentations]);
-  const rows = collectLimitPools(collectLimitAccounts(presentations), now).flatMap((pool) =>
+  const accounts = collectLimitAccounts(presentations);
+  const rows = collectLimitPools(accounts, now).flatMap((pool) =>
     displayLimitWindows(pool).map((window) => ({ driver: pool.driver, window })),
   );
-  if (rows.length === 0) return null;
+  if (rows.length === 0 && !accounts.some((account) => account.limits.resetCredits)) return null;
   return (
     <div className="shrink-0" data-testid="sidebar-usage-overlay">
       <Link
@@ -93,6 +96,20 @@ export function SidebarUsage() {
           );
         })}
       </Link>
+      {accounts.map((account) =>
+        account.limits.resetCredits && account.redeem ? (
+          <SidebarResetCredits
+            key={account.key}
+            account={{ ...account, redeem: account.redeem }}
+            now={now}
+          />
+        ) : account.limits.resetCredits ? (
+          <p key={account.key} className="px-1 py-2 text-xs text-muted-foreground">
+            {account.displayName ?? account.driver}: {account.limits.resetCredits.availableCount}{" "}
+            reset credits · redemption unavailable
+          </p>
+        ) : null,
+      )}
     </div>
   );
 }

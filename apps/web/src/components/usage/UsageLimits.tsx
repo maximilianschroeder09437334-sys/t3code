@@ -11,6 +11,7 @@ import {
 import { useAtomValue } from "@effect/atom-react";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
 import {
+  collectLimitAccounts,
   formatResetsIn,
   type LimitPace,
   paceOf,
@@ -294,7 +295,12 @@ export function ResetCreditDialog({
       <AlertDialogPopup>
         <AlertDialogHeader>
           <AlertDialogTitle>Use a reset credit?</AlertDialogTitle>
-          <AlertDialogDescription>{choice?.confirmDescription}</AlertDialogDescription>
+          <AlertDialogDescription>
+            {choice?.confirmDescription}{" "}
+            {choice
+              ? `Credits remaining after use: ${Math.max(0, choice.availableCount - 1)}.`
+              : ""}
+          </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
@@ -320,7 +326,7 @@ export function ResetCredits({
 }) {
   const { canManageProviders, choice, confirming, setConfirming, confirm, busy, status, redeem } =
     useResetCredit(environmentId);
-  if (credits.availableCount === 0 && status === null) return null;
+
   return (
     <div className="flex flex-col gap-1 text-xs text-muted-foreground">
       {resetCreditChoices(credits, input, now).map((choice) => (
@@ -390,5 +396,46 @@ export function UsageLimitsSection({
       ];
     }),
   );
-  return <UsageLimitsPooled presentations={selected} now={now} />;
+  const creditAccounts = collectLimitAccounts(selected).filter(
+    (account) => account.limits.resetCredits,
+  );
+  return (
+    <div className="flex flex-col gap-4">
+      <UsageLimitsPooled presentations={selected} now={now} />
+      {creditAccounts.length > 0 ? (
+        <section aria-label="Reset credits" className="flex flex-col gap-2 text-xs">
+          <h3 className="font-medium">Reset credits</h3>
+          {creditAccounts.map((account) => {
+            const credits = account.limits.resetCredits!;
+            return (
+              <div key={account.key} className="flex flex-col gap-1 text-muted-foreground">
+                <span>
+                  {account.displayName ?? account.driver}: {credits.availableCount} reset credits
+                </span>
+                {credits.options?.length ? (
+                  credits.options.map((option) => (
+                    <span key={option.creditId}>
+                      {option.label}: {option.availableCount} left ·{" "}
+                      {option.expiresAt
+                        ? `expires ${new Date(option.expiresAt).toLocaleString()}`
+                        : "expiry unknown"}
+                    </span>
+                  ))
+                ) : (
+                  <span>
+                    {credits.nextExpiresAt
+                      ? `Next expiry: ${new Date(credits.nextExpiresAt).toLocaleString()}`
+                      : "Expiry unknown"}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+          <p className="text-muted-foreground">
+            Use the reset-credit button below the sidebar bars to choose a credit and confirm.
+          </p>
+        </section>
+      ) : null}
+    </div>
+  );
 }
