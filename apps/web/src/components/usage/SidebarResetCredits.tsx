@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { resetCreditChoices, type LimitAccount } from "@t3tools/shared/usageLimits";
+import {
+  resetCreditAccountLabel,
+  resetCreditSummaryLines,
+  resetCreditChoices,
+  type LimitAccount,
+} from "@t3tools/shared/usageLimits";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { ResetCreditDialog, useResetCredit } from "./UsageLimits";
@@ -16,6 +21,8 @@ export function SidebarResetCredits({
   const reset = useResetCredit(account.redeem.environmentId);
   const credits = account.limits.resetCredits;
   if (!credits) return null;
+  const accountLabel = resetCreditAccountLabel(account);
+  const summaries = resetCreditSummaryLines(credits, now);
   const choices = resetCreditChoices(credits, account.redeem.input, now);
   return (
     <>
@@ -24,16 +31,16 @@ export function SidebarResetCredits({
           render={<Button variant="ghost" size="sm-multiline" />}
           className="w-full flex-col items-start text-left"
         >
-          <span>{account.displayName ?? account.driver}: reset credits</span>
-          {choices.map((choice) => (
-            <span key={choice.key} className="text-muted-foreground">
-              {choice.summary}
+          <span>{accountLabel}: reset credits</span>
+          {summaries.map((summary) => (
+            <span key={summary} className="text-muted-foreground">
+              {summary}
             </span>
           ))}
         </PopoverTrigger>
         <PopoverPopup width="md" side="right" align="end" className="max-w-[calc(100vw-2rem)]">
           <div className="flex flex-col gap-3 text-xs">
-            <p className="font-medium">Reset credits · {account.displayName ?? account.driver}</p>
+            <p className="font-medium">Reset credits · {accountLabel}</p>
             {choices.map((choice) => (
               <div key={choice.key} className="flex flex-col items-start gap-2">
                 <span>{choice.summary}</span>
@@ -43,7 +50,10 @@ export function SidebarResetCredits({
                   disabled={choice.availableCount === 0 || reset.busy || !reset.canManageProviders}
                   onClick={() => {
                     setOpen(false);
-                    reset.confirm(choice);
+                    reset.confirm({
+                      ...choice,
+                      confirmDescription: `${accountLabel}. ${choice.confirmDescription}`,
+                    });
                   }}
                 >
                   Use reset…

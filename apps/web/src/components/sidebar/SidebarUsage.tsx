@@ -5,6 +5,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import {
+  resetCreditAccountLabel,
+  resetCreditSummaryLines,
   collectLimitAccounts,
   collectLimitPools,
   displayLimitWindows,
@@ -104,10 +106,12 @@ export function SidebarUsage() {
             now={now}
           />
         ) : account.limits.resetCredits ? (
-          <p key={account.key} className="px-1 py-2 text-xs text-muted-foreground">
-            {account.displayName ?? account.driver}: {account.limits.resetCredits.availableCount}{" "}
-            reset credits · redemption unavailable
-          </p>
+          <div key={account.key} className="px-1 py-2 text-xs text-muted-foreground">
+            <p>{resetCreditAccountLabel(account)} · redemption unavailable</p>
+            {resetCreditSummaryLines(account.limits.resetCredits, now).map((summary) => (
+              <p key={summary}>{summary}</p>
+            ))}
+          </div>
         ) : null,
       )}
     </div>

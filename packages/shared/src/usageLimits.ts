@@ -1025,3 +1025,35 @@ export function collectProviderUsageLimits(
   }
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
 }
+
+/** Include routing context so equal balances on separate accounts are distinguishable. */
+export function resetCreditAccountLabel(account: LimitAccount): string {
+  return [
+    ...new Set(
+      [
+        account.displayName ?? String(account.driver),
+        account.email,
+        account.sourceLabel,
+        ...account.environments.map((environment) => environment.label),
+      ].filter((part): part is string => Boolean(part)),
+    ),
+  ].join(" · ");
+}
+
+export function resetCreditSummaryLines(
+  credits: ServerProviderResetCredits,
+  now: number,
+): readonly string[] {
+  const expiry = (at: string | undefined) => {
+    const timestamp = at === undefined ? NaN : Date.parse(at);
+    if (!Number.isFinite(timestamp)) return "expiry unknown";
+    return timestamp <= now
+      ? "expired; refresh usage"
+      : `expires ${DateTime.formatIso(DateTime.makeUnsafe(timestamp))}`;
+  };
+  if (credits.options?.length)
+    return credits.options.map(
+      (option) => `${option.label}: ${option.availableCount} left · ${expiry(option.expiresAt)}`,
+    );
+  return [`${credits.availableCount} reset credits · ${expiry(credits.nextExpiresAt)}`];
+}

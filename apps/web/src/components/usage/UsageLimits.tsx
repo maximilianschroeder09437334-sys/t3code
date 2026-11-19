@@ -11,6 +11,8 @@ import {
 import { useAtomValue } from "@effect/atom-react";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
 import {
+  resetCreditAccountLabel,
+  resetCreditSummaryLines,
   collectLimitAccounts,
   formatResetsIn,
   type LimitPace,
@@ -409,25 +411,10 @@ export function UsageLimitsSection({
             const credits = account.limits.resetCredits!;
             return (
               <div key={account.key} className="flex flex-col gap-1 text-muted-foreground">
-                <span>
-                  {account.displayName ?? account.driver}: {credits.availableCount} reset credits
-                </span>
-                {credits.options?.length ? (
-                  credits.options.map((option) => (
-                    <span key={option.creditId}>
-                      {option.label}: {option.availableCount} left ·{" "}
-                      {option.expiresAt
-                        ? `expires ${new Date(option.expiresAt).toLocaleString()}`
-                        : "expiry unknown"}
-                    </span>
-                  ))
-                ) : (
-                  <span>
-                    {credits.nextExpiresAt
-                      ? `Next expiry: ${new Date(credits.nextExpiresAt).toLocaleString()}`
-                      : "Expiry unknown"}
-                  </span>
-                )}
+                <span>{resetCreditAccountLabel(account)}</span>
+                {resetCreditSummaryLines(credits, now).map((summary) => (
+                  <span key={summary}>{summary}</span>
+                ))}
               </div>
             );
           })}

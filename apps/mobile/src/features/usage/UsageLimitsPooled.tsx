@@ -4,6 +4,8 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { providerClients } from "@t3tools/client-runtime/provider-clients";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
 import {
+  resetCreditAccountLabel,
+  resetCreditSummaryLines,
   collectLimitAccounts,
   collectExternalUsageLinks,
   collectLimitNotices,
@@ -417,7 +419,8 @@ export function UsageLimitsSection({
     selectedEnvironmentIds === null
       ? presentations
       : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
-  const pools = collectLimitPools(collectLimitAccounts(selected), now);
+  const accounts = collectLimitAccounts(selected);
+  const pools = collectLimitPools(accounts, now);
   const notices = collectLimitNotices(selected);
   const externalLinks = collectExternalUsageLinks(selected);
   const colors = useProviderColors();
@@ -466,6 +469,20 @@ export function UsageLimitsSection({
           </Fragment>
         );
       })}
+      {accounts
+        .filter((account) => account.limits.resetCredits)
+        .map((account) => (
+          <View key={account.key} className="gap-1">
+            <Text className="text-xs text-foreground-muted">
+              {resetCreditAccountLabel(account)}
+            </Text>
+            {resetCreditSummaryLines(account.limits.resetCredits!, now).map((summary) => (
+              <Text key={summary} className="text-xs text-foreground-muted">
+                {summary}
+              </Text>
+            ))}
+          </View>
+        ))}
       {externalLinks.map((link) => (
         <View key={link.url} className="gap-3 rounded-xl border border-border-subtle p-4">
           <Text className="text-base font-t3-medium text-foreground">{link.label}</Text>

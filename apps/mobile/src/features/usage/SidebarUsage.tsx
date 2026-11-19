@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNowMinuteMs } from "../../lib/clock";
 import {
+  resetCreditAccountLabel,
+  resetCreditSummaryLines,
   collectLimitAccounts,
   collectLimitPools,
   displayLimitWindows,
@@ -17,11 +19,12 @@ export function SidebarUsage({ bottomInset = 0 }: { readonly bottomInset?: numbe
   const presentations = useAtomValue(environmentPresentations.presentationsWithProvidersAtom);
   // The app-level subscription worker already refreshes limits while active.
   const now = useNowMinuteMs();
-  const pools = collectLimitPools(collectLimitAccounts(presentations), now);
+  const accounts = collectLimitAccounts(presentations);
+  const pools = collectLimitPools(accounts, now);
   const rows = pools.flatMap((pool) =>
     displayLimitWindows(pool).map((window) => ({ driver: pool.driver, window })),
   );
-  if (rows.length === 0) return null;
+  if (rows.length === 0 && !accounts.some((account) => account.limits.resetCredits)) return null;
   return (
     <Pressable
       style={{ marginBottom: bottomInset }}
@@ -72,6 +75,20 @@ export function SidebarUsage({ bottomInset = 0 }: { readonly bottomInset?: numbe
           </View>
         );
       })}
+      {accounts
+        .filter((account) => account.limits.resetCredits)
+        .map((account) => (
+          <View key={account.key} className="gap-1">
+            <Text className="text-xs text-foreground-muted">
+              {resetCreditAccountLabel(account)}
+            </Text>
+            {resetCreditSummaryLines(account.limits.resetCredits!, now).map((summary) => (
+              <Text key={summary} className="text-xs text-foreground-muted">
+                {summary}
+              </Text>
+            ))}
+          </View>
+        ))}
     </Pressable>
   );
 }

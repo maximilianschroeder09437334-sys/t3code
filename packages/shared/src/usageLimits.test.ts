@@ -9,6 +9,9 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  resetCreditAccountLabel,
+  resetCreditSummaryLines,
+  resetCreditChoices,
   type LimitAccount,
   displayLimitWindows,
   cursorUsageWindowDetails,
@@ -28,6 +31,61 @@ import {
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
+
+describe("reset credit account context", () => {
+  it("distinguishes equal balances and retains each account's redemption route", () => {
+    const accounts: LimitAccount[] = ["first@example.com", "second@example.com"].map(
+      (email, i) => ({
+        key: email,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        displayName: null,
+        email,
+        plan: undefined,
+        accentColor: undefined,
+        environments: [{ environmentId: EnvironmentId.make(`env-${i}`), label: `Server ${i}` }],
+        sourceLabel: "Hub",
+        redeem: {
+          environmentId: EnvironmentId.make(`env-${i}`),
+          input: {
+            sourceId: UsageLimitSourceId.make("hub"),
+            accountId: email,
+            creditId: `credit-${i}`,
+          },
+        },
+        limits: {
+          checkedAt: "2026-09-03T12:00:00.000Z",
+          windows: [],
+          resetCredits: { availableCount: 2 },
+        },
+      }),
+    );
+    expect(new Set(accounts.map(resetCreditAccountLabel)).size).toBe(2);
+    for (const account of accounts) {
+      expect(resetCreditAccountLabel(account)).toContain(account.email);
+      const choice = resetCreditChoices(
+        account.limits.resetCredits!,
+        account.redeem!.input,
+        now,
+      )[0]!;
+      expect(choice.input).toEqual(account.redeem!.input);
+      expect(resetCreditSummaryLines(account.limits.resetCredits!, now)[0]).toContain(
+        "expiry unknown",
+      );
+    }
+  });
+
+  it("keeps zero, unknown and expired credits visible without a redemption route", () => {
+    expect(resetCreditSummaryLines({ availableCount: 0 }, now)).toEqual([
+      "0 reset credits · expiry unknown",
+    ]);
+    expect(
+      resetCreditSummaryLines({ availableCount: 2, nextExpiresAt: "2026-09-03T11:00:00Z" }, now)[0],
+    ).toContain("expired");
+    expect(
+      resetCreditSummaryLines({ availableCount: 2, nextExpiresAt: "2026-09-04T11:00:00Z" }, now)[0],
+    ).toContain("expires");
+  });
+});
 
 const window = {
   id: "five_hour",
