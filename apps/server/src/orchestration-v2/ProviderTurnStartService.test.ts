@@ -124,6 +124,7 @@ function startWithMissingWorktree(
     };
   },
   actor: "agent" | "user" = "agent",
+  messageCreatedBy?: "agent" | "user",
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -178,7 +179,14 @@ function startWithMissingWorktree(
     nodes: [{ id: rootNodeId, checkpointScopeId }],
     attempts: [{ id: attemptId }],
     providerThreads: [{ id: providerThreadId, providerSessionId }],
-    messages: [{ id: messageId, text: "Continue", attachments: [] }],
+    messages: [
+      {
+        id: messageId,
+        text: "Continue",
+        attachments: [],
+        ...(messageCreatedBy === undefined ? {} : { createdBy: messageCreatedBy }),
+      },
+    ],
     checkpointScopes: [{ id: checkpointScopeId }],
     contextHandoffs: [],
     contextTransfers: [],
@@ -371,6 +379,38 @@ it("rejects a resumed agent turn when the run selection differs from recorded in
     }),
   );
   expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
+
+it("starts a person's follow-up in an agent-created thread whose selection changed", async () => {
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    {
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "high" }],
+      },
+    },
+    "agent",
+    "user",
+  );
+  await expect(fixture.start).resolves.toBeDefined();
+  expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+});
+
+it("starts a person's follow-up in an agent-created thread without recorded provenance", async () => {
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    undefined,
+    "agent",
+    "user",
+  );
+  await expect(fixture.start).resolves.toBeDefined();
+  expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
 });
 
 it("starts an agent-created Opus turn in default mode without a planning purpose", async () => {

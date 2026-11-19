@@ -612,10 +612,12 @@ export const layer: Layer.Layer<
         });
         return;
       }
+      // A person's own message never needs agent provenance, even in an agent-started thread.
       if (
-        projection.thread.createdBy === "agent" ||
-        projection.thread.delegatedFrom !== undefined ||
-        projection.thread.lineage.relationshipToParent === "subagent"
+        message.createdBy !== "user" &&
+        (projection.thread.createdBy === "agent" ||
+          projection.thread.delegatedFrom !== undefined ||
+          projection.thread.lineage.relationshipToParent === "subagent")
       ) {
         const intent = projection.thread.agentExecutionIntent;
         const providers = yield* providerRegistry.getProviders;
