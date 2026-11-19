@@ -1,3 +1,5 @@
+import * as ApprovalProducer from "./HandoffApprovalProducer.ts";
+import * as Registry from "../provider/ProviderRegistry.ts";
 import * as ParkedReconciler from "./HandoffParkedReconciler.ts";
 import { ServerSettings as ServerSettingsSchema } from "@t3tools/contracts";
 import { usageLimitFailoverIntent, sameFailoverIntent } from "./UsageLimitFailoverPolicy.ts";
@@ -17456,7 +17458,45 @@ it.effect(
         0,
       );
       assert.lengthOf(f.starts, 0);
+      const catalog = yield* (yield* ProviderStart.ProviderTurnStartModels).getProviders;
+      let current = catalog.map((p) =>
+        p.instanceId === claudeInstanceId ? { ...p, auth: { status: "unknown" as const } } : p,
+      );
+      const changes = yield* Queue.unbounded<typeof catalog>();
+      let subscribed = false;
+      const blocked = yield* Deferred.make<void>();
+      const modelLayer = ProviderStart.layerProviderTurnStartModels.pipe(
+        Layer.provide(
+          Layer.mock(Registry.ProviderRegistry)({
+            getProviders: Effect.sync(() => current),
+            streamChanges: Stream.unwrap(
+              Effect.sync(() => {
+                subscribed = true;
+                return Stream.fromQueue(changes);
+              }),
+            ),
+          }),
+        ),
+      );
       f.availability.cold = false;
+      const fixtureModels = yield* ProviderStart.ProviderTurnStartModels.pipe(
+        Effect.provide(modelLayer),
+      );
+      const producer = yield* ApprovalProducer.HandoffApprovalProducer.pipe(
+        Effect.provide(ApprovalProducer.layer.pipe(Layer.provide(modelLayer))),
+      );
+      const owners = Layer.mergeAll(
+        Layer.succeed(ApprovalProducer.HandoffApprovalProducer, {
+          requestIfReady: (id) =>
+            producer
+              .requestIfReady(id)
+              .pipe(
+                Effect.provideService(ProviderStart.ProviderTurnStartModels, fixtureModels),
+                Effect.ensuring(Deferred.succeed(blocked, undefined)),
+              ),
+        }),
+        modelLayer,
+      );
       const accepted = yield* f.sink
         .stream({
           afterSequence: yield* f.sink.latestSequence(),
@@ -17473,11 +17513,20 @@ it.effect(
           Effect.forkChild({ startImmediately: true }),
         );
       yield* Effect.gen(function* () {
-        yield* ParkedReconciler.HandoffParkedReconciler;
+        yield* Deferred.await(blocked);
+        assert.isTrue(
+          subscribed,
+          "Production provider registry bridge must subscribe before blocked observation",
+        );
+        const reconciler = yield* ParkedReconciler.HandoffParkedReconciler;
+        yield* reconciler.drain;
+        assert.lengthOf(f.starts, 0);
+        current = [...catalog];
+        yield* Queue.offer(changes, current);
         yield* Fiber.join(accepted);
         yield* f.worker.drain();
         assert.lengthOf(f.starts, 1);
-      }).pipe(Effect.provide(ParkedReconciler.layer));
+      }).pipe(Effect.provide(ParkedReconciler.layer.pipe(Layer.provide(owners))));
     }).pipe(
       Effect.provide(makeTransferTestLayer(SqlitePersistence.layerMemory, false, undefined, true)),
       Effect.scoped,
