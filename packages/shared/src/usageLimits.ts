@@ -1033,6 +1033,9 @@ export function resetCreditAccountLabel(account: LimitAccount): string {
       [
         account.displayName ?? String(account.driver),
         account.email,
+        account.redeem
+          ? `${"instanceId" in account.redeem.input ? account.redeem.input.instanceId : account.redeem.input.accountId} @ ${account.redeem.environmentId}`
+          : account.key,
         account.sourceLabel,
         ...account.environments.map((environment) => environment.label),
       ].filter((part): part is string => Boolean(part)),

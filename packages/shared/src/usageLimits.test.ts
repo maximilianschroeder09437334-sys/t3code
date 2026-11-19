@@ -60,6 +60,25 @@ describe("reset credit account context", () => {
       }),
     );
     expect(new Set(accounts.map(resetCreditAccountLabel)).size).toBe(2);
+    const unnamedInstances = accounts.map((account, i): LimitAccount => ({
+      ...account,
+      key: `env-a:claude-${i}`,
+      displayName: "Claude",
+      email: undefined,
+      sourceLabel: null,
+      environments: [{ environmentId: EnvironmentId.make("env-a"), label: "Desktop" }],
+      redeem: {
+        environmentId: EnvironmentId.make("env-a"),
+        input: { instanceId: ProviderInstanceId.make(`claude-${i}`) },
+      },
+    }));
+    expect(new Set(unnamedInstances.map(resetCreditAccountLabel)).size).toBe(2);
+    for (const [i, account] of unnamedInstances.entries()) {
+      expect(resetCreditAccountLabel(account)).toContain(`claude-${i} @ env-a`);
+      expect(
+        resetCreditChoices(account.limits.resetCredits!, account.redeem!.input, now)[0]?.input,
+      ).toEqual({ instanceId: `claude-${i}` });
+    }
     for (const account of accounts) {
       expect(resetCreditAccountLabel(account)).toContain(account.email);
       const choice = resetCreditChoices(
