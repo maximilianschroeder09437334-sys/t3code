@@ -627,9 +627,6 @@ export const layer: Layer.Layer<
                 provider: providers.find(
                   (candidate) => candidate.instanceId === intent.modelSelection.instanceId,
                 ),
-                interactionMode: projection.thread.interactionMode,
-                explicitPlan: intent.interactionMode === "plan",
-                planningPurpose: intent.planningPurpose,
               });
         if (modelPolicyError !== null) {
           yield* settleStartFailure({

@@ -508,9 +508,6 @@ const make = Effect.gen(function* () {
           provider: providers.find(
             (provider) => provider.instanceId === request.modelSelection.instanceId,
           ),
-          interactionMode: request.interactionMode,
-          explicitPlan: source.agentExecutionIntent?.interactionMode === "plan",
-          planningPurpose: source.agentExecutionIntent?.planningPurpose,
         });
         if (modelError !== null) return yield* failed(sourceId, "unverified-model-selection");
         const snapshot = yield* queryHandoffReadinessWithReaders(

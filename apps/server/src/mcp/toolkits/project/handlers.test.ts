@@ -459,9 +459,6 @@ it.effect("a launch with a model its provider does not advertise creates no thre
             model,
             options: [{ id: "effort", value: "medium" }],
           },
-          ...(instanceId === "claudeAgent" && model.toLowerCase() === "opus"
-            ? { interactionMode: "plan" as const, planningPurpose: "Design a bounded plan" }
-            : {}),
         })
         .pipe(
           Stream.unwrap,
@@ -1348,7 +1345,7 @@ it.effect("an update the project refuses tells the agent why", () =>
   }),
 );
 
-it.effect("blocks an agent launch with inherited or execution Opus selection", () =>
+it.effect("an agent launch needs an explicit advertised selection and accepts any model", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const { projectId, dependencies } = clientLaunchHarness({
@@ -1396,24 +1393,11 @@ it.effect("blocks an agent launch with inherited or execution Opus selection", (
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
       ),
     );
-    for (const modelSelection of [
-      undefined,
-      {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-opus-5-5",
-        options: [{ id: "effort", value: "medium" }],
-      },
-    ]) {
-      const result = yield* toolkit
-        .handle("t3_thread_launch", {
-          title: "Worker",
-          projectId,
-          ...(modelSelection === undefined ? {} : { modelSelection }),
-        })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
-      expect(result.at(-1)?.result).toMatchObject({ code: "invalid_request" });
-      expect(launched).toHaveLength(0);
-    }
+    const inherited = yield* toolkit
+      .handle("t3_thread_launch", { title: "Worker", projectId })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(inherited.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    expect(launched).toHaveLength(0);
     const allowed = yield* toolkit
       .handle("t3_thread_launch", {
         title: "Worker",
@@ -1427,11 +1411,10 @@ it.effect("blocks an agent launch with inherited or execution Opus selection", (
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(allowed.at(-1)?.result).toMatchObject({ projectId });
     expect(launched).toHaveLength(1);
-    const missingPurpose = yield* toolkit
+    const opusExecution = yield* toolkit
       .handle("t3_thread_launch", {
-        title: "Plan",
+        title: "Worker",
         projectId,
-        interactionMode: "plan",
         modelSelection: {
           instanceId: ProviderInstanceId.make("claudeAgent"),
           model: "planning-alias",
@@ -1439,7 +1422,14 @@ it.effect("blocks an agent launch with inherited or execution Opus selection", (
         },
       })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
-    expect(missingPurpose.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    expect(opusExecution.at(-1)?.result).toMatchObject({ projectId });
+    expect(launched[1]?.agentExecutionIntent).toEqual({
+      modelSelection: {
+        instanceId: "claudeAgent",
+        model: "planning-alias",
+        options: [{ id: "effort", value: "medium" }],
+      },
+    });
     const badEffort = yield* toolkit
       .handle("t3_thread_launch", {
         title: "Worker",
@@ -1452,7 +1442,7 @@ it.effect("blocks an agent launch with inherited or execution Opus selection", (
       })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(badEffort.at(-1)?.result).toMatchObject({ code: "invalid_request" });
-    expect(launched).toHaveLength(1);
+    expect(launched).toHaveLength(2);
     const planning = yield* toolkit
       .handle("t3_thread_launch", {
         title: "Plan",
@@ -1467,8 +1457,8 @@ it.effect("blocks an agent launch with inherited or execution Opus selection", (
       })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(planning.at(-1)?.result).toMatchObject({ projectId });
-    expect(launched[1]?.interactionMode).toBe("plan");
-    expect(launched[1]?.agentExecutionIntent).toMatchObject({
+    expect(launched[2]?.interactionMode).toBe("plan");
+    expect(launched[2]?.agentExecutionIntent).toMatchObject({
       interactionMode: "plan",
       planningPurpose: "Design the bounded retry policy",
       modelSelection: { model: "claude-opus-5-5", options: [{ id: "effort", value: "medium" }] },
@@ -1477,7 +1467,7 @@ it.effect("blocks an agent launch with inherited or execution Opus selection", (
 );
 
 it.effect.each([
-  { name: "omitted selection", selection: undefined, interactionMode: undefined },
+  { name: "omitted selection", selection: undefined },
   {
     name: "unsupported effort",
     selection: {
@@ -1485,53 +1475,14 @@ it.effect.each([
       model: "gpt-6.1-terra",
       options: [{ id: "reasoningEffort", value: "unsupported" }],
     },
-    interactionMode: undefined,
   },
-  {
-    name: "Opus execution",
-    selection: {
-      instanceId: ProviderInstanceId.make("claudeAgent"),
-      model: "research-model",
-      options: [{ id: "effort", value: "medium" }],
-    },
-    interactionMode: undefined,
-  },
-  {
-    name: "Opus plan without purpose",
-    selection: {
-      instanceId: ProviderInstanceId.make("claudeAgent"),
-      model: "research-model",
-      options: [{ id: "effort", value: "medium" }],
-    },
-    interactionMode: "plan" as const,
-  },
-])("rejects $name before launching", ({ selection, interactionMode }) =>
+])("rejects $name before launching", ({ selection }) =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
-    const opus = {
-      instanceId: ProviderInstanceId.make("claudeAgent"),
-      models: [
-        {
-          slug: "claude-opus-5-5",
-          name: "Opus",
-          aliases: ["research-model"],
-          capabilities: {
-            optionDescriptors: [
-              {
-                id: "effort",
-                label: "Reasoning",
-                type: "select",
-                options: [{ id: "medium", label: "Medium" }],
-              },
-            ],
-          },
-        },
-      ],
-    } as unknown as ServerProvider;
     const { projectId, dependencies } = clientLaunchHarness({
       runtimeModeCeiling: "full-access",
       launched,
-      providers: [fixtureProvider, opus],
+      providers: [fixtureProvider],
     });
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
@@ -1543,7 +1494,6 @@ it.effect.each([
         title: "Worker",
         projectId,
         ...(selection === undefined ? {} : { modelSelection: selection }),
-        ...(interactionMode === undefined ? {} : { interactionMode }),
       })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(result.at(-1)?.result).toMatchObject({ code: "invalid_request" });

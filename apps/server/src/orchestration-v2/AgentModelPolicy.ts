@@ -10,9 +10,6 @@ type Selection = {
 
 export function agentModelPolicy(input: {
   readonly selection: Selection | undefined;
-  readonly interactionMode: "default" | "plan";
-  readonly explicitPlan?: boolean | undefined;
-  readonly planningPurpose?: string | undefined;
   readonly provider?: Pick<ServerProvider, "instanceId" | "models"> | undefined;
 }): string | null {
   const selection = input.selection;
@@ -51,13 +48,5 @@ export function agentModelPolicy(input: {
   );
   if (!effort || !options.some((option) => option.id === effort.id))
     return "Agent-created work requires an explicit advertised reasoning effort.";
-  if (
-    /opus/i.test(`${model.slug} ${model.name}`) &&
-    (input.interactionMode !== "plan" ||
-      !input.explicitPlan ||
-      !input.planningPurpose?.trim() ||
-      input.planningPurpose.trim().length > 1000)
-  )
-    return "Opus requires an explicit bounded planning purpose in plan mode.";
   return null;
 }

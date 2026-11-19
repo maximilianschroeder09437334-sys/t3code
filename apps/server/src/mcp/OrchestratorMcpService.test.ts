@@ -1550,27 +1550,9 @@ describe("OrchestratorMcpService provider resolution", () => {
   } as unknown as OrchestrationV2ThreadProjection;
 
   it.effect.each([
-    { name: "omitted delegate selection", kind: "delegate" as const, target: undefined },
-    {
-      name: "Opus delegate execution",
-      kind: "delegate" as const,
-      target: {
-        providerInstanceId: codexInstanceId,
-        model: "claude-opus-5-5",
-        options: [{ id: "effort", value: "medium" }],
-      },
-    },
-    { name: "omitted batch selection", kind: "batch" as const, target: undefined },
-    {
-      name: "Opus batch execution",
-      kind: "batch" as const,
-      target: {
-        providerInstanceId: codexInstanceId,
-        model: "claude-opus-5-5",
-        options: [{ id: "effort", value: "medium" }],
-      },
-    },
-  ])("rejects $name before dispatch", ({ kind, target }) =>
+    { name: "omitted delegate selection", kind: "delegate" as const },
+    { name: "omitted batch selection", kind: "batch" as const },
+  ])("rejects $name before dispatch", ({ kind }) =>
     Effect.gen(function* () {
       const commands: Array<unknown> = [];
       const dependencies = Layer.mergeAll(
@@ -1589,45 +1571,11 @@ describe("OrchestratorMcpService provider resolution", () => {
         }),
         ServerSettings.layerTest(),
         providerRegistryLayer([
-          {
-            ...providerSnapshot({
-              instanceId: codexInstanceId,
-              driver: ProviderDriverKind.make("codex"),
-              model: "claude-opus-5-5",
-            }),
-            models: [
-              {
-                slug: "gpt-5.4",
-                name: "GPT",
-                isCustom: false,
-                capabilities: {
-                  optionDescriptors: [
-                    {
-                      id: "reasoningEffort",
-                      label: "Effort",
-                      type: "select",
-                      options: [{ id: "medium", label: "Medium" }],
-                    },
-                  ],
-                },
-              },
-              {
-                slug: "claude-opus-5-5",
-                name: "Opus",
-                isCustom: false,
-                capabilities: {
-                  optionDescriptors: [
-                    {
-                      id: "effort",
-                      label: "Effort",
-                      type: "select",
-                      options: [{ id: "medium", label: "Medium" }],
-                    },
-                  ],
-                },
-              },
-            ],
-          } as ServerProvider,
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
         ]),
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({}),
@@ -1639,16 +1587,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         const result = yield* (
           kind === "delegate"
-            ? service
-                .delegateTask(scope, {
-                  task: "Implement",
-                  ...(target === undefined ? {} : { target }),
-                })
-                .pipe(Effect.asVoid)
+            ? service.delegateTask(scope, { task: "Implement" }).pipe(Effect.asVoid)
             : service
-                .createThreads(scope, {
-                  threads: [{ prompt: "Implement", ...(target === undefined ? {} : { target }) }],
-                })
+                .createThreads(scope, { threads: [{ prompt: "Implement" }] })
                 .pipe(Effect.asVoid)
         ).pipe(Effect.result);
         assert.deepEqual(commands, []);

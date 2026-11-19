@@ -333,7 +333,7 @@ it("rejects a restricted intent before provider start for every actor", async ()
   );
   expect(fixture.startRootRun).not.toHaveBeenCalled();
 });
-it("blocks an agent-created Opus execution before provider start on resume", async () => {
+it("blocks an agent-created turn without recorded selection provenance on resume", async () => {
   const fixture = startWithMissingWorktree("/tmp/project", undefined, true);
   await expect(fixture.start).rejects.toBeUndefined();
   expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
@@ -373,26 +373,16 @@ it("rejects a resumed agent turn when the run selection differs from recorded in
   expect(fixture.startRootRun).not.toHaveBeenCalled();
 });
 
-it("rejects resumed Opus plan mode without a recorded bounded purpose", async () => {
+it("starts an agent-created Opus turn in default mode without a planning purpose", async () => {
   const fixture = startWithMissingWorktree("/tmp/project", undefined, true, {
     modelSelection: {
       instanceId: ProviderInstanceId.make("claudeAgent"),
       model: "claude-opus-5-5",
       options: [{ id: "effort", value: "medium" }],
     },
-    interactionMode: "plan",
   });
-  await expect(fixture.start).rejects.toBeUndefined();
-  expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
-    expect.objectContaining({
-      events: expect.arrayContaining([
-        expect.objectContaining({
-          type: "turn-item.updated",
-          payload: expect.objectContaining({ title: "Agent model selection blocked" }),
-        }),
-      ]),
-    }),
-  );
+  await expect(fixture.start).resolves.toBeDefined();
+  expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
 });
 
 it("does not apply the agent policy to a human-created Opus thread", async () => {
@@ -401,7 +391,7 @@ it("does not apply the agent policy to a human-created Opus thread", async () =>
   expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
 });
 
-it("accepts explicit bounded Opus planning provenance before workspace recovery", async () => {
+it("accepts recorded Opus plan-mode provenance before workspace recovery", async () => {
   const fixture = startWithMissingWorktree("/tmp/project", undefined, true, {
     modelSelection: {
       instanceId: ProviderInstanceId.make("claudeAgent"),

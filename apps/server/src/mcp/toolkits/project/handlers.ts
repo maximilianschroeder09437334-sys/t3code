@@ -185,9 +185,6 @@ const launchThread = McpToolAccess.startsThreads(
           provider: providersForPolicy.find(
             (candidate) => candidate.instanceId === input.modelSelection?.instanceId,
           ),
-          interactionMode: input.interactionMode === "plan" ? "plan" : "default",
-          explicitPlan: input.interactionMode === "plan",
-          planningPurpose: input.planningPurpose,
         });
         if (modelPolicyError !== null)
           return yield* new OrchestratorMcpFailure({

@@ -2738,9 +2738,6 @@ const make = Effect.gen(function* () {
       const modelPolicyError = agentModelPolicy({
         selection: requestedSelection,
         provider: target.provider,
-        interactionMode: input.interactionMode === "plan" ? "plan" : "default",
-        explicitPlan: input.interactionMode === "plan",
-        planningPurpose: input.planningPurpose,
       });
       if (modelPolicyError !== null) return yield* failure("invalid_request", modelPolicyError);
       const runtimeMode = yield* resolveRuntimeMode(
@@ -3110,9 +3107,6 @@ const make = Effect.gen(function* () {
             provider: providers.find(
               (candidate) => candidate.instanceId === request.target?.providerInstanceId,
             ),
-            interactionMode: request.interactionMode === "plan" ? "plan" : "default",
-            explicitPlan: request.interactionMode === "plan",
-            planningPurpose: request.planningPurpose,
           });
           if (modelPolicyError !== null) return yield* failure("invalid_request", modelPolicyError);
         }

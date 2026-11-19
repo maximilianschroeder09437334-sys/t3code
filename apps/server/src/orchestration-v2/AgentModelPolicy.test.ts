@@ -23,23 +23,18 @@ const selection = {
   options: [{ id: "effort", value: "medium" }],
 };
 
-it("requires explicit supported provider, model and effort and a bounded purpose for Opus planning", () => {
-  const base = { selection, interactionMode: "plan", explicitPlan: true, provider } as const;
+it("requires an explicit supported provider, model and effort, and allows any advertised model", () => {
+  const base = { selection, provider } as const;
   assert.isNotNull(agentModelPolicy({ ...base, selection: undefined }));
   assert.isNotNull(agentModelPolicy({ ...base, selection: { ...selection, options: undefined } }));
-  assert.isNotNull(agentModelPolicy(base));
-  assert.isNull(agentModelPolicy({ ...base, planningPurpose: "Design the bounded retry policy" }));
+  assert.isNull(agentModelPolicy(base));
   assert.isNotNull(
     agentModelPolicy({
       ...base,
-      planningPurpose: "Design the bounded retry policy",
       selection: { ...selection, options: [{ id: "effort", value: "invalid" }] },
     }),
   );
-  assert.isNotNull(
-    agentModelPolicy({ ...base, interactionMode: "default", planningPurpose: "Design" }),
-  );
-  assert.isNotNull(agentModelPolicy({ ...base, provider: undefined, planningPurpose: "Design" }));
+  assert.isNotNull(agentModelPolicy({ ...base, provider: undefined }));
 });
 
 it("rejects ambiguous model aliases rather than selecting a potentially unsafe model", () => {
@@ -50,13 +45,5 @@ it("rejects ambiguous model aliases rather than selecting a potentially unsafe m
       { ...provider.models[0]!, slug: "gpt-safe", name: "GPT", aliases: ["research-model"] },
     ],
   };
-  assert.isNotNull(
-    agentModelPolicy({
-      selection,
-      provider: collision,
-      interactionMode: "plan",
-      explicitPlan: true,
-      planningPurpose: "Design the retry policy",
-    }),
-  );
+  assert.isNotNull(agentModelPolicy({ selection, provider: collision }));
 });
