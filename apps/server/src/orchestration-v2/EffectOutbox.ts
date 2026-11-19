@@ -236,10 +236,19 @@ export interface EffectOutboxV2Shape {
   readonly enqueue: (
     effects: ReadonlyArray<PendingOrchestrationEffectV2>,
   ) => Effect.Effect<void, EffectOutboxError>;
+  readonly bindUsageLimitIntent: (
+    previous: OrchestrationEffectV2,
+    request: HandoffRequest,
+  ) => Effect.Effect<boolean, EffectOutboxError>;
   readonly supersedeHandoff: (
     previous: OrchestrationEffectV2,
     request: HandoffRequest,
   ) => Effect.Effect<boolean, EffectOutboxError>;
+  readonly listParkedHandoffs: (input: {
+    readonly after?: string;
+    readonly threadId?: ThreadId;
+    readonly workspaceRoot?: string;
+  }) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
   readonly get: (
     effectId: string,
   ) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
@@ -424,6 +433,53 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       );
 
     const service: EffectOutboxV2Shape = {
+      bindUsageLimitIntent: Effect.fn("EffectOutbox.bindUsageLimitIntent")(
+        function* (previous, request) {
+          if (
+            previous.id !== `core-handoff:${previous.threadId}` ||
+            previous.request.type !== "thread.handoff" ||
+            previous.request.intent !== undefined ||
+            request.intent === undefined
+          )
+            return false;
+          const rows = yield* sql<{ readonly effect_id: string }>`
+          UPDATE orchestration_v2_effect_outbox SET payload_json = ${encodeRequest(request)}
+          WHERE effect_id = ${previous.id} AND payload_json = ${encodeRequest(previous.request)}
+            AND status IN ('pending', 'running', 'failed')
+            AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_threads
+              WHERE thread_id = ${previous.threadId} AND
+                (json_extract(payload_json, '$.handoffTransfer') IS NOT NULL OR
+                 json_extract(payload_json, '$.usageLimitFailoverConsumed') IS NOT NULL))
+          RETURNING effect_id
+        `.pipe(
+            Effect.mapError(
+              (cause) => new EffectOutboxError({ operation: "bind-failover", cause }),
+            ),
+          );
+          return rows.length === 1;
+        },
+      ),
+      listParkedHandoffs: Effect.fn("EffectOutbox.listParkedHandoffs")(function* (input) {
+        const rows = yield* sql<EffectRow>`
+          SELECT * FROM orchestration_v2_effect_outbox
+          WHERE effect_type = 'thread.handoff' AND status = 'failed'
+            AND effect_id = 'core-handoff:' || thread_id
+            AND effect_id > ${input.after ?? ""}
+            AND (${input.threadId ?? null} IS NULL OR thread_id = ${input.threadId ?? null})
+            AND (${input.workspaceRoot ?? null} IS NULL OR EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_threads t
+              LEFT JOIN projection_projects p ON p.project_id = t.project_id
+              WHERE t.thread_id = orchestration_v2_effect_outbox.thread_id
+                AND COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) = ${input.workspaceRoot ?? null}
+            ))
+            AND json_valid(last_error)
+            AND json_extract(CASE WHEN json_valid(last_error) THEN last_error ELSE '{}' END, '$.type') = 'handoff.parked'
+          ORDER BY effect_id LIMIT 64
+        `.pipe(
+          Effect.mapError((cause) => new EffectOutboxError({ operation: "list-parked", cause })),
+        );
+        return yield* decodeRows("list-parked", rows);
+      }),
       enqueue: Effect.fn("EffectOutbox.enqueue")(
         function* (effects) {
           const now = yield* DateTime.now;

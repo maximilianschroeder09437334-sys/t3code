@@ -199,7 +199,8 @@ export const layerProviderTurnStartHooks = Layer.effect(
 );
 
 export class ProviderTurnStartModels extends Context.Reference<
-  Pick<ProviderRegistry.ProviderRegistry["Service"], "getProviders">
+  Pick<ProviderRegistry.ProviderRegistry["Service"], "getProviders"> &
+    Partial<Pick<ProviderRegistry.ProviderRegistry["Service"], "streamChanges">>
 >("t3/orchestration-v2/ProviderTurnStartService/ProviderTurnStartModels", {
   defaultValue: () => ({ getProviders: Effect.succeed([]) }),
 }) {}
@@ -208,7 +209,10 @@ export const layerProviderTurnStartModels = Layer.effect(
   ProviderTurnStartModels,
   Effect.gen(function* () {
     const providers = yield* ProviderRegistry.ProviderRegistry;
-    return ProviderTurnStartModels.of({ getProviders: providers.getProviders });
+    return ProviderTurnStartModels.of({
+      getProviders: providers.getProviders,
+      streamChanges: providers.streamChanges,
+    });
   }),
 );
 

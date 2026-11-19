@@ -4,6 +4,10 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Settings from "../serverSettings.ts";
+import { ProviderTurnStartModels } from "./ProviderTurnStartService.ts";
+import { usageLimitFailoverIntent } from "./UsageLimitFailoverPolicy.ts";
 import * as Digest from "effect/crypto/Digest";
 import * as Git from "../git/GitManager.ts";
 import * as Terminals from "../terminal/Manager.ts";
@@ -15,6 +19,7 @@ import { HandoffParked } from "./CoreHandoff.ts";
 import { queryHandoffReadiness } from "./CoreHandoffReadiness.ts";
 import { requestHandoffApproval } from "./HandoffApproval.ts";
 import { withAutomaticHandoffAuthority } from "./AutomaticHandoffAuthority.ts";
+const isHandoffParked = Schema.is(HandoffParked);
 
 export class HandoffApprovalProducer extends Context.Service<
   HandoffApprovalProducer,
@@ -33,6 +38,8 @@ const make = Effect.gen(function* () {
   const digest = yield* Digest.Digest;
   const git = yield* Effect.serviceOption(Git.GitManager);
   const terminals = yield* Effect.serviceOption(Terminals.TerminalManager);
+  const settings = yield* Effect.serviceOption(Settings.ServerSettingsService);
+  const models = yield* ProviderTurnStartModels;
   const requestIfReady = Effect.fn("HandoffApprovalProducer.requestIfReady")(
     function* (sourceId: ThreadId) {
       const parked = yield* outbox.get(`core-handoff:${sourceId}`);
@@ -51,7 +58,36 @@ const make = Effect.gen(function* () {
       if (Option.isNone(git) || Option.isNone(terminals))
         return yield* new HandoffParked({
           message: "Physical readiness owners unavailable; request remains parked.",
+          category: "unknown",
         });
+      if (
+        Option.isSome(parked) &&
+        parked.value.request.type === "thread.handoff" &&
+        parked.value.request.intent === undefined &&
+        Option.isSome(settings)
+      ) {
+        const preferences = yield* settings.value.getSettings;
+        if (preferences.rootOwnerUsageLimitFailover?.enabled) {
+          const source = yield* threads.getThreadRecords(sourceId, [
+            "runs",
+            "turnItems",
+            "checkpoints",
+          ]);
+          const intent = usageLimitFailoverIntent(
+            source,
+            parked.value.request,
+            preferences,
+            yield* models.getProviders,
+            DateTime.toEpochMillis(yield* DateTime.now),
+          );
+          if (intent !== null)
+            yield* outbox.bindUsageLimitIntent(parked.value, {
+              ...parked.value.request,
+              intent,
+              modelSelection: intent.destinationSelection,
+            });
+        }
+      }
       const successor = yield* threads.getThreadShell(
         ThreadId.make(`core-handoff:${sourceId}:successor`),
       );
@@ -64,7 +100,13 @@ const make = Effect.gen(function* () {
             observed.classification !== "automatically_eligible")
         )
           return yield* new HandoffParked({
-            message: "Source is not ready for handoff; the request remains parked.",
+            message:
+              observed.after.blockers[0] ??
+              observed.after.unknowns[0] ??
+              observed.after.manualReview[0] ??
+              "Readiness observation changed",
+            category: observed.after.blockers.length ? "blocked" : "unknown",
+            generation: observed.generation,
           });
         if (observed.classification === "manual_review") {
           yield* requestHandoffApproval(sourceId, observed.generation);
@@ -89,15 +131,22 @@ const make = Effect.gen(function* () {
         Effect.provideService(Sessions.ProviderSessionManagerV2, sessions),
         Effect.provideService(Outbox.EffectOutboxV2, outbox),
         Effect.provideService(Digest.Digest, digest),
+        Effect.provideService(ProviderTurnStartModels, models),
+        (effect) =>
+          Option.isSome(settings)
+            ? Effect.provideService(effect, Settings.ServerSettingsService, settings.value)
+            : effect,
         Effect.provideService(Git.GitManager, git.value),
         Effect.provideService(Terminals.TerminalManager, terminals.value),
       );
     },
-    Effect.mapError(
-      () =>
-        new HandoffParked({
-          message: "Review observation changed or was unavailable; request remains parked.",
-        }),
+    Effect.mapError((cause) =>
+      isHandoffParked(cause)
+        ? cause
+        : new HandoffParked({
+            message: "Review observation changed or was unavailable; request remains parked.",
+            category: "unknown",
+          }),
     ),
   );
   return HandoffApprovalProducer.of({ requestIfReady });

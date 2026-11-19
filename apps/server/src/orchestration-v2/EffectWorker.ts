@@ -51,6 +51,8 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
 ) {}
 
 const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecutionError);
+import { encodeParkReason } from "./HandoffParkReason.ts";
+
 const isHandoffParked = Schema.is(CoreHandoff.HandoffParked);
 
 /**
@@ -1065,6 +1067,24 @@ export const layerWithOptions = (
             nonRetryable,
             error,
           });
+          const parkedFailure = Cause.findErrorOption(exit.cause).pipe(
+            Option.flatMap((failure) =>
+              isOrchestrationEffectExecutionError(failure) && isHandoffParked(failure.cause)
+                ? Option.some(failure.cause)
+                : Option.none(),
+            ),
+          );
+          const parkError =
+            effect.request.type === "thread.handoff" && Option.isSome(parkedFailure)
+              ? encodeParkReason(effect.request, {
+                  category: parkedFailure.value.category ?? "authority",
+                  generation: parkedFailure.value.generation ?? null,
+                  retryable:
+                    parkedFailure.value.category === "blocked" ||
+                    parkedFailure.value.category === "unknown",
+                  detail: parkedFailure.value.message,
+                })
+              : error;
           const parkedHandoff =
             effect.request.type === "thread.handoff" &&
             Option.exists(
@@ -1080,7 +1100,7 @@ export const layerWithOptions = (
                 (effect.attemptCount >= maxAttempts &&
                   (!ownsStartingRun(effect.request.type) || cannotSettleRun(exit.cause)))
               ? yield* outbox
-                  .fail({ effectId: effect.id, workerId, error })
+                  .fail({ effectId: effect.id, workerId, error: parkError })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
               : yield* outbox
                   .retry({

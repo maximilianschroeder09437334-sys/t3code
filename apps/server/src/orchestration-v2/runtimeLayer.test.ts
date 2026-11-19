@@ -1,3 +1,8 @@
+import * as ApprovalProducer from "./HandoffApprovalProducer.ts";
+import * as Registry from "../provider/ProviderRegistry.ts";
+import * as ParkedReconciler from "./HandoffParkedReconciler.ts";
+import { ServerSettings as ServerSettingsSchema } from "@t3tools/contracts";
+import { usageLimitFailoverIntent, sameFailoverIntent } from "./UsageLimitFailoverPolicy.ts";
 import {
   CONTEXT_HANDOFF_NUDGE,
   contextRolloverNoticeId,
@@ -13674,7 +13679,9 @@ const makeTransferTestLayer = (
     | ChildProcessSpawner.ChildProcessSpawner
   > = Layer.mock(TerminalManager.TerminalManager)({
     observeHandoff: () => Effect.succeed([]),
+    subscribeMetadata: () => Effect.succeed(() => {}),
   }),
+  failover = false,
 ) =>
   Layer.mergeAll(
     RuntimeLayer.layer,
@@ -13693,15 +13700,51 @@ const makeTransferTestLayer = (
     ),
   ).pipe(
     Layer.provideMerge(Layer.merge(layerTransferOwners, terminalLayer)),
-    Layer.provide(
+    Layer.provideMerge(
       Layer.succeed(ProviderStart.ProviderTurnStartModels, {
         getProviders: Effect.succeed([
           {
             instanceId: modelSelection.instanceId,
+            driver,
+            enabled: true,
+            installed: true,
+            status: "ready",
+            checkedAt: "1970-01-01T00:00:00.000Z",
+            auth: { status: "authenticated" },
+            availability: "available",
+            supportedRuntimeModes: ["full-access"],
             models: [
               {
                 slug: modelSelection.model,
                 name: "Inert fixture",
+                capabilities: {
+                  optionDescriptors: [
+                    {
+                      id: "reasoningEffort",
+                      type: "select",
+                      label: "Effort",
+                      role: "reasoning",
+                      options: [{ id: "high", label: "High" }],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            instanceId: claudeInstanceId,
+            driver: claudeDriver,
+            enabled: true,
+            installed: true,
+            status: "ready",
+            checkedAt: "1970-01-01T00:00:00.000Z",
+            auth: { status: "authenticated" },
+            availability: "available",
+            supportedRuntimeModes: ["full-access"],
+            models: [
+              {
+                slug: "inert-alternative",
+                name: "Inert alternative",
                 capabilities: {
                   optionDescriptors: [
                     {
@@ -13723,7 +13766,35 @@ const makeTransferTestLayer = (
     Layer.provide(McpProviderSessions.layer),
     Layer.provide(sqlite),
     Layer.provide(layerServerConfig),
-    Layer.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate })),
+    Layer.provideMerge(
+      ServerSettings.layerTest({
+        continueThreadsAfterServerUpdate,
+        ...(failover
+          ? {
+              providerInstances: { [claudeInstanceId]: { driver: claudeDriver, enabled: true } },
+              rootOwnerUsageLimitFailover: {
+                enabled: true,
+                revision: "inert-r1",
+                source: {
+                  driver: "codex" as const,
+                  selection: {
+                    ...modelSelection,
+                    options: [{ id: "reasoningEffort", value: "high" }],
+                  },
+                },
+                destination: {
+                  driver: "claudeAgent" as const,
+                  selection: {
+                    instanceId: claudeInstanceId,
+                    model: "inert-alternative",
+                    options: [{ id: "reasoningEffort", value: "high" }],
+                  },
+                },
+              },
+            }
+          : {}),
+      }),
+    ),
     Layer.provide(layerTestProviderInstanceRegistry),
     Layer.provide(layerGitWorkflowTest),
     Layer.provide(layerProjectServiceTest),
@@ -13874,6 +13945,7 @@ const configureGuardedHandoffOwners = Effect.fn("test.configureGuardedHandoffOwn
 });
 
 const decodeProducerFixtureRun = Schema.decodeEffect(OrchestrationV2RunSchema);
+const decodeFailoverSettings = Schema.decodeEffect(ServerSettingsSchema);
 
 const setupGuardedHandoff = Effect.fn("test.setupGuardedHandoff")(function* (
   key: string,
@@ -16927,4 +16999,801 @@ it.layer(Layer.empty)(
         }).pipe(Effect.provide(layerTransferTest), Effect.scoped),
     );
   },
+);
+
+const setupUsageLimitFailover = Effect.fn("test.setupUsageLimitFailover")(function* (
+  withReset = false,
+  retainedCwd?: string,
+) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const sink = yield* EventSink.EventSinkV2;
+  const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+  const fs = yield* FileSystem.FileSystem;
+  const cwd = retainedCwd ?? (yield* fs.makeTempDirectoryScoped({ prefix: "inert-failover-" }));
+  const sourceId = ThreadId.make("inert-failover-source");
+  const projectId = ProjectId.make("inert-failover-project");
+  const selection = { ...modelSelection, options: [{ id: "reasoningEffort", value: "high" }] };
+  const f = yield* configureGuardedHandoffOwners("usage-limit", cwd, selection);
+  f.availability.completeAppOwnedCoverage = true;
+  f.workspace.checkpointMatches = true;
+  f.workspace.checkpointRef = "refs/checkpoints/inert";
+  f.workspace.checkpointCommit = "inert-saved";
+  yield* configureInertFailoverTarget;
+  yield* seedProject({
+    projectId,
+    title: "Inert failover",
+    workspaceRoot: cwd,
+    defaultModelSelection: selection,
+    createdAt: DateTime.formatIso(f.now),
+  });
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make("failover-create"),
+    threadId: sourceId,
+    projectId,
+    title: "Inert failover",
+    modelSelection: selection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: "feature",
+    worktreePath: cwd,
+    createdBy: "user",
+    creationSource: "web",
+  });
+  const provider = yield* decodeHandoffFixtureProvider({
+    id: "inert-source-provider",
+    driver,
+    providerInstanceId: selection.instanceId,
+    providerSessionId: "inert-source-session",
+    appThreadId: sourceId,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeConversationHeadRef: null,
+    status: "idle",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    pendingBackgroundTasks: [],
+    createdAt: f.now,
+    updatedAt: f.now,
+  });
+  const run = yield* decodeProducerFixtureRun({
+    id: "inert-limited-run",
+    threadId: sourceId,
+    ordinal: 1,
+    providerInstanceId: selection.instanceId,
+    modelSelection: selection,
+    providerThreadId: provider.id,
+    userMessageId: "inert-user",
+    rootNodeId: null,
+    activeAttemptId: null,
+    status: "failed",
+    requestedAt: f.now,
+    startedAt: f.now,
+    completedAt: f.now,
+    checkpointId: null,
+    contextHandoffId: null,
+  });
+  yield* sink.write({
+    events: [
+      {
+        id: EventId.make("inert-provider"),
+        type: "provider-thread.updated",
+        threadId: sourceId,
+        occurredAt: f.now,
+        payload: provider,
+      },
+      {
+        id: EventId.make("inert-run"),
+        type: "run.created",
+        threadId: sourceId,
+        occurredAt: f.now,
+        payload: run,
+      },
+      {
+        id: EventId.make("inert-error"),
+        type: "turn-item.updated",
+        threadId: sourceId,
+        occurredAt: f.now,
+        payload: {
+          id: TurnItemId.make("inert-error-item"),
+          threadId: sourceId,
+          runId: run.id,
+          nodeId: null,
+          providerThreadId: provider.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          type: "error",
+          title: "Inert authoritative usage limit",
+          status: "failed",
+          failure: {
+            class: "usage_limit",
+            message: "Inert limit",
+            code: "usage_limit",
+            retryable: false,
+            ...(withReset
+              ? { resetAt: DateTime.formatIso(DateTime.addDuration(f.now, "1 second")) }
+              : {}),
+          },
+          startedAt: f.now,
+          completedAt: f.now,
+          updatedAt: f.now,
+        },
+      },
+      {
+        id: EventId.make("inert-checkpoint"),
+        type: "checkpoint.captured",
+        threadId: sourceId,
+        occurredAt: f.now,
+        payload: {
+          id: CheckpointId.make("inert-checkpoint"),
+          threadId: sourceId,
+          scopeId: "inert-scope" as never,
+          runId: run.id,
+          nodeId: NodeId.make("inert-node"),
+          parentCheckpointId: null,
+          ordinalWithinScope: 1,
+          appRunOrdinal: 1,
+          ref: CheckpointRef.make("refs/checkpoints/inert"),
+          status: "ready",
+          files: [],
+          capturedAt: f.now,
+        },
+      },
+    ],
+  });
+  const submitted = yield* CoreHandoff.submitHandoff(sourceId, {
+    goal: "Reuse saved material",
+    decisions: [],
+    state: { branch: "feature", commits: [], verified: [] },
+    deadEnds: [],
+    next: "Remain inert",
+    pointers: [],
+  });
+  return { ...f, sourceId, projectId, orchestrator, worker, sink, submitted, run };
+});
+
+it.effect(
+  "usage-limit failover below context cap reserves durable lineage and starts one exact inert destination",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setupUsageLimitFailover();
+      yield* f.worker.runOnce();
+      const row = Option.getOrThrow(
+        yield* (yield* EffectOutbox.EffectOutboxV2).get(CoreHandoff.handoffId(f.sourceId)),
+      );
+      assert(row.request.type === "thread.handoff");
+      yield* CoreHandoff.deliverHandoff(row.request);
+      yield* f.worker.drain();
+      const source = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+      const successor = yield* f.orchestrator.getThreadProjection(f.submitted.successorThreadId);
+      assert.equal(source.handoffTransfer?.state, "started");
+      assert.isDefined(source.usageLimitFailoverConsumed);
+      assert.deepEqual(
+        source.usageLimitFailoverConsumed,
+        successor.thread.usageLimitFailoverConsumed,
+      );
+      assert.lengthOf(f.starts, 1);
+      assert.equal(f.starts[0]?.modelSelection.instanceId, claudeInstanceId);
+      assert.equal(f.starts[0]?.modelSelection.model, "inert-alternative");
+      yield* f.worker.drain();
+      assert.lengthOf(f.starts, 1);
+    }).pipe(
+      Effect.provide(makeTransferTestLayer(SqlitePersistence.layerMemory, false, undefined, true)),
+      Effect.scoped,
+    ),
+);
+
+it.effect(
+  "usage-limit failover rejects changed failure, selection, policy, role and unknown capability bindings",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setupUsageLimitFailover();
+      const settings = yield* (yield* ServerSettings.ServerSettingsService).getSettings;
+      const providers = yield* (yield* ProviderStart.ProviderTurnStartModels).getProviders;
+      const records = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+        f.sourceId,
+        ["runs", "turnItems", "checkpoints"],
+      );
+      const row = Option.getOrThrow(
+        yield* (yield* EffectOutbox.EffectOutboxV2).get(CoreHandoff.handoffId(f.sourceId)),
+      );
+      assert(row.request.type === "thread.handoff");
+      const intent = usageLimitFailoverIntent(records, row.request, settings, providers, 0);
+      assert.isNotNull(intent);
+      const policy = settings.rootOwnerUsageLimitFailover!;
+      const changed = {
+        ...settings,
+        rootOwnerUsageLimitFailover: { ...policy, revision: "changed" },
+      };
+      assert.isFalse(
+        sameFailoverIntent(
+          intent!,
+          usageLimitFailoverIntent(records, row.request, changed, providers, 0)!,
+        ),
+      );
+      for (const candidate of [
+        { ...records, checkpoints: [] },
+        { ...records, turnItems: [] },
+        { ...records, runs: records.runs.map((run) => ({ ...run, status: "completed" as const })) },
+        { ...records, thread: { ...records.thread, settledAt: f.now } },
+        { ...records, thread: { ...records.thread, settledOverride: "settled" as const } },
+        { ...records, thread: { ...records.thread, handoffStopCommandId: CommandId.make("stop") } },
+        { ...records, thread: { ...records.thread, usageLimitFailoverConsumed: intent! } },
+        {
+          ...records,
+          thread: {
+            ...records.thread,
+            lineage: { ...records.thread.lineage, parentThreadId: ThreadId.make("parent") },
+          },
+        },
+      ])
+        assert.isNull(usageLimitFailoverIntent(candidate, row.request, settings, providers, 0));
+      assert.isNull(
+        usageLimitFailoverIntent(
+          records,
+          row.request,
+          yield* decodeFailoverSettings({}),
+          providers,
+          0,
+        ),
+      );
+      assert.isNull(
+        usageLimitFailoverIntent(
+          records,
+          row.request,
+          { ...settings, rootOwnerUsageLimitFailover: { ...policy, enabled: false } },
+          providers,
+          0,
+        ),
+      );
+      for (const prop of ["availability", "auth", "models"] as const) {
+        const missing = providers.map((provider) =>
+          provider.instanceId !== claudeInstanceId
+            ? provider
+            : {
+                ...provider,
+                ...(prop === "availability"
+                  ? { availability: undefined }
+                  : prop === "auth"
+                    ? { auth: { status: "unknown" as const } }
+                    : { models: [] }),
+              },
+        );
+        assert.isNull(usageLimitFailoverIntent(records, row.request, settings, missing, 0));
+      }
+      assert.isNull(
+        usageLimitFailoverIntent(records, row.request, settings, providers, 5 * 60 * 1000 + 1),
+      );
+      const opus = providers.map((provider) =>
+        provider.instanceId !== claudeInstanceId
+          ? provider
+          : {
+              ...provider,
+              models: provider.models.map((model) => ({ ...model, name: "Opus planning" })),
+            },
+      );
+      assert.isNull(
+        usageLimitFailoverIntent(
+          { ...records, thread: { ...records.thread, interactionMode: "plan" } },
+          { ...row.request, interactionMode: "plan" },
+          settings,
+          opus,
+          0,
+        ),
+      );
+      assert.lengthOf(f.starts, 0);
+    }).pipe(
+      Effect.provide(makeTransferTestLayer(SqlitePersistence.layerMemory, false, undefined, true)),
+      Effect.scoped,
+    ),
+);
+
+it.effect.each(["before-reserve", "after-reserve"] as const)(
+  "usage-limit failover revocation %s retains consumed ownership and never starts",
+  (when) =>
+    Effect.gen(function* () {
+      const f = yield* setupUsageLimitFailover();
+      yield* f.worker.runOnce();
+      const projection = yield* f.orchestrator.getThreadProjection(f.sourceId);
+      const review = projection.runtimeRequests.findLast(
+        (request) => request.responseCapability.type === "handoff",
+      )!.responseCapability;
+      assert(review.type === "handoff");
+      if (when === "after-reserve")
+        yield* f.orchestrator.dispatch({
+          type: "handoff.transfer.prepare",
+          commandId: CommandId.make(`handoff-transfer:${review.requestId}:prepare`),
+          threadId: f.sourceId,
+          requestId: review.requestId,
+          generation: review.generation,
+        });
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const policy = (yield* settings.getSettings).rootOwnerUsageLimitFailover!;
+      yield* settings.updateSettings({
+        rootOwnerUsageLimitFailover: { ...policy, enabled: false },
+      });
+      yield* f.worker.drain();
+      const source = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+      assert.lengthOf(f.starts, 0);
+      assert.equal(source.usageLimitFailoverConsumed !== undefined, when === "after-reserve");
+      if (when === "after-reserve") {
+        yield* settings.updateSettings({
+          rootOwnerUsageLimitFailover: { ...policy, revision: "new-revision" },
+        });
+        const records = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+          f.sourceId,
+          ["runs", "turnItems", "checkpoints"],
+        );
+        const row = Option.getOrThrow(
+          yield* (yield* EffectOutbox.EffectOutboxV2).get(CoreHandoff.handoffId(f.sourceId)),
+        );
+        assert(row.request.type === "thread.handoff");
+        assert.isNull(
+          usageLimitFailoverIntent(
+            records,
+            row.request,
+            yield* settings.getSettings,
+            yield* (yield* ProviderStart.ProviderTurnStartModels).getProviders,
+            0,
+          ),
+        );
+      }
+    }).pipe(
+      Effect.provide(makeTransferTestLayer(SqlitePersistence.layerMemory, false, undefined, true)),
+      Effect.scoped,
+    ),
+);
+
+it.effect.each(["reset-first", "failover-first"] as const)(
+  "usage-limit failover and reset have one committed owner: %s",
+  (order) =>
+    Effect.gen(function* () {
+      const f = yield* setupUsageLimitFailover(true);
+      const resetAt = DateTime.formatIso(DateTime.addDuration(f.now, "1 second"));
+      yield* f.orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("inert-arm"),
+        threadId: f.sourceId,
+        limitRecovery: { runId: f.run.id, resetAt, autoResume: true, snooze: false },
+      });
+      yield* TestClock.adjust("1 second");
+      const source = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+      const reset = {
+        type: "message.dispatch" as const,
+        commandId: CommandId.make("inert-reset"),
+        messageId: MessageId.make("inert-reset"),
+        threadId: f.sourceId,
+        text: "Continue saved work",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" as const },
+        usageLimitContinuationOfRunId: f.run.id,
+        usageLimitRecoveryRequestId: source.limitRecovery?.requestId,
+        createdBy: "agent" as const,
+        creationSource: "server" as const,
+      };
+      if (order === "reset-first") {
+        yield* f.orchestrator.dispatch(reset);
+        const admitted = yield* f.orchestrator.getThreadProjection(f.sourceId);
+        assert.lengthOf(admitted.runs, 2);
+        yield* f.worker.drain();
+        assert.isUndefined(
+          (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread.handoffTransfer,
+        );
+        assert.isNull(
+          yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadShell(
+            f.submitted.successorThreadId,
+          ),
+        );
+        assert.isTrue(f.starts.every((turn) => turn.threadId === f.sourceId));
+        assert.isAtMost(f.starts.length, 1);
+      } else {
+        yield* f.worker.runOnce();
+        const projection = yield* f.orchestrator.getThreadProjection(f.sourceId);
+        const review = projection.runtimeRequests.findLast(
+          (request) => request.responseCapability.type === "handoff",
+        )!.responseCapability;
+        assert(review.type === "handoff");
+        yield* f.orchestrator.dispatch({
+          type: "handoff.transfer.prepare",
+          commandId: CommandId.make(`handoff-transfer:${review.requestId}:prepare`),
+          threadId: f.sourceId,
+          requestId: review.requestId,
+          generation: review.generation,
+        });
+        const refused = yield* f.orchestrator.dispatch(reset).pipe(Effect.flip);
+        assert.equal(refused._tag, "OrchestratorDispatchError");
+        yield* f.worker.drain();
+        assert.lengthOf(f.starts, 1);
+        assert.equal(f.starts[0]?.threadId, f.submitted.successorThreadId);
+        assert.lengthOf((yield* f.orchestrator.getThreadProjection(f.sourceId)).runs, 1);
+      }
+    }).pipe(
+      Effect.provide(makeTransferTestLayer(SqlitePersistence.layerMemory, false, undefined, true)),
+      Effect.scoped,
+    ),
+);
+
+const configureInertFailoverTarget = Effect.acquireRelease(
+  Effect.sync(() =>
+    vi
+      .spyOn(claudeProviderInstance.orchestrationAdapter, "openSession")
+      .mockImplementation((input) =>
+        orchestrationAdapter.openSession(input).pipe(
+          Effect.map((runtime) => ({
+            ...runtime,
+            instanceId: claudeInstanceId,
+            driver: claudeDriver,
+            providerSession: {
+              ...runtime.providerSession,
+              driver: claudeDriver,
+              providerInstanceId: claudeInstanceId,
+            },
+          })),
+        ),
+      ),
+  ),
+  (spy) => Effect.sync(() => spy.mockRestore()),
+);
+
+it.effect(
+  "parked usage-limit handoff reopens unknown and wakes on covered readiness without a source terminal event",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setupUsageLimitFailover();
+      f.availability.cold = true;
+      yield* f.worker.drain();
+      const row = Option.getOrThrow(
+        yield* (yield* EffectOutbox.EffectOutboxV2).get(CoreHandoff.handoffId(f.sourceId)),
+      );
+      assert.equal(row.status, "failed");
+      assert.equal(JSON.parse(row.lastError!).category, "unknown");
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      assert.lengthOf(yield* outbox.listParkedHandoffs({ workspaceRoot: f.workspace.root }), 1);
+      assert.lengthOf(
+        yield* outbox.listParkedHandoffs({ workspaceRoot: f.workspace.root + "-unrelated" }),
+        0,
+      );
+      assert.lengthOf(f.starts, 0);
+      const catalog = yield* (yield* ProviderStart.ProviderTurnStartModels).getProviders;
+      let current = catalog.map((p) =>
+        p.instanceId === claudeInstanceId ? { ...p, auth: { status: "unknown" as const } } : p,
+      );
+      const changes = yield* Queue.unbounded<typeof catalog>();
+      let subscribed = false;
+      const blocked = yield* Deferred.make<void>();
+      const modelLayer = ProviderStart.layerProviderTurnStartModels.pipe(
+        Layer.provide(
+          Layer.mock(Registry.ProviderRegistry)({
+            getProviders: Effect.sync(() => current),
+            streamChanges: Stream.unwrap(
+              Effect.sync(() => {
+                subscribed = true;
+                return Stream.fromQueue(changes);
+              }),
+            ),
+          }),
+        ),
+      );
+      f.availability.cold = false;
+      const fixtureModels = yield* ProviderStart.ProviderTurnStartModels.pipe(
+        Effect.provide(modelLayer),
+      );
+      const producer = yield* ApprovalProducer.HandoffApprovalProducer.pipe(
+        Effect.provide(ApprovalProducer.layer.pipe(Layer.provide(modelLayer))),
+      );
+      const owners = Layer.mergeAll(
+        Layer.succeed(ApprovalProducer.HandoffApprovalProducer, {
+          requestIfReady: (id) =>
+            producer
+              .requestIfReady(id)
+              .pipe(
+                Effect.provideService(ProviderStart.ProviderTurnStartModels, fixtureModels),
+                Effect.ensuring(Deferred.succeed(blocked, undefined)),
+              ),
+        }),
+        modelLayer,
+      );
+      const accepted = yield* f.sink
+        .stream({
+          afterSequence: yield* f.sink.latestSequence(),
+          eventType: "runtime-request.updated",
+        })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "runtime-request.updated" &&
+              stored.event.threadId === f.sourceId &&
+              stored.event.payload.decision === "accept",
+          ),
+          Stream.runHead,
+          Effect.forkChild({ startImmediately: true }),
+        );
+      yield* Effect.gen(function* () {
+        yield* Deferred.await(blocked);
+        assert.isTrue(
+          subscribed,
+          "Production provider registry bridge must subscribe before blocked observation",
+        );
+        const reconciler = yield* ParkedReconciler.HandoffParkedReconciler;
+        yield* reconciler.drain;
+        assert.lengthOf(f.starts, 0);
+        current = [...catalog];
+        yield* Queue.offer(changes, current);
+        yield* Fiber.join(accepted);
+        yield* f.worker.drain();
+        assert.lengthOf(f.starts, 1);
+      }).pipe(Effect.provide(ParkedReconciler.layer.pipe(Layer.provide(owners))));
+    }).pipe(
+      Effect.provide(makeTransferTestLayer(SqlitePersistence.layerMemory, false, undefined, true)),
+      Effect.scoped,
+    ),
+);
+
+it.effect.each(["parked", "reserved", "reversed", "started"] as const)(
+  "usage-limit failover retains park or consumed lineage through a real isolated SQLite restart: %s",
+  (phase) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "failover-restart-" });
+      const filename = path.join(cwd, "state.sqlite");
+      const makeLayer = () =>
+        Layer.fresh(
+          makeTransferTestLayer(SqlitePersistence.layerFromPath(filename), false, undefined, true),
+        );
+      const saved = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* setupUsageLimitFailover(false, cwd);
+          if (phase === "parked") {
+            f.availability.cold = true;
+            yield* f.worker.drain();
+            assert.lengthOf(f.starts, 0);
+            return {
+              source: (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread,
+              selection: { ...modelSelection, options: [{ id: "reasoningEffort", value: "high" }] },
+            };
+          }
+          yield* f.worker.runOnce();
+          const projection = yield* f.orchestrator.getThreadProjection(f.sourceId);
+          const review = projection.runtimeRequests.findLast(
+            (request) => request.responseCapability.type === "handoff",
+          )!.responseCapability;
+          assert(review.type === "handoff");
+          if (phase === "reserved" || phase === "reversed")
+            yield* f.orchestrator.dispatch({
+              type: "handoff.transfer.prepare",
+              commandId: CommandId.make(`handoff-transfer:${review.requestId}:prepare`),
+              threadId: f.sourceId,
+              requestId: review.requestId,
+              generation: review.generation,
+            });
+          else yield* f.worker.drain();
+          if (phase === "reversed")
+            yield* withAuthenticatedHandoffResponse(
+              {
+                sessionId: AuthSessionId.make("inert-reversal-human"),
+                subject: "inert-human",
+                method: "browser-session-cookie",
+                scopes: [AuthOrchestrationOperateScope],
+              },
+              f.orchestrator.dispatch({
+                type: "handoff.transfer.reverse",
+                commandId: CommandId.make(`handoff-transfer:${review.requestId}:reverse`),
+                threadId: f.sourceId,
+                requestId: review.requestId,
+                generation: review.generation,
+              }),
+            );
+          const source = (yield* f.orchestrator.getThreadProjection(f.sourceId)).thread;
+          assert.equal(source.handoffTransfer?.state, phase === "reversed" ? "cancelled" : phase);
+          assert.lengthOf(f.starts, phase === "started" ? 1 : 0);
+          return {
+            source,
+            selection: { ...modelSelection, options: [{ id: "reasoningEffort", value: "high" }] },
+          };
+        }).pipe(Effect.provide(makeLayer())),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* configureGuardedHandoffOwners("usage-limit", cwd, saved.selection);
+          f.availability.completeAppOwnedCoverage = true;
+          f.workspace.checkpointMatches = true;
+          f.workspace.checkpointRef = "refs/checkpoints/inert";
+          f.workspace.checkpointCommit = "inert-saved";
+          yield* configureInertFailoverTarget;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const before = (yield* orchestrator.getThreadProjection(saved.source.id)).thread;
+          assert.deepEqual(
+            before.usageLimitFailoverConsumed,
+            saved.source.usageLimitFailoverConsumed,
+          );
+          assert.deepEqual(before.handoffTransfer, saved.source.handoffTransfer);
+          const row = Option.getOrThrow(yield* outbox.get(CoreHandoff.handoffId(saved.source.id)));
+          assert(row.request.type === "thread.handoff");
+          if (phase === "reversed") {
+            const settings = yield* ServerSettings.ServerSettingsService;
+            const policy = (yield* settings.getSettings).rootOwnerUsageLimitFailover!;
+            yield* settings.updateSettings({
+              rootOwnerUsageLimitFailover: { ...policy, revision: "new-after-reversal" },
+            });
+            const records = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+              saved.source.id,
+              ["runs", "turnItems", "checkpoints"],
+            );
+            assert.isNull(
+              usageLimitFailoverIntent(
+                records,
+                row.request,
+                yield* settings.getSettings,
+                yield* (yield* ProviderStart.ProviderTurnStartModels).getProviders,
+                0,
+              ),
+            );
+            yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+            assert.lengthOf(f.starts, 0);
+            assert.deepEqual(
+              (yield* orchestrator.getThreadProjection(saved.source.id)).thread
+                .usageLimitFailoverConsumed,
+              saved.source.usageLimitFailoverConsumed,
+            );
+            return;
+          }
+          if (phase === "parked") {
+            const sink = yield* EventSink.EventSinkV2;
+            const accepted = yield* sink
+              .stream({
+                afterSequence: yield* sink.latestSequence(),
+                eventType: "runtime-request.updated",
+              })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "runtime-request.updated" &&
+                    stored.event.threadId === saved.source.id &&
+                    stored.event.payload.decision === "accept",
+                ),
+                Stream.runHead,
+                Effect.forkChild({ startImmediately: true }),
+              );
+            yield* Effect.gen(function* () {
+              yield* ParkedReconciler.HandoffParkedReconciler;
+              yield* Fiber.join(accepted);
+            }).pipe(Effect.provide(ParkedReconciler.layer));
+          } else if (phase === "reserved") yield* CoreHandoff.deliverHandoff(row.request);
+          yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+          const source = (yield* orchestrator.getThreadProjection(saved.source.id)).thread;
+          const successor = (yield* orchestrator.getThreadProjection(
+            source.handoffTransfer!.successorThreadId,
+          )).thread;
+          assert.equal(source.handoffTransfer?.state, "started");
+          assert.deepEqual(source.usageLimitFailoverConsumed, successor.usageLimitFailoverConsumed);
+          assert.lengthOf(f.starts, phase === "started" ? 0 : 1);
+          assert.equal(
+            (yield* (yield* TransferAdmission.HandoffTransferAdmission)
+              .start(successor.id, source.handoffTransfer!.runId)
+              .pipe(Effect.flip)).stage,
+            "initial-start-already-claimed",
+          );
+        }).pipe(Effect.provide(makeLayer())),
+      );
+    }).pipe(Effect.provide(layerPlatformTest), Effect.scoped),
+);
+
+it.effect(
+  "usage-limit failover never bounces a consumed successor after another limit or a new policy revision",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* setupUsageLimitFailover();
+      yield* f.worker.drain();
+      const successor = yield* f.orchestrator.getThreadProjection(f.submitted.successorThreadId);
+      const run = successor.runs[0]!;
+      yield* f.sink.write({
+        events: [
+          {
+            id: EventId.make("second-limit-run"),
+            type: "run.updated",
+            threadId: successor.thread.id,
+            occurredAt: f.now,
+            payload: { ...run, status: "failed", completedAt: f.now },
+          },
+          {
+            id: EventId.make("second-limit-error"),
+            type: "turn-item.updated",
+            threadId: successor.thread.id,
+            occurredAt: f.now,
+            payload: {
+              id: TurnItemId.make("second-limit-error"),
+              threadId: successor.thread.id,
+              runId: run.id,
+              nodeId: run.rootNodeId,
+              providerThreadId: run.providerThreadId,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 100,
+              type: "error",
+              title: "Second inert limit",
+              status: "failed",
+              failure: {
+                class: "usage_limit",
+                message: "Inert second limit",
+                code: null,
+                retryable: false,
+              },
+              startedAt: f.now,
+              completedAt: f.now,
+              updatedAt: f.now,
+            },
+          },
+        ],
+      });
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const policy = (yield* settings.getSettings).rootOwnerUsageLimitFailover!;
+      yield* settings.updateSettings({
+        rootOwnerUsageLimitFailover: {
+          ...policy,
+          revision: "reverse-policy",
+          source: policy.destination,
+          destination: policy.source,
+        },
+      });
+      const observed = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+        successor.thread.id,
+        ["runs", "turnItems", "checkpoints"],
+      );
+      const savedCheckpoint = (yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+        f.sourceId,
+        ["checkpoints"],
+      )).checkpoints[0]!;
+      const records = {
+        ...observed,
+        checkpoints: [{ ...savedCheckpoint, threadId: successor.thread.id, runId: run.id }],
+      };
+      const row = Option.getOrThrow(
+        yield* (yield* EffectOutbox.EffectOutboxV2).get(CoreHandoff.handoffId(f.sourceId)),
+      );
+      assert(row.request.type === "thread.handoff");
+      const next = {
+        ...row.request,
+        sourceThreadId: successor.thread.id,
+        sourceRunId: run.id,
+        modelSelection: successor.thread.modelSelection,
+        intent: undefined,
+      };
+      const { intent: _intent, ...ordinaryNext } = next;
+      assert.isNull(
+        usageLimitFailoverIntent(
+          records,
+          ordinaryNext,
+          yield* settings.getSettings,
+          yield* (yield* ProviderStart.ProviderTurnStartModels).getProviders,
+          0,
+        ),
+      );
+      const { usageLimitFailoverConsumed: _consumed, ...unconsumed } = records.thread;
+      assert.isNotNull(
+        usageLimitFailoverIntent(
+          { ...records, thread: unconsumed },
+          ordinaryNext,
+          yield* settings.getSettings,
+          yield* (yield* ProviderStart.ProviderTurnStartModels).getProviders,
+          0,
+        ),
+      );
+      yield* f.worker.drain();
+      assert.lengthOf(f.starts, 1);
+      assert.deepEqual(
+        (yield* f.orchestrator.getThreadProjection(successor.thread.id)).thread
+          .usageLimitFailoverConsumed,
+        successor.thread.usageLimitFailoverConsumed,
+      );
+    }).pipe(
+      Effect.provide(makeTransferTestLayer(SqlitePersistence.layerMemory, false, undefined, true)),
+      Effect.scoped,
+    ),
 );

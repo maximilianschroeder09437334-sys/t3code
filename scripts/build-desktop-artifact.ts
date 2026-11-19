@@ -753,6 +753,7 @@ const WindowsPackagedPayloadValidationReason = Schema.Literals([
   "wsl-runtime-missing",
   "wsl-runtime-invalid",
   "file-limit-exceeded",
+  "compile-cache-invalid",
 ]);
 
 export class WindowsPackagedPayloadValidationError extends Schema.TaggedError<WindowsPackagedPayloadValidationError>()(
@@ -781,6 +782,9 @@ export class WindowsPackagedPayloadValidationError extends Schema.TaggedError<Wi
     }
     if (this.reason === "wsl-runtime-invalid") {
       return "Windows packaged payload contains an invalid WSL runtime archive.";
+    }
+    if (this.reason === "compile-cache-invalid") {
+      return "Windows packaged payload contains an invalid server compile cache.";
     }
     if (this.reason === "sidecar-invalid") {
       return "Windows packaged payload contains an invalid server.asar sidecar.";
@@ -3225,6 +3229,103 @@ const countPayloadFiles = Effect.fn("desktopArtifact.countPayloadFiles")(functio
   return count;
 });
 
+const PreparedServerCacheManifest = Schema.Struct({
+  format: Schema.Literal(1),
+  runtime: Schema.NonEmptyString,
+  entries: Schema.Array(Schema.Struct({ module: Schema.String, file: Schema.String })),
+});
+
+const decodePreparedServerCacheManifest = Schema.decodeOption(
+  Schema.fromJsonString(PreparedServerCacheManifest),
+);
+
+export const accountWindowsPayloadFiles = Effect.fn("desktopArtifact.accountWindowsPayloadFiles")(
+  function* (packagedAppDir: string, fileLimit = WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT) {
+    const path = yield* Path.Path;
+    const prepared = path.join(packagedAppDir, "resources", "server-compile-cache");
+    const invalidCache = (cause: unknown) =>
+      new WindowsPackagedPayloadValidationError({
+        reason: "compile-cache-invalid",
+        packagedAppDir,
+        cause,
+      });
+    const compileCacheFileCount = yield* Effect.tryPromise({
+      try: async () => {
+        const directory = await NodeFSP.lstat(prepared).catch((error: unknown) => {
+          if (
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "ENOENT"
+          )
+            return undefined;
+          throw error;
+        });
+        if (!directory) return 0;
+        if (!directory.isDirectory() || directory.isSymbolicLink())
+          throw new Error("Cache must be a directory");
+        const files = await NodeFSP.readdir(prepared);
+        for (const file of files) {
+          const stat = await NodeFSP.lstat(path.join(prepared, file));
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0)
+            throw new Error("Cache entries must be nonempty regular files");
+        }
+        const decoded = decodePreparedServerCacheManifest(
+          await NodeFSP.readFile(path.join(prepared, "manifest.json"), "utf8"),
+        );
+        if (Option.isNone(decoded)) throw new Error("Invalid cache manifest");
+        const manifest = decoded.value;
+        const modules = new Set<string>();
+        const keys = new Set<string>();
+        for (const entry of manifest.entries) {
+          if (
+            !/^server\.asar\/apps\/server\/dist\/[^/\\]+\.mjs$/.test(entry.module) ||
+            !/^[a-f0-9]{8}$/.test(entry.file)
+          )
+            throw new Error("Invalid cache entry path");
+          if (modules.has(entry.module) || keys.has(entry.file))
+            throw new Error("Duplicate cache entry");
+          const moduleStat = statFile(
+            path.join(packagedAppDir, "resources", WINDOWS_SERVER_ASAR_RESOURCE),
+            path.join(...entry.module.slice("server.asar/".length).split("/")),
+          );
+          if (!("size" in moduleStat) || moduleStat.unpacked)
+            throw new Error("Cache module must be packed server code");
+          modules.add(entry.module);
+          keys.add(entry.file);
+        }
+        if (
+          !["binCli-", "server-"].every((prefix) =>
+            [...modules].some((module) =>
+              module.startsWith(`server.asar/apps/server/dist/${prefix}`),
+            ),
+          )
+        )
+          throw new Error("Cache is missing server or CLI entry");
+        if (
+          files.length !== keys.size + 1 ||
+          files.some((file) => file !== "manifest.json" && !keys.has(file))
+        )
+          throw new Error("Cache files do not match manifest");
+        return files.length;
+      },
+      catch: invalidCache,
+    });
+    // Allow one prepared cache per verified packed module plus its manifest; keep the base payload budget unchanged.
+    const fileCount = yield* countPayloadFiles(packagedAppDir);
+    const baseFileCount = fileCount - compileCacheFileCount;
+    if (baseFileCount > fileLimit) {
+      return yield* new WindowsPackagedPayloadValidationError({
+        reason: "file-limit-exceeded",
+        packagedAppDir,
+        fileCount,
+        fileLimit: fileLimit + compileCacheFileCount,
+      });
+    }
+    return { fileCount, baseFileCount, compileCacheFileCount } as const;
+  },
+);
+
 export const verifyWindowsPrimaryFffNativeLoad = Effect.fn(
   "desktopArtifact.verifyWindowsPrimaryFffNativeLoad",
 )(function* (input: {
@@ -3532,15 +3633,8 @@ export const validateWindowsPackagedPayload = Effect.fn(
     }
   }
 
-  const fileCount = yield* countPayloadFiles(packagedAppDir);
-  if (fileCount > fileLimit) {
-    return yield* new WindowsPackagedPayloadValidationError({
-      reason: "file-limit-exceeded",
-      packagedAppDir,
-      fileCount,
-      fileLimit,
-    });
-  }
+  const accounting = yield* accountWindowsPayloadFiles(packagedAppDir, fileLimit);
+  const { fileCount, baseFileCount, compileCacheFileCount } = accounting;
 
   yield* verifyWindowsPackagedRuntime({
     packagedAppDir,
@@ -3550,9 +3644,9 @@ export const validateWindowsPackagedPayload = Effect.fn(
   });
 
   yield* Effect.log(
-    `[desktop-artifact] Validated Windows payload (${String(fileCount)} files, ${String(unpackedFiles.length)} sidecar natives).`,
+    `[desktop-artifact] Validated Windows payload (${String(fileCount)} files: ${String(baseFileCount)} base, ${String(compileCacheFileCount)} compile cache; ${String(unpackedFiles.length)} sidecar natives).`,
   );
-  return { packagedAppDir, fileCount, unpackedFiles } as const;
+  return { packagedAppDir, ...accounting, unpackedFiles } as const;
 });
 
 export class MacPackagedAppMissingError extends Schema.TaggedError<MacPackagedAppMissingError>()(

@@ -7117,6 +7117,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const recovery = projection.thread.limitRecovery;
       const now = yield* DateTime.now;
       if (
+        projection.thread.usageLimitFailoverConsumed !== undefined ||
         run?.id !== command.usageLimitContinuationOfRunId ||
         failure?.class !== "usage_limit" ||
         threadShellFromProjection(projection).lastErrorClass !== "usage_limit" ||
@@ -15769,7 +15770,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* Ref.update(events, (rows) =>
           rows.map((event) =>
             event.type === "thread.created" && event.threadId === request.successorThreadId
-              ? { ...event, payload: { ...event.payload, handoffSourceThreadId: command.threadId } }
+              ? {
+                  ...event,
+                  payload: {
+                    ...event.payload,
+                    handoffSourceThreadId: command.threadId,
+                    ...(request.intent === undefined &&
+                    source.usageLimitFailoverConsumed === undefined
+                      ? {}
+                      : {
+                          usageLimitFailoverConsumed:
+                            request.intent ?? source.usageLimitFailoverConsumed,
+                        }),
+                  },
+                }
               : event,
           ),
         );
@@ -15797,6 +15811,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: {
             ...source,
+            ...(request.intent === undefined ? {} : { usageLimitFailoverConsumed: request.intent }),
             handoffTransfer: {
               requestId: review.requestId,
               generation: review.generation,
@@ -16781,7 +16796,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ].filter((id) => id !== pairSourceId);
           return yield* ids.reduceRight(
             (locked, id) => threadDispatch.withLock(id, locked),
-            dispatchWithReceiptEffect(command),
+            command.type === "handoff.transfer.prepare" || command.type === "prepared-run.release"
+              ? serverSettings
+                  .withSettingsSnapshot(() => dispatchWithReceiptEffect(command))
+                  .pipe(mapDispatchError(command))
+              : dispatchWithReceiptEffect(command),
           );
         }),
       );

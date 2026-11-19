@@ -550,6 +550,9 @@ const layerBase: Layer.Layer<
               ...event.payload,
               ...(!handoffMutation ? { handoffTransfer: thread.handoffTransfer } : {}),
               handoffSourceThreadId: thread.handoffSourceThreadId,
+              ...(!handoffMutation
+                ? { usageLimitFailoverConsumed: thread.usageLimitFailoverConsumed }
+                : {}),
               ...(!handoffMutation ? { handoffStopCommandId: thread.handoffStopCommandId } : {}),
             },
           };

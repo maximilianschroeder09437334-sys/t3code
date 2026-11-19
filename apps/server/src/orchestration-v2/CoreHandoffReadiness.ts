@@ -1,3 +1,6 @@
+import * as Settings from "../serverSettings.ts";
+import { ProviderTurnStartModels } from "./ProviderTurnStartService.ts";
+import { sameFailoverIntent, usageLimitFailoverIntent } from "./UsageLimitFailoverPolicy.ts";
 import { latestNativeContextUsage } from "@t3tools/provider-core/server/handoffBudget";
 import { CONTEXT_ROLLOVER_LIMIT, hasVoluntaryHandoffNudge } from "./ContextRollover.ts";
 import * as DateTime from "effect/DateTime";
@@ -219,6 +222,23 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       )
     )
       blockers.push("Source started a newer run after the handoff request");
+    let allowedFailover = false;
+    if (parkedRequest?.intent !== undefined && sourceRecords !== null) {
+      const settings = yield* Effect.serviceOption(Settings.ServerSettingsService);
+      const models = yield* ProviderTurnStartModels;
+      const current = Option.isNone(settings)
+        ? null
+        : usageLimitFailoverIntent(
+            sourceRecords,
+            parkedRequest,
+            yield* settings.value.getSettings,
+            yield* models.getProviders,
+            DateTime.toEpochMillis(yield* DateTime.now),
+          );
+      allowedFailover = current !== null && sameFailoverIntent(current, parkedRequest.intent);
+      if (!allowedFailover)
+        blockers.push("Usage-limit failover policy or authoritative failure changed");
+    }
     const cap =
       sourceRecords === null
         ? null
@@ -385,6 +405,7 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
     }
     // Automatic release after the nudge accepts detached OS work outside T3's observations.
     if (
+      !allowedFailover &&
       cap === null &&
       !hasVoluntaryHandoffNudge(
         sourceRecords ?? {
@@ -396,6 +417,7 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
     ) {
       manualReview.push("Automatic release requires the 150k nudge or a context-limit handoff.");
     } else if (
+      !allowedFailover &&
       cap !== null &&
       !sourceRecords?.runs.some(
         (run) =>
@@ -406,6 +428,13 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
     ) {
       manualReview.push("The context-limit run's completion could not be confirmed.");
     }
+    if (
+      allowedFailover &&
+      (workspace?.tracking === "untracked workspace" || workspace?.checkpointMatches !== true)
+    )
+      unknowns.push("Failover requires a durable matching checkpoint");
+    if (allowedFailover && providers.some((provider) => !provider.completeAppOwnedCoverage))
+      unknowns.push("Failover requires complete app-owned provider coverage");
     const observedTerminals =
       cwd === null
         ? null
@@ -471,6 +500,7 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
           settledAt: _settledAt,
           settledOverride: _settledOverride,
           handoffTransfer: _handoffTransfer,
+          usageLimitFailoverConsumed: _usageLimitFailoverConsumed,
           ...thread
         }) => thread)(after.sourceRecords.thread);
   const normalized = {

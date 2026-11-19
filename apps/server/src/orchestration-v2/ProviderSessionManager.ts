@@ -34,6 +34,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -241,6 +242,7 @@ export interface ProviderSessionManagerV2Shape {
     Option.Option<ProviderAdapter.ProviderAdapterV2SessionRuntime>,
     ProviderSessionManagerV2Error
   >;
+  readonly streamHandoffReadiness?: Stream.Stream<ThreadId>;
   readonly observeHandoffSession: (id: ProviderSessionId) => Effect.Effect<
     Option.Option<{
       readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -724,6 +726,11 @@ export const layerWithOptions = (
           { discard: true },
         );
       });
+
+      const handoffReadiness = yield* Effect.acquireRelease(
+        PubSub.bounded<ThreadId>(64),
+        PubSub.shutdown,
+      );
 
       const cancelIdleFiber = (fiber: Fiber.Fiber<void, never> | null) =>
         fiber === null ? Effect.void : Fiber.interrupt(fiber).pipe(Effect.ignore);
@@ -1625,7 +1632,19 @@ export const layerWithOptions = (
       });
 
       const scheduleIdleRelease = (providerSessionId: ProviderSessionId) =>
-        withActivityError(providerSessionId, scheduleIdleReleaseInternal(providerSessionId));
+        withActivityError(providerSessionId, scheduleIdleReleaseInternal(providerSessionId)).pipe(
+          Effect.tap(() =>
+            Effect.gen(function* () {
+              const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+              if (entry !== undefined)
+                yield* Effect.forEach(
+                  entry.attachedThreadIds,
+                  (id) => PubSub.publish(handoffReadiness, id),
+                  { discard: true },
+                );
+            }),
+          ),
+        );
 
       const touchActivity = (
         providerSessionId: ProviderSessionId,
@@ -3233,6 +3252,7 @@ export const layerWithOptions = (
               return exposedRuntime;
             }),
           ),
+        streamHandoffReadiness: Stream.fromPubSub(handoffReadiness),
         observeHandoffSession: (id) =>
           Ref.get(sessions).pipe(
             Effect.map((current) => {
