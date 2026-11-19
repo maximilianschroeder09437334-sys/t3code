@@ -422,7 +422,10 @@ const make = Effect.gen(function* () {
             row.commandId === CommandId.make(`handoff-transfer:${requestId}:recover:2`));
         // Observable checkpoints remain in release evidence; the final watermark fences later events.
         const checkpoint =
-          row.event.type === "checkpoint.captured" || row.event.type === "checkpoint-scope.created";
+          row.event.type === "checkpoint.captured" ||
+          row.event.type === "checkpoint-scope.created" ||
+          (row.event.type === "turn-item.updated" && row.event.payload.type === "checkpoint") ||
+          (row.event.type === "run.updated" && row.event.payload.checkpointId !== null);
         if (!ownReview && !ownTransfer && !checkpoint && !sourceStops.includes(row))
           return yield* failed(sourceId, "unrelated-source-event");
       }

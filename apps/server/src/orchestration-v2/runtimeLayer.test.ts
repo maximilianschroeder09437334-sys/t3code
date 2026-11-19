@@ -16145,6 +16145,9 @@ it.layer(Layer.empty)(
                   Effect.gen(function* () {
                     if (command.type === "handoff.transfer.prepare" && !captured) {
                       captured = true;
+                      const completed = (yield* f.orchestrator.getThreadProjection(
+                        sourceId,
+                      )).runs.find((item) => item.id === run.id)!;
                       yield* f.sink
                         .write({
                           events: [
@@ -16166,6 +16169,42 @@ it.layer(Layer.empty)(
                                 status: "error",
                                 files: [],
                                 capturedAt: now,
+                              },
+                            },
+                            {
+                              id: EventId.make("late-checkpoint-turn-item"),
+                              type: "turn-item.updated",
+                              threadId: sourceId,
+                              occurredAt: now,
+                              payload: {
+                                id: TurnItemId.make("late-checkpoint-item"),
+                                threadId: sourceId,
+                                runId: run.id,
+                                nodeId: null,
+                                providerThreadId: null,
+                                providerTurnId: null,
+                                nativeItemRef: null,
+                                parentItemId: null,
+                                ordinal: 199,
+                                status: "completed",
+                                title: null,
+                                startedAt: now,
+                                completedAt: now,
+                                updatedAt: now,
+                                type: "checkpoint",
+                                checkpointId: CheckpointId.make("late-checkpoint"),
+                                scopeId: "late-scope" as never,
+                                files: [],
+                              },
+                            },
+                            {
+                              id: EventId.make("late-checkpoint-run"),
+                              type: "run.updated",
+                              threadId: sourceId,
+                              occurredAt: now,
+                              payload: {
+                                ...completed,
+                                checkpointId: CheckpointId.make("late-checkpoint"),
                               },
                             },
                           ],
