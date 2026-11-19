@@ -121,7 +121,7 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       threads.getThreadEventSequence(sourceThreadId),
     );
     const rawSourceRecords = yield* readRecords(sourceThreadId);
-    const sourceRecords =
+    let sourceRecords =
       rawSourceRecords === null || reviewId === undefined
         ? rawSourceRecords
         : {
@@ -186,7 +186,7 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       blockers.push("This source's inherited ownership is not supported by guarded transfer");
     if (sourceRecords?.thread.handoffSourceThreadId !== undefined) {
       const provider = sourceRecords.providerThreads.find(
-        (value) => value.id === sourceRecords.thread.activeProviderThreadId,
+        (value) => value.id === sourceRecords?.thread.activeProviderThreadId,
       );
       if (
         provider === undefined ||
@@ -258,6 +258,26 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
       if (workspace.submodules.split("\n").some((line) => line.startsWith("160000 ")))
         unknowns.push("Submodule working trees not covered");
       if (workspace.branch === null) blockers.push("Detached HEAD");
+    }
+    if (row !== null && Option.isSome(row) && sourceRecords !== null) {
+      const createdAt = Date.parse(row.value.createdAt);
+      sourceRecords = {
+        ...sourceRecords,
+        runtimeRequests: sourceRecords.runtimeRequests.filter(
+          (request) =>
+            request.responseCapability.type !== "handoff" ||
+            DateTime.toEpochMillis(request.createdAt) >= createdAt,
+        ),
+      };
+    }
+    if (workspace?.tracking === "untracked workspace" && sourceRecords !== null) {
+      sourceRecords = {
+        ...sourceRecords,
+        checkpoints: [],
+        checkpointScopes: [],
+        runs: sourceRecords.runs.map((run) => ({ ...run, checkpointId: null })),
+        turnItems: sourceRecords.turnItems.filter((item) => item.type !== "checkpoint"),
+      };
     }
     const providers: HandoffProviderObservation[] = [];
     for (const records of [sourceRecords, ...children.map((child) => child.records)]) {
@@ -420,8 +440,25 @@ export const queryHandoffReadinessWithReaders = Effect.fn("CoreHandoff.observe")
   });
   const before = yield* observe();
   const after = yield* observe();
-  const beforeText = yield* encodeFrame(before);
-  const afterText = yield* encodeFrame(after);
+  const comparisonFrame = (frame: HandoffReadinessFrame) =>
+    frame.workspace?.tracking === "untracked workspace"
+      ? {
+          ...frame,
+          sourceSequence: null,
+          sourceRecords:
+            frame.sourceRecords === null
+              ? null
+              : {
+                  ...frame.sourceRecords,
+                  thread: {
+                    ...frame.sourceRecords.thread,
+                    updatedAt: frame.sourceRecords.thread.createdAt,
+                  },
+                },
+        }
+      : frame;
+  const beforeText = yield* encodeFrame(comparisonFrame(before));
+  const afterText = yield* encodeFrame(comparisonFrame(after));
   const stable = beforeText === afterText;
   const classification =
     before.blockers.length > 0 ? "known_blocked" : classifyReadiness(after, stable);

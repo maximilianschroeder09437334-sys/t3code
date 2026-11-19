@@ -19,6 +19,7 @@ import * as ProviderStart from "./ProviderTurnStartService.ts";
 import { requestHandoffApproval } from "./HandoffApproval.ts";
 import { queryHandoffReadiness } from "./CoreHandoffReadiness.ts";
 import * as Schema from "effect/Schema";
+
 import * as HandoffGit from "../git/GitManager.ts";
 import { OrchestrationV2ProviderThread, HandoffWorkspace } from "@t3tools/contracts";
 import {
@@ -50,6 +51,7 @@ import { vi } from "vite-plus/test";
 import {
   type ApplicationStoredEvent,
   ActivityLedgerError,
+  GitCommandError,
   CheckpointId,
   CheckpointRef,
   CommandId,
@@ -95,7 +97,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
-import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type { PtyExitEvent } from "@t3tools/shared/PtyAdapter";
 
 import { createAttachmentId } from "../attachmentStore.ts";
@@ -15866,6 +15868,11 @@ it.layer(Layer.empty)(
       "tracked-background-task",
       "lost-coverage",
       "untracked-workspace",
+      "untracked-checkpoint-timeout",
+      "untracked-list-timeout",
+      "untracked-checkpoint-race",
+      "tracked-checkpoint-race",
+      "superseded-request",
       "project-target",
       "scratch-target",
       "settled-stale",
@@ -16076,10 +16083,101 @@ it.layer(Layer.empty)(
               createdAt: DateTime.formatIso(now),
             });
           }
-          if (mode === "untracked-workspace") {
+          if (
+            [
+              "untracked-workspace",
+              "untracked-checkpoint-timeout",
+              "untracked-list-timeout",
+              "untracked-checkpoint-race",
+            ].includes(mode)
+          ) {
             f.workspace.tracking = "untracked workspace";
             f.workspace.branch = null;
             f.workspace.head = "";
+          }
+          if (mode === "untracked-checkpoint-timeout" || mode === "untracked-list-timeout") {
+            const git = yield* HandoffGit.GitManager;
+            vi.mocked(git.observeHandoffWorkspace).mockImplementation((cwd) =>
+              HandoffGit.observeHandoffWorkspace(
+                {
+                  execute: (input) => {
+                    if (
+                      (mode === "untracked-checkpoint-timeout" &&
+                        input.args[2]?.includes("refs/checkpoints")) ||
+                      (mode === "untracked-list-timeout" && input.args[0] === "ls-files")
+                    )
+                      return Effect.fail(
+                        new GitCommandError({
+                          operation: "handoff-test",
+                          command: "git",
+                          cwd,
+                          detail: "Git command timed out",
+                        }),
+                      );
+                    return Effect.succeed({
+                      exitCode: ChildProcessSpawner.ExitCode(0),
+                      stdout:
+                        input.args[0] === "rev-parse"
+                          ? input.args[1] === "--show-toplevel"
+                            ? cwd
+                            : input.args[1] === "--abbrev-ref"
+                              ? "feature"
+                              : "fake-head"
+                          : "",
+                      stderr: "",
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    });
+                  },
+                },
+                cwd,
+                mode === "untracked-checkpoint-timeout" ? "refs/checkpoints/timeout" : null,
+              ),
+            );
+          }
+          if (mode === "untracked-checkpoint-race" || mode === "tracked-checkpoint-race") {
+            const threads = yield* ThreadManagementService.ThreadManagementService;
+            const dispatch = threads.dispatch;
+            let captured = false;
+            yield* Effect.acquireRelease(
+              Effect.sync(() =>
+                vi.spyOn(threads, "dispatch").mockImplementation((command) =>
+                  Effect.gen(function* () {
+                    if (command.type === "handoff.transfer.prepare" && !captured) {
+                      captured = true;
+                      yield* f.sink
+                        .write({
+                          events: [
+                            {
+                              id: EventId.make("late-checkpoint-event"),
+                              type: "checkpoint.captured",
+                              threadId: sourceId,
+                              occurredAt: now,
+                              payload: {
+                                id: CheckpointId.make("late-checkpoint"),
+                                threadId: sourceId,
+                                scopeId: "late-scope" as never,
+                                runId: null,
+                                nodeId: NodeId.make("late-node"),
+                                parentCheckpointId: null,
+                                ordinalWithinScope: 1,
+                                appRunOrdinal: null,
+                                ref: CheckpointRef.make("refs/checkpoints/late"),
+                                status: "error",
+                                files: [],
+                                capturedAt: now,
+                              },
+                            },
+                          ],
+                        })
+                        .pipe(Effect.orDie);
+                    }
+                    return yield* dispatch(command);
+                  }),
+                ),
+              ),
+              (spy) => Effect.sync(() => spy.mockRestore()),
+            );
           }
           const submission = CoreHandoff.submitHandoff(sourceId, {
             ...f.request.handoff,
@@ -16129,7 +16227,7 @@ it.layer(Layer.empty)(
               ],
             });
           }
-          if (mode === "newer-run-stale")
+          if (mode === "newer-run-stale" || mode === "superseded-request")
             yield* f.sink.write({
               events: [
                 {
@@ -16148,6 +16246,10 @@ it.layer(Layer.empty)(
                 },
               ],
             });
+          if (mode === "superseded-request") {
+            yield* TestClock.adjust("2 seconds");
+            yield* submission;
+          }
           if (mode === "taken-successor") {
             const source = (yield* f.orchestrator.getThreadProjection(sourceId)).thread;
             yield* f.sink.write({
@@ -16191,6 +16293,14 @@ it.layer(Layer.empty)(
             assert.isEmpty(f.starts);
             return;
           }
+          if (mode === "tracked-checkpoint-race") {
+            assert.isEmpty(f.starts);
+            assert.isUndefined(pending.thread.handoffTransfer);
+            assert.isTrue(
+              pending.checkpoints.some((checkpoint) => checkpoint.id === "late-checkpoint"),
+            );
+            return;
+          }
           if (mode === "tracked-background-task") {
             const snapshot = yield* queryHandoffReadiness(sourceId);
             assert.equal(snapshot.classification, "known_blocked");
@@ -16204,7 +16314,7 @@ it.layer(Layer.empty)(
             return;
           }
           assert.lengthOf(pending.runtimeRequests, 1);
-          assert.lengthOf(pending.runs, 1);
+          assert.lengthOf(pending.runs, mode === "superseded-request" ? 2 : 1);
           assert.isEmpty(pending.messages);
           const review = pending.runtimeRequests[0]!.responseCapability;
           assert.equal(review.type, "handoff");
@@ -16234,7 +16344,7 @@ it.layer(Layer.empty)(
             yield* f.worker.drain();
           }
           const transferred = yield* f.orchestrator.getThreadProjection(sourceId);
-          assert.lengthOf(transferred.runs, 1);
+          assert.lengthOf(transferred.runs, mode === "superseded-request" ? 2 : 1);
           if (mode === "lost-coverage") {
             assert.equal(transferred.thread.handoffTransfer?.state, "released");
             assert.isEmpty(f.starts);
@@ -16247,6 +16357,8 @@ it.layer(Layer.empty)(
           );
           assert.lengthOf(successor.runs, 1);
           assert.lengthOf(successor.messages, 1);
+          assert.include(successor.messages[0]!.text, f.request.handoff.goal);
+          assert.equal(transferred.thread.settledOverride, "settled");
           assert.deepEqual(successor.thread.modelSelection, f.selection);
           if (crossTarget) {
             assert.equal(successor.thread.projectId, targetId);

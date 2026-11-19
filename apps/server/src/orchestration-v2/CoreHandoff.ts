@@ -5,7 +5,7 @@ import { isContextRolloverLimitNotice } from "./ContextRollover.ts";
 import {
   CommandId,
   HandoffInput,
-  type HandoffRequest,
+  HandoffRequest,
   OrchestratorMcpFailure,
   ThreadId,
   RuntimeRequestId,
@@ -28,6 +28,7 @@ import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 
+const requestsEqual = Schema.toEquivalence(HandoffRequest);
 const decodeHandoff = Schema.decodeEffect(HandoffInput);
 const encodeHandoff = Schema.encodeEffect(Schema.fromJsonString(HandoffInput));
 const refuse = (message: string) =>
@@ -77,7 +78,7 @@ export function contextLimitWorkBarrier(
   };
 }
 
-/** The first request wins for a source thread, even if competing submissions have different text. */
+/** First wins within a run; a later run may supersede an unreleased request. */
 export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
   sourceThreadId: ThreadId,
   input: HandoffInput,
@@ -89,9 +90,16 @@ export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
   );
   const threads = yield* ThreadManagement.ThreadManagementService;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
-  const { thread, turnItems } = yield* threads.getThreadRecords(sourceThreadId, ["turnItems"]);
+  const { thread, turnItems, runs } = yield* threads.getThreadRecords(sourceThreadId, [
+    "turnItems",
+    "runs",
+  ]);
   if (
     thread.deletedAt !== null ||
+    thread.archivedAt !== null ||
+    thread.settledOverride === "settled" ||
+    thread.handoffTransfer !== undefined ||
+    thread.handoffStopCommandId !== undefined ||
     thread.agentExecutionIntent?.restrictedTools !== undefined ||
     thread.linkOrigin !== undefined
   )
@@ -123,7 +131,13 @@ export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
   const barrier = contextLimitWorkBarrier(turnItems, handoff.contextLimitWork);
   if (barrier?.blocker) return yield* refuse(barrier.blocker);
   const id = handoffId(sourceThreadId);
+  const sourceRun = runs
+    .filter((run) => run.startedAt != null)
+    .toSorted(
+      (a, b) => DateTime.toEpochMillis(b.startedAt!) - DateTime.toEpochMillis(a.startedAt!),
+    )[0];
   const request: HandoffRequest = {
+    ...(sourceRun === undefined ? {} : { sourceRunId: sourceRun.id }),
     type: "thread.handoff",
     handoff,
     ...(target === undefined ? {} : { target }),
@@ -136,11 +150,21 @@ export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
     worktreePath: thread.worktreePath,
     branch: thread.branch,
   };
+  const previous = yield* outbox.get(id);
+  if (
+    Option.isSome(previous) &&
+    sourceRun?.startedAt != null &&
+    previous.value.request.type === "thread.handoff" &&
+    previous.value.request.sourceRunId !== sourceRun.id &&
+    DateTime.toEpochMillis(sourceRun.startedAt) > Date.parse(previous.value.createdAt)
+  ) {
+    yield* outbox.supersedeHandoff(previous.value, request);
+  }
   yield* outbox.enqueue([{ id, commandId: CommandId.make(id), threadId: sourceThreadId, request }]);
   const accepted = yield* outbox.get(id);
   if (Option.isNone(accepted) || accepted.value.request.type !== "thread.handoff")
     return yield* refuse("The durable handoff request could not be confirmed.");
-  if ((yield* encodeHandoff(accepted.value.request.handoff)) !== (yield* encodeHandoff(handoff)))
+  if (!requestsEqual(accepted.value.request, request))
     return yield* refuse(
       "This source already has a different durable handoff; the first request is preserved.",
     );
@@ -198,6 +222,19 @@ export const recoverReleasedHandoff = Effect.fn("CoreHandoff.recoverReleased")(f
 
 /** Accepted reviews prepare and release one fenced pair; legacy receipts reconcile without new launch authority. */
 export const deliverHandoff = Effect.fn("CoreHandoff.deliver")(function* (request: HandoffRequest) {
+  const durable = yield* Effect.serviceOption(EffectOutbox.EffectOutboxV2);
+  if (Option.isSome(durable)) {
+    const current = yield* durable.value.get(handoffId(request.sourceThreadId));
+    if (
+      Option.isNone(current) ||
+      current.value.status === "cancelled" ||
+      current.value.request.type !== "thread.handoff" ||
+      !requestsEqual(current.value.request, request)
+    )
+      return yield* new HandoffParked({
+        message: "Handoff superseded or cancelled; old request cannot release.",
+      });
+  }
   const launches = yield* Effect.serviceOption(ThreadLaunch.ThreadLaunchService);
   const receipts = yield* Effect.serviceOption(Receipts.CommandReceiptStoreV2);
   if (Option.isNone(launches) && Option.isNone(receipts))

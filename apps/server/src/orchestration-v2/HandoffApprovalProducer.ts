@@ -1,4 +1,5 @@
 import { CommandId, ThreadId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -34,11 +35,17 @@ const make = Effect.gen(function* () {
   const terminals = yield* Effect.serviceOption(Terminals.TerminalManager);
   const requestIfReady = Effect.fn("HandoffApprovalProducer.requestIfReady")(
     function* (sourceId: ThreadId) {
+      const parked = yield* outbox.get(`core-handoff:${sourceId}`);
       const records = yield* threads.getThreadRecords(sourceId, ["runtimeRequests"]);
       if (
         records.thread.handoffStopCommandId !== undefined ||
         records.thread.handoffTransfer !== undefined ||
-        records.runtimeRequests.some((request) => request.responseCapability.type === "handoff")
+        records.runtimeRequests.some(
+          (request) =>
+            request.responseCapability.type === "handoff" &&
+            (Option.isNone(parked) ||
+              DateTime.toEpochMillis(request.createdAt) >= Date.parse(parked.value.createdAt)),
+        )
       )
         return;
       if (Option.isNone(git) || Option.isNone(terminals))

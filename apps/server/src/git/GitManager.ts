@@ -3801,7 +3801,7 @@ export const observeHandoffWorkspace = Effect.fn("GitManager.observeHandoffWorks
     worktreeDiff: "",
     untracked: "",
     submodules: "",
-    checkpointRef,
+    checkpointRef: null,
     checkpointCommit: null,
     checkpointMatches: null,
     checkpointError: null,
@@ -3818,6 +3818,10 @@ export const observeHandoffWorkspace = Effect.fn("GitManager.observeHandoffWorks
         allowNonZeroExit: true,
       })
       .pipe(
+        Effect.catchIf(
+          (error) => /timed? out|timeout/i.test(error.detail),
+          () => Effect.fail({ _tag: "UntrackedHandoffWorkspace" as const }),
+        ),
         Effect.flatMap(
           (
             result,

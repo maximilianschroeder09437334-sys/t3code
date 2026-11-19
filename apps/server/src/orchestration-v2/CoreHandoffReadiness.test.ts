@@ -17,6 +17,7 @@ import {
   OrchestrationV2RuntimeRequest,
   ThreadId,
   CommandId,
+  GitCommandError,
   RunId,
   type HandoffRequest,
 } from "@t3tools/contracts";
@@ -234,6 +235,9 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
     "metadata",
     "dirty",
     "checkpoint",
+    "checkpoint-timeout",
+    "untracked-timeout",
+    "unborn-checkpoint-change",
     "head-change",
     "run-change",
     "child-change",
@@ -261,7 +265,16 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
         sequences = 0,
         indexReads = 0;
       if (
-        ["unborn", "non-repo", "oversized", "settled-stale", "newer-run"].includes(scenario) ||
+        [
+          "unborn",
+          "non-repo",
+          "oversized",
+          "settled-stale",
+          "newer-run",
+          "checkpoint-timeout",
+          "untracked-timeout",
+          "unborn-checkpoint-change",
+        ].includes(scenario) ||
         scenario === "cap-missing-proof" ||
         scenario === "cap-reconciled" ||
         scenario === "cap-run-missing"
@@ -308,9 +321,9 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       }
       if (scenario === "metadata")
         records = { ...records, thread: { ...records.thread, branch: "thread-metadata" } };
-      if (scenario === "dirty" || scenario === "checkpoint")
+      if (scenario === "dirty" || scenario === "checkpoint" || scenario === "checkpoint-timeout")
         yield* fixture.write("file.txt", "b\n");
-      if (scenario === "checkpoint")
+      if (scenario === "checkpoint" || scenario === "checkpoint-timeout")
         records = {
           ...records,
           checkpoints: [
@@ -353,6 +366,9 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           "unborn",
           "non-repo",
           "oversized",
+          "checkpoint-timeout",
+          "untracked-timeout",
+          "unborn-checkpoint-change",
           "settled-stale",
           "newer-run",
         ].includes(scenario)
@@ -452,9 +468,16 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
           deadEnds: [],
           next: "Review",
           pointers: [],
-          ...(["unborn", "non-repo", "oversized", "settled-stale", "newer-run"].includes(
-            scenario,
-          ) ||
+          ...([
+            "unborn",
+            "non-repo",
+            "oversized",
+            "settled-stale",
+            "newer-run",
+            "checkpoint-timeout",
+            "untracked-timeout",
+            "unborn-checkpoint-change",
+          ].includes(scenario) ||
           scenario === "cap-reconciled" ||
           scenario === "cap-run-missing"
             ? { contextLimitWork: { capRunId, results: [] } }
@@ -508,6 +531,29 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
               runs: scenario === "active-child" ? [run] : [],
             } as never;
           if (scenario === "missing-array") return { ...records, runs: undefined } as never;
+          if (scenario === "unborn-checkpoint-change")
+            return {
+              ...records,
+              checkpoints:
+                reads > 1
+                  ? [
+                      {
+                        id: "failed-cp",
+                        threadId,
+                        scopeId: "scope",
+                        runId: null,
+                        nodeId: "node",
+                        parentCheckpointId: null,
+                        ordinalWithinScope: 1,
+                        appRunOrdinal: null,
+                        ref: "refs/failed",
+                        status: "error",
+                        files: [],
+                        capturedAt: now,
+                      },
+                    ]
+                  : [],
+            } as never;
           return scenario === "run-change" && reads > 1
             ? ({ ...records, runs: [run] } as never)
             : (records as never);
@@ -538,18 +584,37 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
               Layer.mock(Git.GitManager)({
                 observeHandoffWorkspace: Effect.fnUntraced(function* (cwd, ref) {
                   const result = yield* Git.observeHandoffWorkspace(
-                    scenario === "oversized"
+                    [
+                      "oversized",
+                      "checkpoint-timeout",
+                      "untracked-timeout",
+                      "unborn-checkpoint-change",
+                    ].includes(scenario)
                       ? {
                           execute: (input) =>
-                            input.args[0] === "status"
-                              ? Effect.succeed({
-                                  exitCode: 0,
-                                  stdout: "",
-                                  stderr: "",
-                                  stdoutTruncated: true,
-                                  stderrTruncated: false,
-                                } as never)
-                              : driver.execute(input),
+                            (scenario === "checkpoint-timeout" &&
+                              input.args[2]?.includes("refs/checkpoints")) ||
+                            (scenario === "untracked-timeout" && input.args[0] === "ls-files") ||
+                            (scenario === "unborn-checkpoint-change" &&
+                              input.args[0] === "rev-parse" &&
+                              input.args[2] === "HEAD")
+                              ? Effect.fail(
+                                  new GitCommandError({
+                                    operation: "observe",
+                                    command: "git",
+                                    cwd,
+                                    detail: "Git command timed out",
+                                  }),
+                                )
+                              : scenario === "oversized" && input.args[0] === "status"
+                                ? Effect.succeed({
+                                    exitCode: 0,
+                                    stdout: "",
+                                    stderr: "",
+                                    stdoutTruncated: true,
+                                    stderrTruncated: false,
+                                  } as never)
+                                : driver.execute(input),
                         }
                       : driver,
                     cwd,
@@ -574,7 +639,14 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
                           instanceId: selection.instanceId,
                           driver: "codex",
                           handoffReadinessCoverage:
-                            ["unborn", "non-repo", "oversized"].includes(scenario) ||
+                            [
+                              "unborn",
+                              "non-repo",
+                              "oversized",
+                              "checkpoint-timeout",
+                              "untracked-timeout",
+                              "unborn-checkpoint-change",
+                            ].includes(scenario) ||
                             scenario === "non-context-handoff" ||
                             scenario === "cap-reconciled" ||
                             scenario === "cap-run-missing"
@@ -617,7 +689,14 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       );
       if (
         result.before.sourceRecords !== null &&
-        !["unborn", "non-repo", "oversized"].includes(scenario)
+        ![
+          "unborn",
+          "non-repo",
+          "oversized",
+          "checkpoint-timeout",
+          "untracked-timeout",
+          "unborn-checkpoint-change",
+        ].includes(scenario)
       )
         assert.equal(result.before.workspace?.head, fixture.head);
       if (
@@ -660,7 +739,15 @@ it.layer(layers)("CoreHandoff readiness", (it) => {
       else
         assert.equal(
           result.classification,
-          ["cap-reconciled", "unborn", "non-repo", "oversized"].includes(scenario)
+          [
+            "cap-reconciled",
+            "unborn",
+            "non-repo",
+            "oversized",
+            "checkpoint-timeout",
+            "untracked-timeout",
+            "unborn-checkpoint-change",
+          ].includes(scenario)
             ? "automatically_eligible"
             : "manual_review",
           result.after.blockers.join(" | "),

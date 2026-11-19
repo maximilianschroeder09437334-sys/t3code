@@ -420,7 +420,10 @@ const make = Effect.gen(function* () {
             row.commandId === CommandId.make(`handoff-transfer:${requestId}:start`) ||
             row.commandId === CommandId.make(`handoff-transfer:${requestId}:recover:1`) ||
             row.commandId === CommandId.make(`handoff-transfer:${requestId}:recover:2`));
-        if (!ownReview && !ownTransfer && !sourceStops.includes(row))
+        // Observable checkpoints remain in release evidence; the final watermark fences later events.
+        const checkpoint =
+          row.event.type === "checkpoint.captured" || row.event.type === "checkpoint-scope.created";
+        if (!ownReview && !ownTransfer && !checkpoint && !sourceStops.includes(row))
           return yield* failed(sourceId, "unrelated-source-event");
       }
       if (recorded !== 1 || acceptedDecisions !== 1)

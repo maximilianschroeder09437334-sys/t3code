@@ -236,6 +236,10 @@ export interface EffectOutboxV2Shape {
   readonly enqueue: (
     effects: ReadonlyArray<PendingOrchestrationEffectV2>,
   ) => Effect.Effect<void, EffectOutboxError>;
+  readonly supersedeHandoff: (
+    previous: OrchestrationEffectV2,
+    request: HandoffRequest,
+  ) => Effect.Effect<boolean, EffectOutboxError>;
   readonly get: (
     effectId: string,
   ) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
@@ -459,6 +463,46 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         },
         Effect.mapError((cause) => new EffectOutboxError({ operation: "enqueue", cause })),
       ),
+      supersedeHandoff: Effect.fn("EffectOutbox.supersedeHandoff")(function* (previous, request) {
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const now = DateTime.formatIso(yield* DateTime.now);
+              const archived = yield* sql<{ readonly effect_id: string }>`
+            UPDATE orchestration_v2_effect_outbox
+            SET effect_id = ${`${previous.id}:superseded:${previous.createdAt}`},
+                status = 'cancelled', lease_owner = NULL, completed_at = ${now},
+                updated_at = ${now}, last_error = 'Handoff superseded by a later source run'
+            WHERE effect_id = ${previous.id}
+              AND effect_type = 'thread.handoff'
+              AND payload_json = ${encodeRequest(previous.request)}
+              AND created_at = ${previous.createdAt}
+              AND status IN ('pending', 'running', 'failed', 'cancelled')
+              AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_threads
+                WHERE thread_id = ${previous.threadId}
+                  AND json_extract(payload_json, '$.handoffTransfer') IS NOT NULL
+              )
+            RETURNING effect_id
+          `;
+              if (archived.length !== 1) return false;
+              yield* service.enqueue([
+                {
+                  id: previous.id,
+                  commandId: previous.commandId,
+                  threadId: previous.threadId,
+                  request,
+                },
+              ]);
+              return true;
+            }),
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) => new EffectOutboxError({ operation: "supersede-handoff", cause }),
+            ),
+          );
+      }),
       get: (effectId) =>
         sql<EffectRow>`
           SELECT *

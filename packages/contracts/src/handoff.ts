@@ -53,6 +53,7 @@ export const HandoffRequest = Schema.Struct({
       branch: Schema.NullOr(Schema.String),
     }),
   ),
+  sourceRunId: Schema.optionalKey(RunId),
   handoff: HandoffInput,
   projectId: ProjectId,
   sourceThreadId: ThreadId,

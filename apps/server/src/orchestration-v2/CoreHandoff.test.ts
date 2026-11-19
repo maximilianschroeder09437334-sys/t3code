@@ -410,3 +410,47 @@ it.effect("accepts an untracked source with no known Git branch", () =>
     ),
   ),
 );
+
+it.effect("supersedes a stale request atomically on a later run and fences its old delivery", () =>
+  Effect.gen(function* () {
+    let current = source();
+    yield* Effect.gen(function* () {
+      yield* CoreHandoff.submitHandoff(sourceId, handoff);
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const old = Option.getOrThrow(yield* outbox.get(CoreHandoff.handoffId(sourceId)));
+      assert.equal(old.request.type, "thread.handoff");
+      yield* TestClock.adjust("1 second");
+      current = {
+        ...current,
+        runs: [{ ...current.runs[0]!, id: "later-run", startedAt: yield* DateTime.now }],
+      } as never;
+      const replacement = { ...handoff, goal: "Later saved checkpoint" };
+      const submitted = yield* CoreHandoff.submitHandoff(sourceId, replacement);
+      assert.isTrue(submitted.accepted);
+      const active = Option.getOrThrow(yield* outbox.get(CoreHandoff.handoffId(sourceId)));
+      assert.equal(
+        active.request.type === "thread.handoff" && active.request.handoff.goal,
+        replacement.goal,
+      );
+      const archived = yield* outbox.listByCommandId(old.commandId);
+      assert.isTrue(
+        archived.some((row) => row.status === "cancelled" && row.lastError?.includes("superseded")),
+      );
+      const duplicate = yield* CoreHandoff.submitHandoff(sourceId, {
+        ...replacement,
+        goal: "Same run conflict",
+      }).pipe(Effect.flip);
+      assert.equal(duplicate._tag, "OrchestratorMcpFailure");
+      if (old.request.type !== "thread.handoff") return assert.fail();
+      const stale = yield* CoreHandoff.deliverHandoff(old.request).pipe(Effect.flip);
+      assert.equal(stale._tag, "HandoffParked");
+      assert.include(stale.message, "superseded");
+    }).pipe(
+      Effect.provide(
+        Layer.mock(Threads.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(current),
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(storage)),
+);
