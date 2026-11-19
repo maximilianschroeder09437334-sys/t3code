@@ -485,6 +485,8 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   completedAt: Schema.DateTimeUtc,
 });
 
+import { UsageLimitFailoverIntent } from "./usageLimitFailover.ts";
+
 export const HandoffTransfer = Schema.Struct({
   previousSettledOverride: Schema.optional(Schema.NullOr(Schema.Literals(["active", "settled"]))),
   recoveryCount: Schema.optional(Schema.Number),
@@ -505,6 +507,7 @@ export const HandoffTransfer = Schema.Struct({
 export type HandoffTransfer = typeof HandoffTransfer.Type;
 
 export const OrchestrationV2AppThread = Schema.Struct({
+  usageLimitFailoverConsumed: Schema.optional(UsageLimitFailoverIntent),
   handoffStopCommandId: Schema.optional(CommandId),
   handoffTransfer: Schema.optional(HandoffTransfer),
   handoffSourceThreadId: Schema.optional(ThreadId),

@@ -179,6 +179,8 @@ export const submitHandoff = Effect.fn("CoreHandoff.submit")(function* (
 
 export class HandoffParked extends Schema.TaggedError<HandoffParked>()("HandoffParked", {
   message: Schema.String,
+  category: Schema.optional(Schema.Literals(["blocked", "unknown", "manual_review", "authority"])),
+  generation: Schema.optional(Schema.String),
 }) {}
 
 export const recoverReleasedHandoff = Effect.fn("CoreHandoff.recoverReleased")(function* (

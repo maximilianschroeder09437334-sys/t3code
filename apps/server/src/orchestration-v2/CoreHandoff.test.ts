@@ -290,6 +290,12 @@ it.effect.each(["none", "rejected", "mismatched", "accepted-bad-ack", "read-fail
         const row = yield* outbox.get(CoreHandoff.handoffId(sourceId));
         if (Option.isNone(row)) return assert.fail();
         assert.equal(row.value.status, "failed");
+        if (scenario !== "read-failure") {
+          const reason = JSON.parse(row.value.lastError!);
+          assert.equal(reason.type, "handoff.parked");
+          assert.equal(reason.version, 1);
+          assert.equal(reason.sourceThreadId, sourceId);
+        }
         assert.equal(row.value.attemptCount, scenario === "read-failure" ? 2 : 1);
         assert.deepEqual(
           row.value.request.type === "thread.handoff" && row.value.request.handoff,

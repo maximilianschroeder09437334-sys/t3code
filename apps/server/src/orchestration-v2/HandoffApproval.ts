@@ -28,7 +28,10 @@ export const requestHandoffApproval = Effect.fn("HandoffApproval.request")(funct
     source.projectId !== parked.projectId ||
     source.branch !== parked.branch ||
     source.worktreePath !== parked.worktreePath ||
-    !modelSelectionsEqual(source.modelSelection, parked.modelSelection) ||
+    !modelSelectionsEqual(
+      source.modelSelection,
+      parked.intent?.sourceSelection ?? parked.modelSelection,
+    ) ||
     source.runtimeMode !== parked.runtimeMode ||
     source.interactionMode !== parked.interactionMode ||
     snapshot.before.blockers.length ||

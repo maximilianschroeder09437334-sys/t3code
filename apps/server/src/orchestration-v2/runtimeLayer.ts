@@ -1,3 +1,4 @@
+import * as HandoffParkedReconciler from "./HandoffParkedReconciler.ts";
 import * as HandoffApprovalProducer from "./HandoffApprovalProducer.ts";
 import * as HandoffTransferAdmission from "./HandoffTransferAdmission.ts";
 import * as WorktreeBranchSync from "./WorktreeBranchSync.ts";
@@ -401,6 +402,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 );
 
 export const layer = Layer.mergeAll(
+  layerHandoffApprovalProducerProvided,
   layerEffectExecutorProvided,
   layerHandoffTransferAdmissionProvided,
   layerCommandOutputHubProvided,
@@ -416,6 +418,17 @@ export const layer = Layer.mergeAll(
 );
 
 export const layerProduction = Layer.mergeAll(
+  HandoffParkedReconciler.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        layerHandoffApprovalProducerProvided,
+        layerOrchestratorProvided,
+        layerProviderSessionManagerProvided,
+        layerProviderRuntimeRecoveryProvided,
+        layerStores,
+      ),
+    ),
+  ),
   WorktreeBranchSync.layer.pipe(
     Layer.provide(Layer.merge(layerThreadManagementProvided, ProjectionStore.layer)),
   ),

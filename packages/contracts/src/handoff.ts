@@ -1,3 +1,5 @@
+import { UsageLimitFailoverIntent } from "./usageLimitFailover.ts";
+export { UsageLimitFailoverIntent } from "./usageLimitFailover.ts";
 import { OrchestrationV2ThreadProjection } from "./orchestrationV2.ts";
 import * as Schema from "effect/Schema";
 import { ProjectId, RunId, ThreadId, TrimmedNonEmptyString, TurnItemId } from "./baseSchemas.ts";
@@ -45,6 +47,7 @@ export const HandoffInput = Schema.Struct({
 export type HandoffInput = typeof HandoffInput.Type;
 
 export const HandoffRequest = Schema.Struct({
+  intent: Schema.optionalKey(UsageLimitFailoverIntent),
   type: Schema.Literal("thread.handoff"),
   target: Schema.optionalKey(
     Schema.Struct({

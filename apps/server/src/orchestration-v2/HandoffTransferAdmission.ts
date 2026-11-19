@@ -1,3 +1,5 @@
+import { sameFailoverIntent, usageLimitFailoverIntent } from "./UsageLimitFailoverPolicy.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { automaticHandoffDeclaration } from "@t3tools/contracts";
 import { ProviderTurnStartModels } from "./ProviderTurnStartService.ts";
 import { agentModelPolicy } from "./AgentModelPolicy.ts";
@@ -226,6 +228,9 @@ const make = Effect.gen(function* () {
   const terminals = yield* Effect.serviceOption(Terminals.TerminalManager);
   const digest = yield* Digest.Digest;
   const models = yield* ProviderTurnStartModels;
+  const settings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const withSettingsAdmission = <A, E, R>(work: Effect.Effect<A, E, R>) =>
+    Option.isSome(settings) ? settings.value.withSettingsSnapshot(() => work) : work;
   const failed = (sourceThreadId: string, stage: string) =>
     new HandoffTransferError({ sourceThreadId, stage });
   const inspect = Effect.fn("HandoffTransferAdmission.inspect")(
@@ -264,6 +269,32 @@ const make = Effect.gen(function* () {
       )
         return yield* failed(sourceId, "stale-source-or-successor");
       const sourceRuns = yield* projections.getThreadRecords(sourceId, ["runs"]);
+      const intent = parked.value.request.intent;
+      if (intent !== undefined) {
+        if (Option.isNone(settings))
+          return yield* failed(sourceId, "failover-settings-unavailable");
+        const records = yield* projections.getThreadRecords(sourceId, [
+          "runs",
+          "turnItems",
+          "checkpoints",
+        ]);
+        const current = usageLimitFailoverIntent(
+          records,
+          parked.value.request,
+          yield* settings.value.getSettings,
+          yield* models.getProviders,
+          DateTime.toEpochMillis(yield* DateTime.now),
+        );
+        if (
+          !current ||
+          !sameFailoverIntent(current, intent) ||
+          !modelSelectionsEqual(parked.value.request.modelSelection, intent.destinationSelection) ||
+          (source.handoffTransfer !== undefined &&
+            (source.usageLimitFailoverConsumed === undefined ||
+              !sameFailoverIntent(source.usageLimitFailoverConsumed, intent)))
+        )
+          return yield* failed(sourceId, "failover-binding-revoked");
+      }
       if (
         sourceRuns.runs.some(
           (run) =>
@@ -287,7 +318,10 @@ const make = Effect.gen(function* () {
         source.projectId !== request.projectId ||
         source.branch !== request.branch ||
         source.worktreePath !== request.worktreePath ||
-        !modelSelectionsEqual(source.modelSelection, request.modelSelection) ||
+        !modelSelectionsEqual(
+          source.modelSelection,
+          request.intent?.sourceSelection ?? request.modelSelection,
+        ) ||
         source.runtimeMode !== request.runtimeMode ||
         source.interactionMode !== request.interactionMode ||
         review.blockers.length ||
@@ -564,6 +598,11 @@ const make = Effect.gen(function* () {
           Effect.provideService(Projects.ProjectStoreV2, projects),
           Effect.provideService(Outbox.EffectOutboxV2, outbox),
           Effect.provideService(Digest.Digest, digest),
+          Effect.provideService(ProviderTurnStartModels, models),
+          (effect) =>
+            Option.isSome(settings)
+              ? Effect.provideService(effect, ServerSettings.ServerSettingsService, settings.value)
+              : effect,
         );
         if (
           !snapshot.stable ||
@@ -652,6 +691,15 @@ const make = Effect.gen(function* () {
   const start = Effect.fn("HandoffTransferAdmission.start")(
     function* (threadId: ThreadId, runId: RunId, ownProviderStart?: ProviderStart) {
       const thread = yield* projections.getThread(threadId);
+      if (thread.usageLimitFailoverConsumed !== undefined) {
+        const records = yield* projections.getThreadRecords(threadId, ["runs"]);
+        if (
+          records.runs.some(
+            (run) => run.id === runId && run.usageLimitContinuationOfRunId !== undefined,
+          )
+        )
+          return yield* failed(threadId, "consumed-failover-reset-fenced");
+      }
       if (thread.handoffSourceThreadId === undefined) {
         yield* assertDispatch(threadId, "provider-start");
         return;
@@ -712,57 +760,59 @@ const make = Effect.gen(function* () {
               const admitted = yield* executor.withHandoffCheckout(
                 [checkout],
                 "claim",
-                Effect.gen(function* () {
-                  const accepted = yield* inspect(
-                    sourceId,
-                    pair.requestId,
-                    pair.generation,
-                    ownProviderStart,
-                  );
-                  const now = yield* DateTime.now;
-                  const commit = sink.commitCommand({
-                    commandId,
-                    threadId: sourceId,
-                    commandType: "handoff.transfer.start",
-                    acceptedAt: now,
-                    expectedHandoff: { review: accepted.review, request: accepted.request },
-                    expectedThreadSequences: accepted.expectedSequences,
-                    events: [
-                      {
-                        id: EventId.make(`${commandId}:ownership`),
-                        type: "thread.metadata-updated",
-                        threadId: sourceId,
-                        occurredAt: now,
-                        payload: { ...source, handoffTransfer: { ...pair, state: "started" } },
-                      },
-                    ],
-                    effects: [],
-                  });
-                  const claim = yield* accepted.sessionWrites.length === 0
-                    ? commit
-                    : sink.withProviderBatch(
-                        Effect.gen(function* () {
-                          for (const expected of accepted.sessionWrites) {
-                            const rows = yield* projections.listHandoffSessionWrites(
-                              sourceId,
-                              expected.id,
-                              expected.afterSequence,
-                            );
-                            if (
-                              (rows.at(-1)?.sequence ?? expected.afterSequence) !==
-                              expected.throughSequence
-                            )
-                              return yield* failed(
+                withSettingsAdmission(
+                  Effect.gen(function* () {
+                    const accepted = yield* inspect(
+                      sourceId,
+                      pair.requestId,
+                      pair.generation,
+                      ownProviderStart,
+                    );
+                    const now = yield* DateTime.now;
+                    const commit = sink.commitCommand({
+                      commandId,
+                      threadId: sourceId,
+                      commandType: "handoff.transfer.start",
+                      acceptedAt: now,
+                      expectedHandoff: { review: accepted.review, request: accepted.request },
+                      expectedThreadSequences: accepted.expectedSequences,
+                      events: [
+                        {
+                          id: EventId.make(`${commandId}:ownership`),
+                          type: "thread.metadata-updated",
+                          threadId: sourceId,
+                          occurredAt: now,
+                          payload: { ...source, handoffTransfer: { ...pair, state: "started" } },
+                        },
+                      ],
+                      effects: [],
+                    });
+                    const claim = yield* accepted.sessionWrites.length === 0
+                      ? commit
+                      : sink.withProviderBatch(
+                          Effect.gen(function* () {
+                            for (const expected of accepted.sessionWrites) {
+                              const rows = yield* projections.listHandoffSessionWrites(
                                 sourceId,
-                                "provider-session-changed-before-claim",
+                                expected.id,
+                                expected.afterSequence,
                               );
-                          }
-                          return yield* commit;
-                        }),
-                      );
-                  if (!claim.committed)
-                    return yield* failed(sourceId, "initial-start-already-claimed");
-                }),
+                              if (
+                                (rows.at(-1)?.sequence ?? expected.afterSequence) !==
+                                expected.throughSequence
+                              )
+                                return yield* failed(
+                                  sourceId,
+                                  "provider-session-changed-before-claim",
+                                );
+                            }
+                            return yield* commit;
+                          }),
+                        );
+                    if (!claim.committed)
+                      return yield* failed(sourceId, "initial-start-already-claimed");
+                  }),
+                ),
               );
               if (Option.isNone(admitted))
                 return yield* failed(sourceId, "checkout-terminal-mutation");

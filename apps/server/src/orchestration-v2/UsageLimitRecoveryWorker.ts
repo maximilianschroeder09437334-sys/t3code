@@ -112,6 +112,8 @@ const makeSweep = Effect.gen(function* () {
     });
     let acted = false;
     for (const thread of candidates) {
+      if ((yield* projections.getThread(thread.id)).usageLimitFailoverConsumed !== undefined)
+        continue;
       const command = limitRecoveryCommand(
         thread,
         preferences.autoResumeLimitedThreads,
