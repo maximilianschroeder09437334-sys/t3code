@@ -252,6 +252,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.activitySubscribe]: "orchestration",
   [WS_METHODS.activityCheckInGet]: "orchestration",
   [WS_METHODS.activityCheckInMarkSeen]: "orchestration",
+  [WS_METHODS.activitySubscribeThreadContext]: "orchestration",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";

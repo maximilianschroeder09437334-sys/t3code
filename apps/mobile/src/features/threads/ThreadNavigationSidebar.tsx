@@ -1,3 +1,4 @@
+import { rootNavigationRef } from "../../lib/rootNavigation";
 import { SidebarUsage } from "../usage/SidebarUsage";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
@@ -642,6 +643,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
           </SwipeableScrollGateProvider>
           <ThreadUndoNotice visible={props.visible} />
         </View>
+        <Button label="Overview" onPress={() => rootNavigationRef.navigate("Overview")} />
         <SidebarUsage bottomInset={insets.bottom} />
       </>
     );
@@ -697,6 +699,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
         )}
       </View>
       {header}
+      <Button label="Overview" onPress={() => rootNavigationRef.navigate("Overview")} />
       <ThreadUndoNotice visible={props.visible} />
     </View>
   );

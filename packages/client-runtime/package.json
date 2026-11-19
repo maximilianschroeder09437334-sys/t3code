@@ -231,6 +231,14 @@
       "types": "./src/state/orchestrationV2Projection.ts",
       "default": "./src/state/orchestrationV2Projection.ts"
     },
+    "./state/activity": {
+      "types": "./src/state/activity.ts",
+      "default": "./src/state/activity.ts"
+    },
+    "./state/overview": {
+      "types": "./src/state/overview.ts",
+      "default": "./src/state/overview.ts"
+    },
     "./state/presentation": {
       "types": "./src/state/presentation.ts",
       "default": "./src/state/presentation.ts"

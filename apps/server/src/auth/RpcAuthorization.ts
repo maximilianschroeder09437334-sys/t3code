@@ -183,6 +183,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.activitySubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.activityCheckInGet]: AuthOrchestrationReadScope,
   [WS_METHODS.activityCheckInMarkSeen]: AuthOrchestrationOperateScope,
+  [WS_METHODS.activitySubscribeThreadContext]: AuthOrchestrationReadScope,
   [WS_METHODS.assetsPersistChatAttachments]: AuthOrchestrationOperateScope,
   [WS_METHODS.attachmentsCreateUploadUrl]: AuthOrchestrationOperateScope,
   [WS_METHODS.attachmentsDelete]: AuthOrchestrationOperateScope,

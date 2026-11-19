@@ -445,6 +445,10 @@ import {
   ActivityMarkSeenInput,
   ActivitySubscribeInput,
 } from "./activityLedger.ts";
+import {
+  ThreadContextUsageUpdate,
+  ThreadContextUsageSubscribeInput,
+} from "./threadContextUsage.ts";
 
 export const WS_METHODS = {
   projectsListEntries: "projects.listEntries",
@@ -472,6 +476,7 @@ export const WS_METHODS = {
   activitySubscribe: "activity.subscribe",
   activityCheckInGet: "activity.checkIn.get",
   activityCheckInMarkSeen: "activity.checkIn.markSeen",
+  activitySubscribeThreadContext: "activity.subscribeThreadContext",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -1624,6 +1629,12 @@ const WsActivityCheckInMarkSeenRpc = Rpc.make(WS_METHODS.activityCheckInMarkSeen
   success: ActivityCheckIn,
   error: activityError,
 });
+const WsActivitySubscribeThreadContextRpc = Rpc.make(WS_METHODS.activitySubscribeThreadContext, {
+  payload: ThreadContextUsageSubscribeInput,
+  success: ThreadContextUsageUpdate,
+  error: activityError,
+  stream: true,
+});
 
 const WsAssetsPersistChatAttachmentsRpc = Rpc.make(WS_METHODS.assetsPersistChatAttachments, {
   payload: PersistChatAttachmentsInput,
@@ -2420,6 +2431,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsActivitySubscribeRpc,
   WsActivityCheckInGetRpc,
   WsActivityCheckInMarkSeenRpc,
+  WsActivitySubscribeThreadContextRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,

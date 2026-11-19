@@ -78,6 +78,7 @@ export * from "./threadNotes.ts";
 
 export * from "./hookAutomation.ts";
 export * from "./activityLedger.ts";
+export * from "./threadContextUsage.ts";
 export * from "./handoff.ts";
 
 export * from "./webPush.ts";

@@ -1,3 +1,4 @@
+import { OverviewRouteScreen } from "./features/overview/OverviewRouteScreen";
 import { isDraftThreadRoute } from "./features/threads/thread-route-state";
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
@@ -509,6 +510,11 @@ const RootStackConfig = createWorkspaceStackNavigator({
         contentStyle: { backgroundColor: "transparent" },
         ...getCompactBrandHeaderOptions(),
       },
+    }),
+    Overview: createNativeStackScreen({
+      screen: OverviewRouteScreen,
+      linking: "overview",
+      options: pageRoute({ title: "Overview" }),
     }),
     PullRequest: createNativeStackScreen({
       screen: PullRequestRouteScreen,

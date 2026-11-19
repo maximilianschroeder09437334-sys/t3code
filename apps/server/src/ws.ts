@@ -1,5 +1,6 @@
 import * as WebPushNotifications from "./notifications/WebPushNotifications.ts";
 import * as ActivityLedger from "./activity/ActivityLedger.ts";
+import * as ThreadContextUsage from "./activity/ThreadContextUsage.ts";
 import { HookRegistryError } from "@t3tools/contracts";
 import * as HookAutomation from "./hooks/HookAutomation.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
@@ -2703,6 +2704,10 @@ export const layerWsRpc = (
         [WS_METHODS.activityCheckInGet]: () => activityLedger.sinceCheckIn(currentSession.subject),
         [WS_METHODS.activityCheckInMarkSeen]: (input) =>
           activityLedger.markSeen(currentSession.subject, input.seenSequence),
+        [WS_METHODS.activitySubscribeThreadContext]: (input) =>
+          ThreadContextUsage.stream(input.threadIds).pipe(
+            Stream.provideService(Orchestrator.OrchestratorV2, orchestrationEngine),
+          ),
         [WS_METHODS.webPushInfo]: () => webPush.info(currentSessionId),
         [WS_METHODS.webPushPrepare]: () => webPush.prepare(),
         [WS_METHODS.webPushSubscribe]: (input) => webPush.subscribe(currentSessionId, input),
