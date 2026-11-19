@@ -271,13 +271,10 @@ export function useSelectedThreadRequests() {
 
   const onChangeUserInputCustomAnswer = (
     requestId: RuntimeRequestId,
-    questionId: string,
+    question: ThreadUserInputQuestion,
     customAnswer: string,
   ) => {
-    const question = activePendingUserInputs
-      .find((request) => request.requestId === requestId)
-      ?.questions.find((entry) => entry.id === questionId);
-    if (!selectedThreadShell || !question) {
+    if (!selectedThreadShell) {
       return;
     }
 
@@ -321,11 +318,35 @@ export function useSelectedThreadRequests() {
   };
 
   const onSubmitUserInput = async () => {
+    const currentUserInputDrafts =
+      selectedThreadShell && activePendingUserInput
+        ? (appAtomRegistry.get(userInputDraftsByRequestKeyAtom)[
+            userInputDraftKey(
+              selectedThreadShell.environmentId,
+              selectedThreadShell.id,
+              activePendingUserInput.requestId,
+            )
+          ] ?? {})
+        : {};
+    const currentAnswerDrafts = activePendingUserInput
+      ? Object.fromEntries(
+          activePendingUserInput.questions.map((question) => [
+            question.id,
+            {
+              ...activePendingUserInputDrafts[question.id],
+              ...currentUserInputDrafts[question.id],
+            },
+          ]),
+        )
+      : {};
+    const currentAnswers = activePendingUserInput
+      ? buildPendingUserInputAnswers(activePendingUserInput.questions, currentAnswerDrafts)
+      : null;
     if (
       !selectedThreadShell ||
       !activePendingUserInput ||
       activePendingUserInput.responseCapability === "not_resumable" ||
-      !activePendingUserInputAnswers ||
+      !currentAnswers ||
       !readEnvironmentScope(selectedThreadShell.environmentId, AuthOrchestrationOperateScope)
     ) {
       return;
@@ -383,7 +404,7 @@ export function useSelectedThreadRequests() {
       input: {
         threadId: selectedThreadShell.id,
         requestId: activePendingUserInput.requestId,
-        answers: activePendingUserInputAnswers,
+        answers: currentAnswers,
         ...(attachmentsByQuestionId.size > 0
           ? { attachmentsByQuestionId: Object.fromEntries(attachmentsByQuestionId) }
           : {}),

@@ -317,7 +317,7 @@ export interface ThreadDetailScreenProps {
   ) => void;
   readonly onChangeUserInputCustomAnswer: (
     requestId: RuntimeRequestId,
-    questionId: string,
+    question: ThreadUserInputQuestion,
     customAnswer: string,
   ) => void;
   readonly onSubmitUserInput: () => Promise<unknown>;

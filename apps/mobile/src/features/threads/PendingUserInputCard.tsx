@@ -8,7 +8,7 @@ import {
   type TextDirection,
 } from "@t3tools/shared/textDirection";
 import { useNavigation } from "@react-navigation/native";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, View, type LayoutChangeEvent } from "react-native";
 import Animated, {
   useAnimatedStyle,
@@ -32,6 +32,7 @@ import {
 } from "../files/filePath";
 import { useLiveThreadLinkLabels } from "../../state/entities";
 import {
+  buildPendingUserInputAnswers,
   isPendingUserInputOptionSelected,
   type PendingUserInputDraftAnswer,
 } from "@t3tools/client-runtime/state/pending-user-input";
@@ -60,7 +61,7 @@ export interface PendingUserInputCardProps {
   ) => void;
   readonly onChangeCustomAnswer: (
     requestId: RuntimeRequestId,
-    questionId: string,
+    question: ThreadUserInputQuestion,
     customAnswer: string,
   ) => void;
   readonly onSubmit: () => Promise<unknown>;
@@ -120,6 +121,13 @@ function QuestionText(props: {
 }
 
 export function PendingUserInputCard(props: PendingUserInputCardProps) {
+  const [localAnswerState, setLocalAnswerState] = useState({
+    requestId: props.pendingUserInput.requestId,
+    answers: {} as Record<string, string>,
+  });
+  const customAnswerDrafts =
+    localAnswerState.requestId === props.pendingUserInput.requestId ? localAnswerState.answers : {};
+  const answerFlushers = useRef(new Map<string, () => void>());
   const questionCount = props.pendingUserInput.questions.length;
   const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
   const isResponding = props.respondingUserInputId === props.pendingUserInput.requestId;
@@ -133,6 +141,17 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
       ])
       .join(" "),
   );
+  const draftsWithLocalAnswers = { ...props.drafts };
+  for (const [questionId, customAnswer] of Object.entries(customAnswerDrafts)) {
+    draftsWithLocalAnswers[questionId] = {
+      ...draftsWithLocalAnswers[questionId],
+      customAnswer,
+    };
+  }
+  const answers =
+    Object.keys(customAnswerDrafts).length === 0
+      ? props.answers
+      : buildPendingUserInputAnswers(props.pendingUserInput.questions, draftsWithLocalAnswers);
 
   const { cardCoverage, cardProgress, maxHeight } = props;
   const barHeightRef = useRef(0);
@@ -297,13 +316,18 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                           "min-h-12 w-full rounded-2xl border px-3.5 py-3",
                           selected ? "border-primary bg-primary/10" : "border-border bg-input",
                         )}
-                        onPress={() =>
+                        onPress={() => {
+                          setLocalAnswerState((current) => {
+                            if (!(question.id in current.answers)) return current;
+                            const { [question.id]: _cleared, ...answers } = current.answers;
+                            return { ...current, answers };
+                          });
                           props.onSelectOption(
                             props.pendingUserInput.requestId,
                             question,
                             optionValue,
-                          )
-                        }
+                          );
+                        }}
                       >
                         <View className="min-w-0 flex-1 gap-0.5">
                           <Text
@@ -348,9 +372,24 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                   question={question}
                   questions={props.pendingUserInput.questions}
                   disabled={responseDisabled}
-                  value={draft?.customAnswer ?? ""}
-                  onChangeText={(value) =>
-                    props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
+                  value={customAnswerDrafts[question.id] ?? draft?.customAnswer ?? ""}
+                  answerFlushers={answerFlushers}
+                  onDraftChange={(value) => {
+                    setLocalAnswerState((current) => {
+                      const answers =
+                        current.requestId === props.pendingUserInput.requestId
+                          ? current.answers
+                          : {};
+                      return answers[question.id] === value
+                        ? current
+                        : {
+                            requestId: props.pendingUserInput.requestId,
+                            answers: { ...answers, [question.id]: value },
+                          };
+                    });
+                  }}
+                  onCommitText={(value) =>
+                    props.onChangeCustomAnswer(props.pendingUserInput.requestId, question, value)
                   }
                   onInputFocusChange={props.onInputFocusChange}
                 />
@@ -362,9 +401,12 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
       <Button
         label="Submit answers"
         fullWidth
-        tone={props.answers ? "primary" : "secondary"}
-        disabled={!props.canOperateThread || responseDisabled || props.answers === null}
-        onPress={() => void props.onSubmit()}
+        tone={answers ? "primary" : "secondary"}
+        disabled={!props.canOperateThread || responseDisabled || answers === null}
+        onPress={() => {
+          for (const flush of answerFlushers.current.values()) flush();
+          void props.onSubmit();
+        }}
       />
       {props.pendingUserInput.dismissible ? (
         <Button

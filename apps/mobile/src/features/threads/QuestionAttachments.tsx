@@ -8,7 +8,7 @@ import { convertPastedImagesToAttachments } from "../../lib/composerImages";
 import { PROVIDER_SEND_TURN_MAX_ATTACHMENTS, type UserInputQuestion } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { View, type TextInputInstance } from "react-native";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type RefObject } from "react";
 import { ComposerAttachmentButton } from "./ComposerAttachmentButton";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
 import { pickComposerFiles, pickComposerMedia } from "../../lib/composerImages";
@@ -29,6 +29,7 @@ import {
   questionAttachmentDraftKey,
   questionAttachmentPreparationAtom,
 } from "../../state/question-attachments";
+import { useQuestionAnswerDraft } from "./questionAnswerDraft";
 
 export function QuestionAttachments(props: {
   requestId: string;
@@ -36,7 +37,9 @@ export function QuestionAttachments(props: {
   questions: ReadonlyArray<UserInputQuestion>;
   disabled: boolean;
   value: string;
-  onChangeText: (value: string) => void;
+  onDraftChange: (value: string) => void;
+  onCommitText: (value: string) => void;
+  answerFlushers: RefObject<Map<string, () => void>>;
   onInputFocusChange?: ((focused: boolean) => void) | undefined;
 }) {
   const { selectedThread } = useThreadSelection();
@@ -46,7 +49,18 @@ export function QuestionAttachments(props: {
   const configs = useServerConfigs();
   const drafts = useAtomValue(composerDraftsAtom);
   const focusedRef = useRef(false);
+  const answerDraft = useQuestionAnswerDraft(props.value, props.onCommitText);
   const onInputFocusChange = props.onInputFocusChange;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers this field's flush so Submit commits text the native input still holds
+  useEffect(() => {
+    const flushers = props.answerFlushers.current;
+    flushers.set(props.question.id, answerDraft.flush);
+    return () => {
+      if (flushers.get(props.question.id) === answerDraft.flush) {
+        flushers.delete(props.question.id);
+      }
+    };
+  }, [answerDraft.flush, props.answerFlushers, props.question.id]);
   // The caller keys this component by request and question, so unmounting ends any open
   // picker's scope.
   const pickerScope = useRef<{ active: boolean }>({ active: false });
@@ -68,14 +82,12 @@ export function QuestionAttachments(props: {
   // iOS's pending autocorrection. The input owns its text; the only outside write is an option
   // selection clearing the draft.
   const inputRef = useRef<TextInputInstance>(null);
-  const [initialText] = useState(props.value);
-  const nativeText = useRef(props.value);
+  const clearAnswerDraft = answerDraft.clear;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes an option selection's cleared draft into the uncontrolled native input
   useEffect(() => {
-    if (props.value !== "" || nativeText.current === "") return;
-    nativeText.current = "";
+    if (props.value !== "" || !clearAnswerDraft()) return;
     inputRef.current?.clear();
-  }, [props.value]);
+  }, [clearAnswerDraft, props.value]);
   const append = (
     key: string,
     attachments: Parameters<typeof appendComposerDraftAttachments>[1],
@@ -208,20 +220,22 @@ export function QuestionAttachments(props: {
       <TextInputWrapper onPaste={paste}>
         <TextInput
           ref={inputRef}
-          defaultValue={initialText}
+          defaultValue={answerDraft.defaultValue}
           multiline={props.question.initialAnswer !== undefined}
           submitBehavior={props.question.initialAnswer !== undefined ? "newline" : undefined}
           editable={!props.disabled}
-          onChangeText={(text) => {
-            nativeText.current = text;
-            props.onChangeText(text);
+          onChangeText={(value) => {
+            answerDraft.onChangeText(value);
+            props.onDraftChange(value);
           }}
+          onEndEditing={(event) => answerDraft.flush(event.nativeEvent.text)}
           onFocus={() => {
             focusedRef.current = true;
             onInputFocusChange?.(true);
           }}
           onBlur={() => {
             focusedRef.current = false;
+            answerDraft.onBlur();
             onInputFocusChange?.(false);
           }}
           placeholder="Or type a custom answer"
