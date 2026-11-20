@@ -925,21 +925,25 @@ it.effect("offers a continuation for a later wake after a queued continuation is
         creationSource: "web",
       });
 
-      // The first run is still finalizing when its background task wakes Claude.
+      // The first run has completed, but its checkpoint capture has not run yet when its
+      // background task wakes Claude, so the continuation's start is still waiting on the lane.
       yield* userTurnWithBackgroundTask("first", "build-1");
-      const queued = yield* watch(
-        (event) => event.type === "run.created" && event.payload.status === "queued",
+      const created = yield* watch(
+        (event) =>
+          event.type === "run.created" &&
+          event.payload.status === "starting" &&
+          event.payload.userMessageId !== MessageId.make("first"),
       );
       yield* offerAndWait(backgroundTaskNotification("build-1"));
       yield* offerAndWait(wakeAssistant("wake-1"));
-      yield* Fiber.join(queued);
+      yield* Fiber.join(created);
       assert.lengthOf(continuations, 1);
       const continuationRun = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
-        (run) => run.status === "queued",
+        (run) => run.status === "starting",
       );
       assert.ok(continuationRun !== undefined);
       yield* orchestrator.dispatch({
-        type: "queued-run.cancel",
+        type: "run.interrupt",
         commandId: CommandId.make("cancel"),
         threadId,
         runId: continuationRun.id,
@@ -949,7 +953,10 @@ it.effect("offers a continuation for a later wake after a queued continuation is
       yield* orchestrator.resumeQueuedRuns;
       yield* worker.drain();
       const idle = yield* orchestrator.getThreadProjection(threadId);
-      assert.equal(idle.runs.find((run) => run.id === continuationRun.id)?.status, "cancelled");
+      assert.include(
+        ["cancelled", "interrupted"],
+        idle.runs.find((run) => run.id === continuationRun.id)?.status,
+      );
       assert.isFalse(idle.runs.some((run) => run.status === "queued"));
 
       yield* userTurnWithBackgroundTask("second", "build-2");
