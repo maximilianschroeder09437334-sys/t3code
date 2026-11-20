@@ -359,7 +359,7 @@ const cancelBackgroundOnlyTask = (
           (event) =>
             event.type === "run.updated" &&
             event.payload.id === child.turn.runId &&
-            event.payload.status === "waiting",
+            event.payload.status === "completed",
         );
         const nativeSubagentEvents = [
           {

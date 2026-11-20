@@ -430,9 +430,14 @@ detail also exposes an in-flight title regeneration.
 
 Sends a message to any ordinary or delegated thread in the environment:
 
-- `auto` starts an idle thread, steers a fully active turn, or queues behind a
-  turn that is not yet steerable;
-- `queue` creates a separate follow-up run after active work;
+- `auto` starts an idle thread or steers active work. A turn that has not
+  reached the provider yet takes the message as a steer once it starts. It is
+  queued only when the provider cannot steer, when Stop has reached the turn
+  (then it joins the held queue and does not release it), or when the turn
+  already ended (then it is the next turn);
+- `queue` behaves like `auto` when an agent sends it, so another agent's
+  message never waits for the whole turn. A person's send and a scheduled
+  delivery still create a separate follow-up run after active work;
 - `steer` requires a steerable active provider turn; and
 - `restart` requires an active provider turn and uses the orchestrator's
   interrupt-and-restart path. On a provider that can stop a turn and queue
@@ -512,8 +517,10 @@ unanswered. When a child opens a pending `user_input` request, the parent gets
 a notification message telling it to answer with the pending request tools or
 ask the user. The message says whether the child is blocked or, for a Codex
 async question, still working. If the parent's turn is running and its provider
-can steer without interrupting tools, the notification steers into that turn,
-like a background task's completion. A queued notice would wait behind a
+can steer, the notification steers into that turn, like a background task's
+completion. This includes providers whose steering ends a running tool, such
+as Claude: a delegated result reaches the parent the way a person's steer
+does. A queued notice would wait behind a
 long-running orchestrator turn that may never end. Otherwise it queues. If the
 question is answered or dismissed before a queued notification starts a turn,
 that queued turn is cancelled. Approvals are not

@@ -1083,6 +1083,80 @@ it.effect(
 );
 
 it.effect(
+  "delivers another agent's queued send like an automatic one, keeping a person's queued",
+  () => {
+    const threadId = ThreadId.make("thread:agent-queued-send");
+    const projectId = ProjectId.make("project:agent-queued-send");
+    const selection = { instanceId: ProviderInstanceId.make("codex"), model: "test" };
+    const commands: Array<Extract<OrchestrationV2Command, { type: "message.dispatch" }>> = [];
+    const layer = ThreadManagementService.layer.pipe(
+      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadRecords: () =>
+            Effect.succeed({
+              thread: {
+                id: threadId,
+                projectId,
+                archivedAt: null,
+                deletedAt: null,
+                modelSelection: selection,
+              },
+              // Finished: an agent's message starts the next turn instead of joining a queue.
+              runs: [{ id: RunId.make("run:agent-queued-send"), ordinal: 1, status: "completed" }],
+              providerTurns: [],
+            } as never),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              if (command.type === "message.dispatch") commands.push(command);
+            }).pipe(Effect.andThen(Effect.die("Fixture stops after observing the dispatch"))),
+        }),
+      ),
+      Layer.provide(
+        ServerSettings.layerTest({
+          providerInstances: { [selection.instanceId]: { driver: "codex", enabled: true } },
+        }),
+      ),
+      Layer.provideMerge(layerReceiptsTest),
+    );
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const send = (
+        id: string,
+        input: Partial<Parameters<typeof threads.sendToThread>[0]> & {
+          readonly createdBy: "agent" | "user";
+        },
+      ) =>
+        threads
+          .sendToThread({
+            threadId,
+            projectId,
+            commandId: CommandId.make(`command:agent-queued-send:${id}`),
+            messageId: MessageId.make(`message:agent-queued-send:${id}`),
+            text: id,
+            attachments: [],
+            mode: "queue",
+            creationSource: input.createdBy === "user" ? "web" : "mcp",
+            ...input,
+          })
+          .pipe(Effect.exit);
+      yield* send("agent", { createdBy: "agent" });
+      yield* send("person", { createdBy: "user" });
+      yield* send("scheduled", { createdBy: "agent", scheduledTaskId: "scheduled:1" as never });
+      yield* send("fresh", { createdBy: "agent", freshContext: true });
+      expect(
+        commands.map((command) => [command.text, command.dispatchMode, command.deliveryIntent]),
+      ).toEqual([
+        ["agent", { type: "start_immediately" }, "auto"],
+        ["person", { type: "queue_after_active" }, undefined],
+        ["scheduled", { type: "queue_after_active" }, undefined],
+        ["fresh", { type: "queue_after_active" }, undefined],
+      ]);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect(
   "admits two transcript exports at a time and frees a slot on failure or interruption",
   () =>
     Effect.gen(function* () {

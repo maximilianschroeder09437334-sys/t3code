@@ -132,9 +132,10 @@ it.effect(
                 Ref.get(refs).pipe(Effect.map((current) => current.has(checkpointRef))),
               captureCheckpoint: ({ checkpointRef }) =>
                 Effect.gen(function* () {
-                  yield* Ref.update(snapshots, (count) => count + 1);
+                  const snapshot = yield* Ref.updateAndGet(snapshots, (count) => count + 1);
                   yield* Deferred.succeed(firstSnapshotStarted, undefined);
-                  yield* Effect.sleep("10 seconds");
+                  // The post-turn capture fits its budget; the later baseline overruns its own.
+                  yield* Effect.sleep(snapshot === 1 ? "4 seconds" : "10 seconds");
                   yield* Ref.update(refs, (current) => new Set([...current, checkpointRef]));
                 }),
             }),
@@ -160,7 +161,7 @@ it.effect(
         const waitingBaseline = yield* checkpoints
           .captureBaseline({ scope, ordinalWithinScope: 1 })
           .pipe(Effect.result, Effect.forkChild);
-        yield* TestClock.adjust("10 seconds");
+        yield* TestClock.adjust("4 seconds");
         assert.strictEqual((yield* Fiber.join(postTurn)).status, "ready");
         assert.strictEqual((yield* Fiber.join(waitingBaseline))._tag, "Success");
 
@@ -232,4 +233,78 @@ it.effect("records a repository probe failure as an error checkpoint, not a miss
 
     assert.deepEqual(statuses, { baseline: "error", turn: "error" });
   }),
+);
+
+it.effect(
+  "bounds an end-of-turn snapshot and skips that slow workspace for 30 minutes, not others",
+  () =>
+    Effect.gen(function* () {
+      const scopeFor = (name: string, cwd: string): OrchestrationV2CheckpointScope => ({
+        id: CheckpointScopeId.make(`checkpoint-scope:${name}`),
+        threadId: ThreadId.make(`thread:${name}`),
+        runId: RunId.make(`run:${name}:1`),
+        nodeId: NodeId.make(`node:${name}:1`),
+        parentScopeId: null,
+        providerThreadId: ProviderThreadId.make(`provider-thread:${name}`),
+        kind: "root_run",
+        ordinalWithinParent: 0,
+        advancesAppRunCount: true,
+        cwd,
+        createdAt: DateTime.makeUnsafe("2026-07-28T00:00:00.000Z"),
+      });
+      const slow = scopeFor("slow-workspace", "/home/desktop");
+      const fast = scopeFor("fast-workspace", "/repo/fast");
+      const snapshots = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layerTest = CheckpointService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            Layer.mock(CheckpointStore.CheckpointStore)({
+              isGitRepository: () => Effect.succeed(true),
+              hasCheckpointRef: () => Effect.succeed(false),
+              // A workspace with huge untracked trees used to hold Git for its 30 second timeout.
+              captureCheckpoint: ({ cwd }) =>
+                Ref.update(snapshots, (current) => [...current, cwd]).pipe(
+                  Effect.andThen(cwd === slow.cwd ? Effect.sleep("30 seconds") : Effect.void),
+                ),
+            }),
+          ),
+        ),
+        Layer.provideMerge(NodeCrypto.layer),
+      );
+
+      yield* Effect.gen(function* () {
+        const checkpoints = yield* CheckpointService.CheckpointServiceV2;
+        const capture = (scope: OrchestrationV2CheckpointScope) =>
+          checkpoints.capture({
+            scope,
+            ordinalWithinScope: 1,
+            runId: scope.runId!,
+            nodeId: scope.nodeId!,
+            appRunOrdinal: 1,
+            capturedAt: scope.createdAt,
+          });
+
+        const first = yield* capture(slow).pipe(Effect.forkChild);
+        yield* TestClock.adjust("5 seconds");
+        assert.strictEqual((yield* Fiber.join(first)).status, "error");
+
+        // Skipped without touching Git: no further snapshot and no clock advance needed.
+        assert.strictEqual((yield* capture(slow)).status, "error");
+        assert.strictEqual(
+          (yield* Effect.result(
+            checkpoints.captureBaseline({ scope: slow, ordinalWithinScope: 2 }),
+          ))._tag,
+          "Success",
+        );
+        assert.strictEqual((yield* capture(fast)).status, "ready");
+        assert.deepEqual(yield* Ref.get(snapshots), [slow.cwd, fast.cwd]);
+
+        yield* TestClock.adjust("30 minutes");
+        const retried = yield* capture(slow).pipe(Effect.forkChild);
+        yield* TestClock.adjust("5 seconds");
+        assert.strictEqual((yield* Fiber.join(retried)).status, "error");
+        assert.deepEqual(yield* Ref.get(snapshots), [slow.cwd, fast.cwd, slow.cwd]);
+      }).pipe(Effect.provide(layerTest));
+    }),
 );

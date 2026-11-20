@@ -287,6 +287,10 @@ export function layerWithRegistry<Error>(
     readonly wrapProjectionStore?: (
       store: ProjectionStore.ProjectionStoreV2Shape,
     ) => ProjectionStore.ProjectionStoreV2Shape;
+    /** Lets a test slow or hold the workspace snapshots behind checkpoints. */
+    readonly wrapCheckpointStore?: (
+      store: CheckpointStore.CheckpointStore["Service"],
+    ) => CheckpointStore.CheckpointStore["Service"];
     readonly managedPolicy?: ManagedPolicyDocument;
   } = {},
 ): Layer.Layer<
@@ -379,10 +383,20 @@ export function layerWithRegistry<Error>(
     Layer.provide(layerServerConfig),
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
-  const layerCheckpointStore = CheckpointStore.layer.pipe(
+  const layerRealCheckpointStore = CheckpointStore.layer.pipe(
     Layer.provide(layerVcsDriverRegistry),
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
+  const wrapCheckpointStore = options.wrapCheckpointStore;
+  const layerCheckpointStore =
+    wrapCheckpointStore === undefined
+      ? layerRealCheckpointStore
+      : Layer.effect(
+          CheckpointStore.CheckpointStore,
+          Effect.gen(function* () {
+            return wrapCheckpointStore(yield* CheckpointStore.CheckpointStore);
+          }),
+        ).pipe(Layer.provide(layerRealCheckpointStore));
   const layerCheckpointServiceProvided = CheckpointService.layer.pipe(
     Layer.provide(Layer.mergeAll(layerCheckpointStore, IdAllocator.layer)),
   );

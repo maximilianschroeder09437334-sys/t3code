@@ -120,19 +120,50 @@ it("resolves automatic message delivery from authoritative provider capabilities
 });
 
 it.each(["preparing", "starting"] as const)(
-  "queues an automatic message while the handoff run is %s",
+  "queues a person's automatic message while the handoff run is %s, but steers an agent's",
   (status) => {
     const projection = dispatchProjection(baseCapabilities);
+    const starting = { ...projection, runs: projection.runs.map((run) => ({ ...run, status })) };
     assert.deepEqual(
-      CommandPolicy.resolveMessageDispatchIntent(
-        { ...projection, runs: projection.runs.map((run) => ({ ...run, status })) },
-        { type: "start_immediately" },
-        "auto",
-      ),
+      CommandPolicy.resolveMessageDispatchIntent(starting, { type: "start_immediately" }, "auto"),
       { type: "queue_after_active" },
+    );
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(starting, { type: "start_immediately" }, "auto", {
+        steerWhenReady: true,
+      }),
+      { type: "steer_active", targetRunId: activeRunId },
     );
   },
 );
+
+it("starts an agent's automatic message on an idle thread and queues it after a finished turn", () => {
+  const projection = dispatchProjection(baseCapabilities);
+  const agent = { steerWhenReady: true } as const;
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      dispatchProjection(),
+      { type: "queue_after_active" },
+      "auto",
+      agent,
+    ),
+    { type: "start_immediately" },
+  );
+  // A run whose checkpoint an older build still captures took its last turn already.
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      {
+        ...projection,
+        runs: projection.runs.map((run) => ({ ...run, status: "waiting" as const })),
+        providerTurns: [{ runAttemptId: activeAttemptId, status: "completed" }],
+      } as unknown as OrchestrationV2ThreadProjection,
+      { type: "start_immediately" },
+      "auto",
+      agent,
+    ),
+    { type: "queue_after_active" },
+  );
+});
 
 it.each([
   ["has not started", []],
@@ -150,6 +181,13 @@ it.each([
   assert.deepEqual(
     CommandPolicy.resolveMessageDispatchIntent(projection, { type: "start_immediately" }, "auto"),
     { type: "queue_after_active" },
+  );
+  // An agent's message waits for the turn only by steering into it once it runs.
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(projection, { type: "start_immediately" }, "auto", {
+      steerWhenReady: true,
+    }),
+    { type: "steer_active", targetRunId: activeRunId },
   );
   assert.deepEqual(
     CommandPolicy.resolveMessageDispatchIntent(projection, { type: "start_immediately" }, "steer"),

@@ -52,8 +52,8 @@ root provider turn/completed
   -> finalize assistant streams
   -> finalize plans/todos/questions
   -> root node terminal
-  -> capture checkpoint if applicable
   -> run terminal
+  -> capture checkpoint if applicable (effect on the thread's lane)
 ```
 
 Only the root node can complete the run.
@@ -374,10 +374,18 @@ Post-root-run checkpoint:
 ```text
 root node terminal
   -> drain/finalize streams
+  -> mark run terminal (the turn reads as done)
+  -> checkpoint.capture effect on the thread's effect lane
   -> capture root checkpoint for app run ordinal
   -> compute diff from prior root checkpoint
-  -> mark run terminal with checkpoint
+  -> attach the checkpoint to the terminal run
 ```
+
+The thread's effect lane runs one effect at a time in enqueue order, so the
+next turn's start waits for this capture. The capture's Git work has a 5 second
+budget. A workspace that overruns it records an `error` checkpoint, and its
+checkpoints are skipped for 30 minutes, so very large workspaces do not delay
+every turn.
 
 Child/subagent checkpoint:
 

@@ -67,15 +67,13 @@ export const layer: Layer.Layer<
     }) {
       const { run, rootNode, scope, providerThread, preservedCheckpointOrdinals, sideChat } =
         yield* projections.getCheckpointCaptureContext(input.threadId, input);
-      // Stopped runs remain terminal; their checkpoint is the next message's rollback point.
-      const stopped = run?.status === "interrupted" || run?.status === "cancelled";
+      // Settled runs keep their status and completion time; the checkpoint is the next message's
+      // rollback point. Only a run finalized by an older build still waits here to complete.
+      const settled =
+        run?.status === "completed" || run?.status === "interrupted" || run?.status === "cancelled";
 
       // A checkpoint on a settled run proves this at-least-once effect already committed.
-      if (
-        run !== undefined &&
-        run.checkpointId !== null &&
-        (run.status === "completed" || stopped)
-      ) {
+      if (run !== undefined && run.checkpointId !== null && settled) {
         return;
       }
       // Rollback uses the same lane and can precede a capture retry; preserve the restored workspace and discarded run.
@@ -85,7 +83,7 @@ export const layer: Layer.Layer<
 
       if (
         run === undefined ||
-        (run.status !== "waiting" && !stopped) ||
+        (run.status !== "waiting" && !settled) ||
         rootNode === undefined ||
         scope === undefined ||
         rootNode.checkpointScopeId !== scope.id ||
@@ -202,7 +200,7 @@ export const layer: Layer.Layer<
             nodeId: rootNode.id,
             providerInstanceId: run.providerInstanceId,
             occurredAt: capturedAt,
-            payload: stopped
+            payload: settled
               ? { ...runWithoutDelegatedCompletion, checkpointId: checkpoint.id }
               : {
                   ...runWithoutDelegatedCompletion,
@@ -211,7 +209,7 @@ export const layer: Layer.Layer<
                   checkpointId: checkpoint.id,
                 },
           },
-          ...(stopped
+          ...(settled
             ? []
             : [
                 {

@@ -14,6 +14,9 @@ import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
+import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
+import * as Option from "effect/Option";
 import * as Hex from "effect/encoding/Hex";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Layer from "effect/Layer";
@@ -28,6 +31,12 @@ const ROOT_CHECKPOINT_SCOPE_NAME = "root";
 // The provider turn waits on the baseline, so a workspace too slow for this starts without one.
 // It bounds only the snapshot: waiting on the lock lets an in-flight capture finish the same ref.
 const BASELINE_CAPTURE_BUDGET = "5 seconds";
+// The thread's next turn starts behind the end-of-turn capture on the same effect lane, so its git
+// work (snapshot, then diff summary) shares this budget instead of Git's 30 second default.
+const CAPTURE_BUDGET = Duration.seconds(5);
+// After a snapshot overruns, a workspace that slow (huge untracked trees) would cost every turn the
+// whole budget again. Its checkpoints are skipped until this passes, then retried once.
+const SLOW_WORKSPACE_SKIP = Duration.minutes(30);
 
 export class CheckpointRootScopePrepareError extends Schema.TaggedError<CheckpointRootScopePrepareError>()(
   "CheckpointRootScopePrepareError",
@@ -250,6 +259,30 @@ export const layer: Layer.Layer<
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       workspaceLocks.withLock(cwd, effect);
 
+    // Workspace path -> epoch millis until which its snapshots are skipped.
+    const slowWorkspaces = new Map<string, number>();
+    const isSlowWorkspace = (cwd: string) =>
+      Clock.currentTimeMillis.pipe(
+        Effect.map((now) => {
+          const until = slowWorkspaces.get(cwd);
+          if (until === undefined) return false;
+          if (now < until) return true;
+          slowWorkspaces.delete(cwd);
+          return false;
+        }),
+      );
+    const markSlowWorkspace = Effect.fn("CheckpointService.markSlowWorkspace")(function* (
+      scope: OrchestrationV2CheckpointScope,
+      stage: string,
+    ) {
+      const now = yield* Clock.currentTimeMillis;
+      slowWorkspaces.set(scope.cwd, now + Duration.toMillis(SLOW_WORKSPACE_SKIP));
+      yield* Effect.logWarning(
+        "orchestration V2 checkpoint snapshot overran its budget; skipping this workspace's checkpoints for 30 minutes",
+        { scopeId: scope.id, cwd: scope.cwd, stage },
+      );
+    });
+
     // A failed probe is an operational error, not proof that the workspace has no repository.
     const probeRepository = (scope: OrchestrationV2CheckpointScope) =>
       checkpointStore.isGitRepository(scope.cwd).pipe(
@@ -268,6 +301,9 @@ export const layer: Layer.Layer<
       withWorkspaceLock(
         input.scope.cwd,
         Effect.gen(function* () {
+          if (yield* isSlowWorkspace(input.scope.cwd)) {
+            return;
+          }
           if (!(yield* checkpointStore.isGitRepository(input.scope.cwd))) {
             return;
           }
@@ -290,7 +326,14 @@ export const layer: Layer.Layer<
               checkpointRef,
             })
             .pipe(
-              Effect.timeout(BASELINE_CAPTURE_BUDGET),
+              Effect.timeoutOption(BASELINE_CAPTURE_BUDGET),
+              Effect.flatMap((captured) =>
+                Option.isSome(captured)
+                  ? Effect.void
+                  : markSlowWorkspace(input.scope, "baseline").pipe(
+                      Effect.andThen(Effect.fail("Checkpoint baseline overran its budget.")),
+                    ),
+              ),
               Effect.catchTags({
                 VcsUnsupportedOperationError: () => Effect.void,
               }),
@@ -389,7 +432,11 @@ export const layer: Layer.Layer<
           });
 
           const repository =
-            input.forceMissing === true ? "missing" : yield* probeRepository(input.scope);
+            input.forceMissing === true
+              ? "missing"
+              : (yield* isSlowWorkspace(input.scope.cwd))
+                ? "error"
+                : yield* probeRepository(input.scope);
           if (repository !== "repository") {
             return makeCheckpoint({
               id: checkpointId,
@@ -406,6 +453,7 @@ export const layer: Layer.Layer<
             });
           }
 
+          const startedAt = yield* Clock.currentTimeMillis;
           const captureStatus = yield* checkpointStore
             .captureCheckpoint({
               cwd: input.scope.cwd,
@@ -413,7 +461,12 @@ export const layer: Layer.Layer<
               ...(input.ordinalWithinScope > 0 ? { previousCheckpointRef } : {}),
             })
             .pipe(
-              Effect.as("ready" as const),
+              Effect.timeoutOption(CAPTURE_BUDGET),
+              Effect.flatMap((captured) =>
+                Option.isSome(captured)
+                  ? Effect.succeed("ready" as const)
+                  : markSlowWorkspace(input.scope, "capture").pipe(Effect.as("error" as const)),
+              ),
               Effect.catchTags({
                 VcsUnsupportedOperationError: () => Effect.succeed("missing" as const),
               }),
@@ -461,6 +514,13 @@ export const layer: Layer.Layer<
             fromCheckpointRef: previousCheckpointRef,
             toCheckpointRef: checkpointRef,
           };
+          // The summary gets what the snapshot left of the budget; without it the checkpoint stays usable.
+          const summaryBudget = Duration.millis(
+            Math.max(
+              1_000,
+              Duration.toMillis(CAPTURE_BUDGET) - ((yield* Clock.currentTimeMillis) - startedAt),
+            ),
+          );
           // A pull or rebase can change thousands of files the turn did not write.
           const files = previousExists
             ? yield* Effect.all([
@@ -485,10 +545,19 @@ export const layer: Layer.Layer<
                     .filter((file) => !isGitImport(file, authoredPaths))
                     .map((file) => ({
                       path: file.path,
-                      kind: "modified",
+                      kind: "modified" as const,
                       additions: file.additions,
                       deletions: file.deletions,
                     })),
+                ),
+                Effect.timeoutOption(summaryBudget),
+                Effect.flatMap((summary) =>
+                  Option.isSome(summary)
+                    ? Effect.succeed(summary.value)
+                    : Effect.logWarning(
+                        "orchestration V2 checkpoint diff summary overran its budget",
+                        { scopeId: input.scope.id, checkpointRef },
+                      ).pipe(Effect.as([])),
                 ),
                 Effect.catch((cause) =>
                   Effect.logWarning("orchestration V2 checkpoint diff summary failed", {

@@ -3054,7 +3054,7 @@ it.effect("settles native subagents when a workspace handoff completes the root 
     assert.deepEqual(statusOf("turn-item.updated", runningTurnItem.id), ["interrupted"]);
     assert.deepEqual(statusOf("node.updated", runningNode.id), ["interrupted"]);
     assert.deepEqual(statusOf("node.updated", runningChildNode.id), ["interrupted"]);
-    assert.deepEqual(statusOf("run.updated", ids.runId), ["waiting"]);
+    assert.deepEqual(statusOf("run.updated", ids.runId), ["completed"]);
     assert.deepEqual(statusOf("run-attempt.updated", ids.attemptId), ["completed"]);
     assert.isFalse(
       events.some(
@@ -3761,8 +3761,8 @@ it.effect.each([
             : [],
         ),
         ended
-          ? ["run.updated:waiting", "subagent.updated:failed", "turn-item.updated:failed"]
-          : ["run.updated:waiting"],
+          ? ["run.updated:completed", "subagent.updated:failed", "turn-item.updated:failed"]
+          : ["run.updated:completed"],
       );
     }),
 );
@@ -3986,13 +3986,20 @@ it.effect("does not start a turn whose run settled during the app context read",
 
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
-    const { observed } = yield* captureRootRunTermination({
+    const { observed, finalEvents, committedEffects } = yield* captureRootRunTermination({
       key: "pull-request-refresh:refresh-failure",
       shouldFinalizeRun: () => Effect.succeed(true),
       events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
       refreshAfterTurn: Effect.die("refresh failed"),
     });
-    assert.deepEqual(observed, ["run:waiting", "pull-requests-refreshed"]);
+    assert.deepEqual(observed, ["run:completed", "pull-requests-refreshed"]);
+    // The turn reads as done at once; its checkpoint follows on the thread's effect lane.
+    const finalRun = finalEvents.find((event) => event.type === "run.updated");
+    assert.isTrue(finalRun?.type === "run.updated" && finalRun.payload.completedAt !== null);
+    assert.deepEqual(
+      committedEffects.map((effect) => effect.request.type),
+      ["checkpoint.capture"],
+    );
   }),
 );
 

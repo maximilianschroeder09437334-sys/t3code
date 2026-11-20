@@ -888,10 +888,20 @@ const make = Effect.gen(function* () {
       });
     }
     // A fresh send never joins a running turn, so it needs none to steer or restart.
+    // Another agent's message never waits behind the target's turn: a queued one is delivered
+    // like an automatic one, which steers active work and starts an idle thread. A person's
+    // sends and scheduled deliveries keep the mode they asked for.
+    const agentQueuedSend =
+      input.mode === "queue" &&
+      input.createdBy !== "user" &&
+      input.scheduledTaskId === undefined &&
+      !input.freshContext;
     const mode =
       input.freshContext && (input.mode === "steer" || input.mode === "restart")
         ? "queue"
-        : input.mode;
+        : agentQueuedSend
+          ? "auto"
+          : input.mode;
     let dispatchMode: Extract<
       OrchestrationV2Command,
       { readonly type: "message.dispatch" }
@@ -998,13 +1008,16 @@ const make = Effect.gen(function* () {
       );
     const delivery: ThreadManagementSendResult["delivery"] = restartedAsNextTurn
       ? "restarted"
-      : turnItem === null || turnItem.inputIntent === "queued_turn"
-        ? "queued"
-        : turnItem.inputIntent === "turn_start"
-          ? "started"
-          : mode === "restart"
-            ? "restarted"
-            : "steered";
+      : run.status === "queued" && run.steerWhenReadyRunId !== undefined
+        ? // Held only until the target's turn starts, then steered into it.
+          "steered"
+        : turnItem === null || turnItem.inputIntent === "queued_turn"
+          ? "queued"
+          : turnItem.inputIntent === "turn_start"
+            ? "started"
+            : mode === "restart"
+              ? "restarted"
+              : "steered";
     return { dispatch: dispatched, projection, message, run, turnItem, delivery };
   });
 

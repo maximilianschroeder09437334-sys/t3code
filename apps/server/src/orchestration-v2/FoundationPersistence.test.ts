@@ -2963,6 +2963,47 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }).pipe(Effect.provide(Layer.fresh(layerEffectOutboxProvided))),
   );
 
+  // A finished turn reads as completed before its capture runs, so the next turn's start must
+  // still wait on the lane for that capture to end.
+  it.effect("keeps the next turn's start behind the previous turn's checkpoint capture", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const workerId = "capture-order-worker";
+      const threadId = ThreadId.make("thread:foundation-capture-order");
+      const previousRunId = RunId.make("run:foundation-capture-order:1");
+      yield* outbox.enqueue([
+        {
+          id: `effect:checkpoint.capture:${previousRunId}`,
+          commandId: CommandId.make(`command:effect:checkpoint.capture:${previousRunId}`),
+          threadId,
+          request: {
+            type: "checkpoint.capture",
+            runId: previousRunId,
+            scopeId: CheckpointScopeId.make("scope:foundation-capture-order"),
+          },
+        },
+      ]);
+      yield* outbox.enqueue([
+        {
+          id: "effect:foundation-capture-order:start",
+          commandId: CommandId.make("command:foundation-capture-order:start"),
+          threadId,
+          request: {
+            type: "provider-turn.start",
+            runId: RunId.make("run:foundation-capture-order:2"),
+          },
+        },
+      ]);
+      const capture = yield* outbox.claimNext({ workerId });
+      assert.equal(Option.getOrUndefined(capture)?.request.type, "checkpoint.capture");
+      assert.isTrue(Option.isNone(yield* outbox.claimNext({ workerId })));
+      yield* outbox.succeed({ effectId: `effect:checkpoint.capture:${previousRunId}`, workerId });
+      const start = yield* outbox.claimNext({ workerId });
+      assert.equal(Option.getOrUndefined(start)?.id, "effect:foundation-capture-order:start");
+      yield* outbox.succeed({ effectId: "effect:foundation-capture-order:start", workerId });
+    }).pipe(Effect.provide(Layer.fresh(layerEffectOutboxProvided))),
+  );
+
   it.effect("runs distinct threads concurrently while serializing effects within a thread", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;

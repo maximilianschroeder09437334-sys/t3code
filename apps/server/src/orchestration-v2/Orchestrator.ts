@@ -7352,10 +7352,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection = applyToProjection(projection, event);
     }
     let modelSelection = command.modelSelection ?? projection.thread.modelSelection;
+    // A person's automatic send keeps their queue-or-steer behaviour; another agent's always joins
+    // the target's turn, even one that has not started yet.
+    const agentAutoSend = command.deliveryIntent === "auto" && command.createdBy !== "user";
     let dispatchMode = resolveMessageDispatchIntent(
       projection,
       command.dispatchMode,
       command.deliveryIntent,
+      { steerWhenReady: agentAutoSend },
     );
     if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
       const targetRunId = dispatchMode.targetRunId;
@@ -7567,10 +7571,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const session = yield* providerSessions
           .get(providerThread.providerSessionId)
           .pipe(Effect.orElseSucceed(() => Option.none()));
+        // Like a person's steer, this reaches providers whose steering interrupts a running tool.
         if (
           Option.isSome(session) &&
           session.value.providerSession.capabilities.turns.supportsActiveSteering &&
-          session.value.providerSession.capabilities.turns.activeSteeringInterruptsTools !== true &&
           !(yield* stopReachedRun(command, command.threadId, active.id))
         ) {
           dispatchMode = { type: "steer_active", targetRunId: active.id };
@@ -7658,16 +7662,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .get(target.providerInstanceId)
           .pipe(mapDispatchError(command));
         const capabilities = yield* adapter.getCapabilities().pipe(mapDispatchError(command));
-        yield* commandPolicy
+        const steerable = yield* commandPolicy
           .decideSteeringExecution({
             commandId: command.commandId,
             threadId: command.threadId,
             providerInstanceId: target.providerInstanceId,
             capabilities,
           })
-          .pipe(mapDispatchError(command));
-        yield* ensureSteeringMessage(command, command);
-        steerWhenReadyRunId = target.id;
+          .pipe(
+            mapDispatchError(command),
+            Effect.andThen(ensureSteeringMessage(command, command)),
+            Effect.as(true),
+            // An agent's automatic send that cannot steer this turn runs after it instead.
+            agentAutoSend ? Effect.orElseSucceed(() => false) : (effect) => effect,
+          );
+        if (steerable) steerWhenReadyRunId = target.id;
         dispatchMode = { type: "queue_after_active" };
       }
     }

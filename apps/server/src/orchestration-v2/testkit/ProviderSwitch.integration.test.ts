@@ -2006,7 +2006,7 @@ describe("orchestration v2 provider switching", () => {
 
         // The handoff itself is not a failure: the run completes once the session closes.
         const runSettled = yield* awaitEvent(
-          (event) => event.type === "run.updated" && event.payload.status === "waiting",
+          (event) => event.type === "run.updated" && event.payload.status === "completed",
         );
         yield* orchestrator.dispatch({
           type: "thread.metadata.update",

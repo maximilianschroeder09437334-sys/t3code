@@ -401,15 +401,16 @@ it.effect.each(deliveries)(
           assert.equal(steer.inputIntent, "promoted_queued_to_steer");
         }
         yield* worker.drain();
-        const explicitSteer =
-          delivery === "user steering" || delivery === "promoted queued message";
+        // A child's completion steers like a person's message, though that ends Claude's pending
+        // tools; only a scheduled delivery waits for the turn.
+        const explicitSteer = delivery !== "scheduled message";
         assert.equal(batchAbort.signal.aborted, explicitSteer);
         assert.equal(offers.length, explicitSteer ? 2 : 1);
         const finished = yield* watch(
           (event) =>
             event.type === "run.updated" &&
             event.payload.id === parent.id &&
-            event.payload.status === "waiting",
+            event.payload.status === "completed",
         );
         yield* Queue.offer(sdkMessages, toolResult("build", false));
         for (const id of statusIds)
@@ -426,20 +427,11 @@ it.effect.each(deliveries)(
             (event) =>
               event.type === "run.updated" &&
               event.payload.id === queued.id &&
-              event.payload.status === "waiting",
+              event.payload.status === "completed",
           );
-          const delivered =
-            delivery === "child completion"
-              ? yield* watch(
-                  (event) =>
-                    event.type === "subagent.updated" &&
-                    event.payload.completionDelivery?.state === "delivered",
-                )
-              : null;
           yield* Queue.offer(sdkMessages, result("notice-completed", false));
           yield* Fiber.join(noticeFinished);
           yield* worker.drain();
-          if (delivered !== null) yield* Fiber.join(delivered);
         }
         const after = yield* orchestrator.getThreadProjection(threadId);
         const reads = after.turnItems.filter((item) =>
@@ -458,15 +450,14 @@ it.effect.each(deliveries)(
         );
         if (!explicitSteer) {
           assert.equal(after.runs.length, 2);
-          if (delivery === "child completion") {
-            assert.equal(after.messages.filter((message) => message.id === messageId).length, 1);
-            assert.equal(after.subagents[0]?.completionDelivery?.state, "delivered");
-          } else {
-            assert.equal(
-              after.messages.filter((message) => message.scheduledTaskId !== undefined).length,
-              1,
-            );
-          }
+          assert.equal(
+            after.messages.filter((message) => message.scheduledTaskId !== undefined).length,
+            1,
+          );
+        } else if (delivery === "child completion") {
+          assert.equal(after.runs.length, 1);
+          assert.equal(after.messages.filter((message) => message.id === messageId).length, 1);
+          assert.equal(after.subagents[0]?.completionDelivery?.state, "delivered");
         }
         yield* orchestrator.recoverDelegatedTasks;
         yield* orchestrator.resumeQueuedRuns;
@@ -914,7 +905,7 @@ it.effect("offers a continuation for a later wake after a queued continuation is
         });
         yield* worker.drain();
         yield* Fiber.join(running);
-        const waiting = yield* runUpdated(id, "waiting");
+        const waiting = yield* runUpdated(id, "completed");
         yield* Queue.offer(sdkMessages, backgroundTaskStarted(taskId));
         yield* Queue.offer(sdkMessages, result(`result-${id}`, false));
         yield* Fiber.join(waiting);
@@ -994,7 +985,7 @@ it.effect("offers a continuation for a later wake after a queued continuation is
         (event) =>
           event.type === "run.updated" &&
           event.payload.id === secondContinuation.id &&
-          event.payload.status === "waiting",
+          event.payload.status === "completed",
       );
       yield* offerAndWait(result("wake-2-result", false));
       yield* Fiber.join(secondWaiting);

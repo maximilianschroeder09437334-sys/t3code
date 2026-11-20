@@ -821,20 +821,22 @@ export const layer: Layer.Layer<
                 allocateEventId,
               })
             : [];
-        const persistedStatus =
-          input.terminal.status === "completed" ? "waiting" : input.terminal.status;
+        // A finished turn settles now; its checkpoint follows on this thread's effect lane. The
+        // lane runs one effect at a time in enqueue order, so the next turn's start (enqueued
+        // later) cannot reach the provider before this capture ends, as with stopped runs.
+        const persistedStatus = input.terminal.status;
         // Omit delegatedCompletion; the startup snapshot must not overwrite newer acknowledgements, successors, or Stop barriers.
         const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } =
           input.run;
         const finalizedRun: OrchestrationV2Run = {
           ...runWithoutDelegatedCompletion,
           status: persistedStatus,
-          completedAt: input.terminal.status === "completed" ? null : completedAt,
+          completedAt,
         };
         const finalizedRootNode: OrchestrationV2ExecutionNode = {
           ...input.rootNode,
           status: persistedStatus,
-          completedAt: input.terminal.status === "completed" ? null : completedAt,
+          completedAt,
           checkpointScopeId: input.checkpointScope.id,
         };
         const finalizedProviderThread: OrchestrationV2ProviderThread = {
@@ -848,7 +850,7 @@ export const layer: Layer.Layer<
         const checkpointCaptureCommandId = CommandId.make(
           `command:effect:checkpoint.capture:${input.run.id}`,
         );
-        // Stopped runs capture rollback points for the next message; enqueue before later starts on this effect lane.
+        // Settled runs capture rollback points for the next message; enqueue before later starts on this effect lane.
         const finalization = {
           effects: [
             ...(input.terminal.status === "completed" ||

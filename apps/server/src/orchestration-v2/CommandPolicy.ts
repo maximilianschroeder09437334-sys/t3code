@@ -94,8 +94,9 @@ export function resolveMessageDispatchIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
   deliveryIntent?: "auto" | "steer" | "restart",
+  options: { readonly steerWhenReady?: boolean } = {},
 ): MessageDispatchMode {
-  const mode = resolveDeliveryIntent(projection, requestedMode, deliveryIntent);
+  const mode = resolveDeliveryIntent(projection, requestedMode, deliveryIntent, options);
   if (mode.type !== "steer_active") return mode;
   // Compaction and sign-out cannot accept steers; queue follow-ups.
   const target = projection.runs.find((run) => run.id === mode.targetRunId);
@@ -154,7 +155,8 @@ function providerTurnCapabilities(
 function resolveDeliveryIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
-  deliveryIntent?: "auto" | "steer" | "restart",
+  deliveryIntent: "auto" | "steer" | "restart" | undefined,
+  options: { readonly steerWhenReady?: boolean },
 ): MessageDispatchMode {
   if (deliveryIntent === undefined) return requestedMode;
 
@@ -175,7 +177,14 @@ function resolveDeliveryIntent(
       (turn) => turn.runAttemptId === activeRun.activeAttemptId && turn.status === "running",
     )
   ) {
-    return { type: "queue_after_active" };
+    // Another agent's message joins a turn that has not started yet as soon as it runs, rather
+    // than waiting for the whole turn. A turn that already ended takes it as the next turn.
+    return options.steerWhenReady === true &&
+      (activeRun.status === "preparing" ||
+        activeRun.status === "starting" ||
+        activeRun.status === "running")
+      ? { type: "steer_active", targetRunId: activeRun.id }
+      : { type: "queue_after_active" };
   }
 
   const capabilities = providerTurnCapabilities(projection, activeRun);
