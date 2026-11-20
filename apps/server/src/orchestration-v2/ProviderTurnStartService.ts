@@ -3,7 +3,7 @@ import {
   HandoffProviderSessionWrite,
 } from "./HandoffProviderStartGuard.ts";
 import * as HandoffAdmission from "./HandoffTransferAdmission.ts";
-import { agentModelPolicy } from "./AgentModelPolicy.ts";
+import { agentModelPolicy, agentSelectionMatchesRun } from "./AgentModelPolicy.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -622,7 +622,8 @@ export const layer: Layer.Layer<
         const intent = projection.thread.agentExecutionIntent;
         const providers = yield* providerRegistry.getProviders;
         const modelPolicyError =
-          intent === undefined || !modelSelectionsEqual(intent.modelSelection, run.modelSelection)
+          intent === undefined ||
+          !agentSelectionMatchesRun(intent.modelSelection, run.modelSelection)
             ? "Agent selection provenance is missing or does not match this run."
             : agentModelPolicy({
                 selection: intent.modelSelection,

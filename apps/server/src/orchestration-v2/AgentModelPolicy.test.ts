@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import type { ServerProvider } from "@t3tools/contracts";
-import { agentModelPolicy } from "./AgentModelPolicy.ts";
+import { ProviderInstanceId, type ModelSelection } from "@t3tools/contracts";
+import { agentModelPolicy, agentSelectionMatchesRun } from "./AgentModelPolicy.ts";
 
 const provider = {
   instanceId: "claudeAgent",
@@ -46,4 +47,28 @@ it("rejects ambiguous model aliases rather than selecting a potentially unsafe m
     ],
   };
   assert.isNotNull(agentModelPolicy({ selection, provider: collision }));
+});
+
+it("matches a run whose selection only adds a switched-off option to the agent's choice", () => {
+  const intent: ModelSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+    options: [{ id: "effort", value: "medium" }],
+  };
+  const withFastModeOff: ModelSelection = {
+    ...intent,
+    options: [...intent.options!, { id: "fastMode", value: false }],
+  };
+  assert.isTrue(agentSelectionMatchesRun(intent, withFastModeOff));
+  assert.isTrue(agentSelectionMatchesRun(withFastModeOff, intent));
+  assert.isFalse(
+    agentSelectionMatchesRun(intent, {
+      ...intent,
+      options: [...intent.options!, { id: "fastMode", value: true }],
+    }),
+  );
+  assert.isFalse(
+    agentSelectionMatchesRun(intent, { ...intent, options: [{ id: "effort", value: "high" }] }),
+  );
+  assert.isFalse(agentSelectionMatchesRun(intent, { ...intent, model: "claude-haiku" }));
 });

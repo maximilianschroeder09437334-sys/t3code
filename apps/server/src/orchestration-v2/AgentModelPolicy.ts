@@ -1,4 +1,5 @@
-import type { ServerProvider } from "@t3tools/contracts";
+import type { ModelSelection, ServerProvider } from "@t3tools/contracts";
+import { createModelSelection, modelSelectionsEqual } from "@t3tools/shared/model";
 
 type Selection = {
   readonly instanceId?: string | undefined;
@@ -7,6 +8,20 @@ type Selection = {
     | ReadonlyArray<{ readonly id: string; readonly value: string | boolean }>
     | undefined;
 };
+
+/**
+ * Whether a run carries the selection an agent chose. A switched-off option (such as the
+ * `fastMode: false` a composer adds) reads the same as one left unset.
+ */
+export function agentSelectionMatchesRun(intent: ModelSelection, run: ModelSelection): boolean {
+  const withoutOffOptions = (selection: ModelSelection) =>
+    createModelSelection(
+      selection.instanceId,
+      selection.model,
+      selection.options?.filter((option) => option.value !== false),
+    );
+  return modelSelectionsEqual(withoutOffOptions(intent), withoutOffOptions(run));
+}
 
 export function agentModelPolicy(input: {
   readonly selection: Selection | undefined;
