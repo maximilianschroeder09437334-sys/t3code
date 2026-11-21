@@ -111,20 +111,20 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
   input: {
     label: "Input",
     icon: "questionmark.bubble",
-    className: "text-adaptive-indigo-600-300",
-    iconTintClassName: "accent-adaptive-indigo-600-300",
+    className: "text-warning-foreground",
+    iconTintClassName: "accent-warning-foreground",
   },
   request: {
     label: "Request",
     icon: "person.crop.circle",
-    className: "text-adaptive-fuchsia-600-300",
-    iconTintClassName: "accent-adaptive-fuchsia-600-300",
+    className: "text-warning-foreground",
+    iconTintClassName: "accent-warning-foreground",
   },
   working: {
     label: null,
     icon: "circle.dashed",
-    className: "text-adaptive-sky-600-400",
-    iconTintClassName: "accent-adaptive-sky-600-400",
+    className: "text-foreground-muted",
+    iconTintClassName: "accent-foreground-muted",
   },
   waiting: {
     label: null,
@@ -141,8 +141,8 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
   limited: {
     label: "Limited",
     icon: "exclamationmark.circle",
-    className: "text-warning-foreground",
-    iconTintClassName: "accent-warning-foreground",
+    className: "text-foreground-muted",
+    iconTintClassName: "accent-foreground-muted",
   },
 };
 const DONE_STATUS_LABEL: StatusLabel = {

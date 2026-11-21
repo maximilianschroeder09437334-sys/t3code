@@ -46,7 +46,7 @@ export function AgentActivityWidget(
       case "waiting_for_approval":
         return isLightScheme ? "#d97706" : "#fcd34d";
       case "waiting_for_input":
-        return isLightScheme ? "#4f46e5" : "#a5b4fc";
+        return isLightScheme ? "#d97706" : "#fcd34d";
       case "failed":
         return isLightScheme ? "#dc2626" : "#fca5a5";
       case "completed":
@@ -56,7 +56,7 @@ export function AgentActivityWidget(
       case "starting":
       case "running":
       default:
-        return isLightScheme ? "#0284c7" : "#7dd3fc";
+        return secondaryForeground;
     }
   };
   const phasePriority = (phase: AgentActivityPhase): number => {

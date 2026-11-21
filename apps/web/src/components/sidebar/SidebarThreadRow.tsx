@@ -756,7 +756,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 ? "Goal"
                 : "Working",
           icon: "working" as const,
-          className: "text-info-foreground",
+          className: "text-muted-foreground",
         }
       : status === "waiting"
         ? {
@@ -774,19 +774,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             ? {
                 label: "Input",
                 icon: "input" as const,
-                className: "text-indigo-600 dark:text-indigo-300",
+                className: "text-warning-foreground",
               }
             : status === "request"
               ? {
                   label: "Request",
                   icon: "request" as const,
-                  className: "text-guest-foreground",
+                  className: "text-warning-foreground",
                 }
               : status === "limited"
                 ? {
                     label: "Limited",
                     icon: "failed" as const,
-                    className: "text-warning-foreground",
+                    className: "text-muted-foreground",
                   }
                 : status === "failed"
                   ? {

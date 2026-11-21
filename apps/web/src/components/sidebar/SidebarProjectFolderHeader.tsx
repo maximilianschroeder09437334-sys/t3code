@@ -15,7 +15,7 @@ const FOLDER_DOT_CLASS_NAME = {
   attention: "bg-warning",
   failed: "bg-error",
   unread: "bg-success",
-  working: "bg-info",
+  working: "bg-muted-foreground",
 } as const;
 
 const FOLDER_DOT_LABEL = {

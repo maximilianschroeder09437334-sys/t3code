@@ -440,6 +440,8 @@ describe("resolveThreadStatusPill", () => {
     expect(resolveSidebarThreadStatus(blocked)).toBe("waiting");
     expect(resolveThreadStatusPill({ thread: blocked })).toMatchObject({
       label: "Waiting",
+      colorClass: "text-muted-foreground",
+      dotClass: "bg-muted-foreground",
       pulse: false,
     });
 
@@ -447,7 +449,24 @@ describe("resolveThreadStatusPill", () => {
     expect(resolveSidebarThreadStatus(resumed)).toBe("working");
     expect(resolveThreadStatusPill({ thread: resumed })).toMatchObject({
       label: "Working",
+      colorClass: "text-muted-foreground",
+      dotClass: "bg-muted-foreground",
       pulse: true,
+    });
+
+    expect(
+      resolveThreadStatusPill({ thread: { ...baseThread, hasPendingApprovals: true } }),
+    ).toMatchObject({
+      label: "Pending Approval",
+      colorClass: "text-warning-foreground",
+      dotClass: "bg-warning",
+    });
+    expect(
+      resolveThreadStatusPill({ thread: { ...baseThread, hasPendingUserInput: true } }),
+    ).toMatchObject({
+      label: "Awaiting Input",
+      colorClass: "text-warning-foreground",
+      dotClass: "bg-warning",
     });
   });
 
@@ -468,8 +487,8 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({
       label: "Waiting",
-      colorClass: "text-sidebar-muted-foreground",
-      dotClass: "bg-sidebar-muted-foreground",
+      colorClass: "text-muted-foreground",
+      dotClass: "bg-muted-foreground",
       pulse: false,
     });
   });
@@ -488,7 +507,12 @@ describe("resolveThreadStatusPill", () => {
           },
         },
       }),
-    ).toMatchObject({ label: "Plan Ready", pulse: false });
+    ).toMatchObject({
+      label: "Plan Ready",
+      colorClass: "text-warning-foreground",
+      dotClass: "bg-warning",
+      pulse: false,
+    });
   });
 
   it("does not manufacture completed state without a client visit marker", () => {
@@ -522,7 +546,12 @@ describe("resolveThreadStatusPill", () => {
           },
         },
       }),
-    ).toMatchObject({ label: "Completed", pulse: false });
+    ).toMatchObject({
+      label: "Completed",
+      colorClass: "text-success-foreground",
+      dotClass: "bg-success",
+      pulse: false,
+    });
   });
 
   it("shows failed, not completed, when the unseen run failed", () => {
@@ -541,7 +570,12 @@ describe("resolveThreadStatusPill", () => {
           },
         },
       }),
-    ).toMatchObject({ label: "Failed", pulse: false });
+    ).toMatchObject({
+      label: "Failed",
+      colorClass: "text-error-foreground",
+      dotClass: "bg-error",
+      pulse: false,
+    });
   });
 
   it("shows failed, not plan ready, when a plan run proposed a plan and then failed", () => {
