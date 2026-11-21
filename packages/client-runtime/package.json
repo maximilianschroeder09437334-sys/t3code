@@ -43,6 +43,10 @@
       "types": "./src/handoff.ts",
       "default": "./src/handoff.ts"
     },
+    "./state/homeDashboard": {
+      "types": "./src/state/homeDashboard.ts",
+      "default": "./src/state/homeDashboard.ts"
+    },
     "./device/stream": {
       "types": "./src/device/stream.ts",
       "default": "./src/device/stream.ts"

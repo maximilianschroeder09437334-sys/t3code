@@ -11,7 +11,7 @@ import { Platform } from "react-native";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
 
-import { useProjects } from "../../state/entities";
+import { useDelegatedUnderParent, useProjects } from "../../state/entities";
 import { steadyNavigationThreadShellsAtom } from "../../state/threads";
 import { useLaunchingThreads, usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useWorkspaceState } from "../../state/workspace";
@@ -42,6 +42,7 @@ import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspace
 import { WorkspaceListEmptyDetail } from "../layout/workspace/WorkspaceListEmptyDetail";
 import { WorkspaceListHeader } from "../layout/workspace/WorkspaceListHeader";
 import { buildHomeListFilterMenuItems, homeListFilterEnvironments } from "./home-list-filter-menu";
+import { HomeDashboardScreen } from "./HomeDashboardScreen";
 
 export function HomeRouteScreen() {
   const nativePrimaryColumn = use(NativePrimaryColumnContext);
@@ -49,6 +50,7 @@ export function HomeRouteScreen() {
   const { primarySidebarSearchQuery } = useWorkspacePaneState();
   const selectDetail = useSelectWorkspaceDetail();
   const projects = useProjects();
+  const delegatedUnderParent = useDelegatedUnderParent();
   // Stop rebuilding the streaming thread list while Thread covers Home.
   const visible = useHomeRouteVisible();
   const threads = useLaunchingThreads(
@@ -61,6 +63,7 @@ export function HomeRouteScreen() {
   const selectTab = useSelectWorkspaceTab();
   const workspace = useWorkspaceTabs();
   const [localSearchQuery, setLocalSearchQuery] = useState("");
+  const [showHomeDashboard, setShowHomeDashboard] = useState(false);
   const searchQuery =
     Platform.OS === "android"
       ? primarySidebarSearchQuery
@@ -147,6 +150,30 @@ export function HomeRouteScreen() {
   const selectedProjectKey =
     resolveHomeProjectFilterScope(projectScopes, projects, listOptions)?.key ?? null;
 
+  if (showHomeDashboard) {
+    return (
+      <HomeDashboardScreen
+        projects={projects}
+        threads={threads}
+        delegatedUnderParent={delegatedUnderParent}
+        onBack={() => setShowHomeDashboard(false)}
+        onOpenThread={handleSelectThread}
+        onSettleThread={settleThread}
+        onSnoozeThread={snoozeThread}
+        onNewThread={(project) => {
+          selectThreadRoute({
+            draft: {
+              requestId: uuidv4(),
+              environmentId: String(project.environmentId),
+              projectId: String(project.id),
+              title: project.title,
+            },
+          });
+        }}
+      />
+    );
+  }
+
   if (layout.usesSplitView && !nativePrimaryColumn) {
     return (
       <WorkspaceListEmptyDetail
@@ -220,6 +247,8 @@ export function HomeRouteScreen() {
             });
           }}
           onStartNewTask={startNewTask}
+          onOpenHome={() => setShowHomeDashboard(true)}
+          delegatedUnderParent={delegatedUnderParent}
           pendingTasks={pendingTasks}
           projectGroupingMode={listOptions.projectGroupingMode}
           projects={projects}

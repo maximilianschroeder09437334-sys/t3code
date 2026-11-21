@@ -28,6 +28,7 @@ import {
 import {
   Platform,
   ScrollView,
+  Pressable,
   useWindowDimensions,
   View,
   type ScrollViewProps,
@@ -46,6 +47,7 @@ import {
   deriveCenteredContentHorizontalPadding,
 } from "../../lib/layout";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { AppText as Text } from "../../components/ui/AppText";
 import { FloatingActionButton } from "../../components/ui/FloatingActionButton";
 import type { WorkspaceEnvironment, WorkspaceState } from "../../state/workspaceModel";
 import type { SavedRemoteConnection } from "../../lib/connection";
@@ -102,6 +104,11 @@ import { holdLaunchSplashForHomeRows, settleLaunchSplashHomeRows } from "./home-
 import { useWorkspaceTabs } from "../layout/workspace/WorkspaceTabsContext";
 import { ThreadListFilters } from "./ThreadListFilters";
 import { deriveHomeEmptyState } from "./home-empty-state";
+import {
+  countHomeDashboardRows,
+  homeCountSegments,
+} from "@t3tools/client-runtime/state/homeDashboard";
+import { deriveMobileHomeRows } from "./homeDashboardRows";
 
 interface HomeScreenProps {
   /** Whether this list is the one on screen; see `useHomeRouteVisible`. */
@@ -125,6 +132,8 @@ interface HomeScreenProps {
   readonly onAddConnection: () => void;
   readonly onOpenSettings: () => void;
   readonly onStartNewTask: () => void;
+  readonly onOpenHome: () => void;
+  readonly delegatedUnderParent: ReadonlySet<string>;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
   readonly onDeleteThread: (thread: EnvironmentThreadShell) => void;
@@ -678,6 +687,41 @@ export function HomeScreen(props: HomeScreenProps) {
   const v2ListHeader = (
     <>
       {listHeader}
+      {(() => {
+        const homeRows = deriveMobileHomeRows({
+          threads: props.threads,
+          projects: props.projects,
+          now,
+          delegatedUnderParent: props.delegatedUnderParent,
+        });
+        const counts = countHomeDashboardRows(homeRows);
+        return (
+          <Pressable
+            accessibilityRole="button"
+            onPress={props.onOpenHome}
+            className="mb-2 rounded-xl border border-border bg-card px-3 py-2"
+          >
+            <Text className="text-sm font-semibold text-foreground">Home</Text>
+            <Text className="text-xs">
+              {homeCountSegments(counts).map((item, index) => (
+                <Text
+                  key={item.section}
+                  className={
+                    item.section === "needs"
+                      ? "text-warning-foreground"
+                      : item.section === "running"
+                        ? "text-info-foreground"
+                        : "text-success"
+                  }
+                >
+                  {index ? " | " : ""}
+                  {item.text}
+                </Text>
+              ))}
+            </Text>
+          </Pressable>
+        );
+      })()}
       {Platform.OS === "ios" && workspace ? (
         <ThreadListFilters
           gutter={sidebarSurface ? 8 : 0}

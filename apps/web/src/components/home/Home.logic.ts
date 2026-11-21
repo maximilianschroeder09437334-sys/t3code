@@ -1,4 +1,3 @@
-import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   scopedProjectKey,
@@ -8,17 +7,15 @@ import {
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import type { ScopedProjectRef } from "@t3tools/contracts";
-import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { resolveSidebarThreadStatus } from "../Sidebar.logic";
+import {
+  countHomeDashboardRows,
+  deriveHomeDashboardRows,
+  type HomeDashboardRow,
+} from "@t3tools/client-runtime/state/homeDashboard";
 
 export type HomeSection = "needs" | "done" | "running";
-export interface HomeRow {
-  readonly thread: EnvironmentThreadShell;
-  readonly section: HomeSection;
-  readonly projectName: string;
-  readonly projectKey: string;
-  readonly predecessors: ReadonlyArray<EnvironmentThreadShell>;
-}
+export type HomeRow = HomeDashboardRow;
 export interface HomeCounts {
   readonly needs: number;
   readonly done: number;
@@ -174,32 +171,6 @@ export function homeComposerProjectRef(
   return project ? scopeProjectRef(project.environmentId, project.id) : null;
 }
 
-function sectionFor(thread: EnvironmentThreadShell): HomeSection {
-  const status = resolveSidebarThreadStatus(thread);
-  if (status === "approval" || status === "input" || status === "request") return "needs";
-  return status === "preparing" ||
-    status === "working" ||
-    status === "waiting" ||
-    status === "limited"
-    ? "running"
-    : "done";
-}
-
-function workstream(thread: EnvironmentThreadShell): string {
-  const prefix = thread.title.split(": ", 1)[0]?.trim();
-  return prefix ? prefix.toLocaleLowerCase() : thread.id;
-}
-
-function workstreamKey(thread: EnvironmentThreadShell): string {
-  return `${scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId))}\u0001${workstream(thread)}`;
-}
-
-function activity(thread: EnvironmentThreadShell): number {
-  return Date.parse(thread.latestUserMessageAt ?? thread.updatedAt) || 0;
-}
-
-const NO_DELEGATED: ReadonlySet<string> = new Set();
-
 export function deriveHomeRows(input: {
   threads: ReadonlyArray<EnvironmentThreadShell>;
   projects: ReadonlyArray<EnvironmentProject>;
@@ -208,81 +179,11 @@ export function deriveHomeRows(input: {
   /** Tasks delegated from a listed parent; the sidebar shows those under the parent. */
   delegatedUnderParent?: ReadonlySet<string>;
 }): ReadonlyArray<HomeRow> {
-  const projects = new Map(
-    input.projects.map((project) => [
-      scopedProjectKey(scopeProjectRef(project.environmentId, project.id)),
-      project,
-    ]),
-  );
-  const usable = input.threads.filter(
-    (thread) =>
-      thread.archivedAt === null &&
-      thread.deletedAt === null &&
-      // Same rule as the sidebar: subagents, side chats and delegated tasks live under their
-      // parent. Forks are ordinary top-level threads and stay.
-      !isShownUnderParent(
-        { environmentId: thread.environmentId, threadId: thread.id },
-        thread.lineage,
-        input.delegatedUnderParent ?? NO_DELEGATED,
-      ) &&
-      !effectiveSnoozed(thread, { now: input.now }),
-  );
-  const active = usable.filter((thread) => thread.settledOverride !== "settled");
-  const newestByWorkstream = new Map<string, EnvironmentThreadShell>();
-  for (const thread of active) {
-    const key = workstreamKey(thread);
-    const previous = newestByWorkstream.get(key);
-    if (previous === undefined || activity(thread) > activity(previous))
-      newestByWorkstream.set(key, thread);
-  }
-  const rows: HomeRow[] = active.map((thread) => {
-    const projectKeyValue = scopedProjectKey(
-      scopeProjectRef(thread.environmentId, thread.projectId),
-    );
-    const project = projects.get(projectKeyValue);
-    const predecessors =
-      newestByWorkstream.get(workstreamKey(thread))?.id !== thread.id
-        ? []
-        : usable
-            .filter(
-              (candidate) =>
-                candidate.settledOverride === "settled" &&
-                workstreamKey(candidate) === workstreamKey(thread) &&
-                activity(candidate) < activity(thread),
-            )
-            .sort((a, b) => activity(b) - activity(a))
-            .slice(0, 10);
-    return {
-      thread,
-      section: sectionFor(thread),
-      projectName: project?.title ?? "Unknown project",
-      projectKey: projectKeyValue,
-      predecessors,
-    };
-  });
-  const sectionOrder: Record<HomeSection, number> = { needs: 0, done: 1, running: 2 };
-  const projectOrder = new Map(
-    [...input.projects].map((project, index) => [
-      scopedProjectKey(scopeProjectRef(project.environmentId, project.id)),
-      index,
-    ]),
-  );
-  return rows.sort(
-    (a, b) =>
-      sectionOrder[a.section] - sectionOrder[b.section] ||
-      (projectOrder.get(a.projectKey) ?? Infinity) - (projectOrder.get(b.projectKey) ?? Infinity) ||
-      activity(b.thread) - activity(a.thread),
-  );
+  return deriveHomeDashboardRows(input);
 }
 
 export function countHomeRows(rows: ReadonlyArray<HomeRow>): HomeCounts {
-  const counts = {
-    needs: 0,
-    done: 0,
-    running: 0,
-  };
-  for (const row of rows) counts[row.section] += 1;
-  return counts;
+  return countHomeDashboardRows(rows);
 }
 
 export function homeThreadRef(thread: EnvironmentThreadShell) {
