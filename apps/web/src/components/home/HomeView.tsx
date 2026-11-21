@@ -17,6 +17,8 @@ import { useEnvironmentProviders } from "../../state/environments";
 import { useAtomValue } from "@effect/atom-react";
 import { environmentThreadDetails, threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
+import { newMessageId } from "../../lib/utils";
 import { deriveHomeRows, countHomeRows, homeThreadRef, type HomeSection } from "./Home.logic";
 
 const labels: Record<HomeSection, string> = {
@@ -171,7 +173,7 @@ export function HomeView() {
                           {thread.runtime?.status === "failed" ? (
                             <span className="text-error">Failed</span>
                           ) : section === "running" ? (
-                            "Updated"
+                            `Updated ${formatRelativeTimeLabel(thread.updatedAt, Date.parse(`${now}:00.000Z`))}`
                           ) : null}
                         </span>
                       </div>
@@ -322,7 +324,7 @@ export function HomeView() {
           </div>
           <textarea
             className="min-h-12 w-full resize-y bg-transparent text-sm outline-none"
-            placeholder="Enter starts a new thread"
+            placeholder="Enter opens a new thread with this prompt"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={(event) => {
@@ -351,6 +353,9 @@ function HomeNeedsPanel({ thread }: { thread: ReturnType<typeof useVisibleThread
     reportFailure: false,
   });
   const respondToUserInput = useOrchestrationCommand(threadEnvironment.respondToUserInput, {
+    reportFailure: false,
+  });
+  const startTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
   const { snoozeThread } = useThreadActions();
@@ -406,6 +411,18 @@ function HomeNeedsPanel({ thread }: { thread: ReturnType<typeof useVisibleThread
       },
     });
     if (result._tag === "Success") {
+      if (reason) {
+        await startTurn({
+          environmentId: thread.environmentId,
+          input: {
+            threadId: thread.id,
+            message: { messageId: newMessageId(), role: "user", text: reason, attachments: [] },
+            modelSelection: thread.modelSelection,
+            runtimeMode: thread.runtimeMode,
+            interactionMode: thread.interactionMode,
+          },
+        });
+      }
       setRejecting(false);
       setRejectReason("");
       setSent(true);
