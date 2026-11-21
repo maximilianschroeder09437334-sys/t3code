@@ -383,20 +383,25 @@ it.effect.each(
         yield* Fiber.join(delivery);
       }
       if (delivery !== null && !question) {
-        const requeued = yield* orchestrator.getThreadProjection(threadId);
-        assert.isTrue(requeued.runs.some((run) => run.status === "queued"));
-        assert.isFalse(
-          requeued.visibleTurnItems.some(
-            ({ item }) => item.type === "user_message" && item.messageId === messageId,
-          ),
-          "a steer that fell back to the queue must not appear delivered",
+        // The turn settled while the steer was in flight, so the fallback starts the message as
+        // the next run at once rather than queueing it behind a turn that already ended.
+        const fallback = yield* orchestrator.getThreadProjection(threadId);
+        const fallbackRun = fallback.runs.find((run) => run.userMessageId === messageId);
+        assert.notEqual(fallbackRun?.id, first.runId);
+        assert.equal(fallbackRun?.status, "starting");
+        assert.isFalse(fallback.runs.some((run) => run.status === "queued"));
+        assert.equal(
+          fallback.messages.find((message) => message.id === messageId)?.runId,
+          fallbackRun?.id,
         );
-        const item = requeued.turnItems.find(
+        const item = fallback.turnItems.find(
           (item) => item.type === "user_message" && item.messageId === messageId,
         );
-        assert.equal(item?.status, "pending");
-        assert.isNull(item?.startedAt);
-        assert.isNull(item?.completedAt);
+        assert.equal(
+          item?.runId,
+          fallbackRun?.id,
+          "a steer that missed the turn must not appear delivered into it",
+        );
       }
       if (timing === "before dispatch") yield* dispatchSteer;
       yield* worker.drain();

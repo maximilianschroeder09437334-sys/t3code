@@ -73,6 +73,13 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
+// What a committed write publishes besides its events: run outcomes, and handoff starts made ready.
+interface AppliedEvents {
+  readonly outcomes: ReadonlyArray<RunOutcome>;
+  readonly readyHandoffs: number;
+}
+const nothingApplied: AppliedEvents = { outcomes: [], readyHandoffs: 0 };
+
 interface ProviderBatchPublication {
   readonly publish: Array<Effect.Effect<void>>;
   eventCount: number;
@@ -316,32 +323,23 @@ const layerBase: Layer.Layer<
         .pipe(Effect.map((thread) => thread.lineage.relationshipToParent === "subagent")),
     );
     // Recorded before publication, so an interrupted publish cannot lose a committed outcome.
+    // Publication holds the publish lane, so it must not query: a writer whose transaction holds the
+    // only connection waits on that lane, and the query would wait on the writer.
     const publishStoredEvents = (
       events: ReadonlyArray<OrchestrationV2StoredEvent>,
-      outcomes: ReadonlyArray<RunOutcome>,
+      applied: AppliedEvents,
     ) =>
-      runOutcomes.record(outcomes).pipe(
-        Effect.andThen(eventStore.publishCommitted(events)),
-        Effect.andThen(publishLiveEvents(events)),
-        Effect.andThen(
-          Effect.gen(function* () {
-            for (const stored of events) {
-              if (
-                stored.event.type !== "run.updated" ||
-                !["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(
-                  stored.event.payload.status,
-                )
-              )
-                continue;
-              const ready = yield* effectOutbox
-                .get(`core-handoff:${stored.event.threadId}:ready:${stored.event.payload.id}`)
-                .pipe(Effect.orDie);
-              if (Option.isSome(ready) && ready.value.status === "pending")
-                yield* effectOutbox.notifyAvailable();
-            }
-          }),
-        ),
-      );
+      runOutcomes
+        .record(applied.outcomes)
+        .pipe(
+          Effect.andThen(eventStore.publishCommitted(events)),
+          Effect.andThen(publishLiveEvents(events)),
+          Effect.andThen(
+            applied.readyHandoffs > 0
+              ? effectOutbox.notifyAvailable(applied.readyHandoffs)
+              : Effect.void,
+          ),
+        );
 
     // Serialize commit and publish; reordered publication makes clients drop earlier sequences.
     const publishLane = yield* Semaphore.make(1);
@@ -648,8 +646,25 @@ const layerBase: Layer.Layer<
               updated_at = excluded.updated_at
           `;
         }
+        // Read pending handoff starts here too, on this transaction's connection, so publication
+        // can wake a worker for them without querying while it holds the publish lane.
+        let readyHandoffs = 0;
+        for (const stored of storedEvents) {
+          if (
+            stored.event.type !== "run.updated" ||
+            !["completed", "failed", "interrupted", "cancelled", "rolled_back"].includes(
+              stored.event.payload.status,
+            )
+          )
+            continue;
+          const ready = yield* effectOutbox.get(
+            `core-handoff:${stored.event.threadId}:ready:${stored.event.payload.id}`,
+          );
+          if (Option.isSome(ready) && ready.value.status === "pending") readyHandoffs += 1;
+        }
         // Read lineage here, on the connection this transaction holds; see makeRunOutcomeRecorder.
-        return yield* runOutcomes.prepare(storedEvents);
+        const outcomes = yield* runOutcomes.prepare(storedEvents);
+        return { outcomes, readyHandoffs } satisfies AppliedEvents;
       });
 
     // The enclosing write or commit span already traces this per-event projection merge.
@@ -699,7 +714,7 @@ const layerBase: Layer.Layer<
                 AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
               LIMIT 1
             `;
-            if (owners.length > 0) return { committed: [], outcomes: [] };
+            if (owners.length > 0) return { committed: [], outcomes: nothingApplied };
           }
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
