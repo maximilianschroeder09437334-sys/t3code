@@ -5,6 +5,7 @@ import {
   countHomeRows,
   deriveHomeRows,
   formatHomeCounts,
+  formatHomeDuration,
   formatHomeTimeLabel,
   homeComposerProjectRef,
 } from "./Home.logic";
@@ -53,6 +54,43 @@ describe("deriveHomeRows", () => {
       makeThreadFixture({ id: ThreadId.make("settled"), settledOverride: "settled" }),
     ]);
     expect(rows).toHaveLength(0);
+  });
+
+  it("matches the sidebar: drops subagent, side chat, delegated, settled and snoozed, keeps forks", () => {
+    const lineage = (id: string, extra: Record<string, unknown>) =>
+      ({
+        rootThreadId: ThreadId.make("parent"),
+        parentThreadId: ThreadId.make("parent"),
+        relationshipToParent: null,
+        ...extra,
+      }) as never;
+    const threads = [
+      makeThreadFixture({ id: ThreadId.make("top") }),
+      makeThreadFixture({
+        id: ThreadId.make("fork"),
+        lineage: lineage("fork", { relationshipToParent: "fork" }),
+      }),
+      makeThreadFixture({
+        id: ThreadId.make("sub"),
+        lineage: lineage("sub", { relationshipToParent: "subagent" }),
+      }),
+      makeThreadFixture({
+        id: ThreadId.make("side"),
+        lineage: lineage("side", { sideChat: true }),
+      }),
+      makeThreadFixture({ id: ThreadId.make("deleg") }),
+      makeThreadFixture({ id: ThreadId.make("settled"), settledOverride: "settled" }),
+      makeThreadFixture({ id: ThreadId.make("snoozed"), snoozedUntil: "2026-11-22T00:00:00Z" }),
+    ];
+    const rows = deriveHomeRows({
+      threads,
+      projects: [project],
+      now: "2026-11-21T12:00:00Z",
+      lastVisitedAt: null,
+      delegatedUnderParent: new Set(["environment-test\u0000deleg"]),
+    });
+    expect(rows.map((row) => row.thread.id).sort()).toEqual(["fork", "top"]);
+    expect(countHomeRows(rows)).toEqual({ needs: 0, done: 2, running: 0 });
   });
 
   it("attaches older settled workstream threads to their unsettled successor", () => {
@@ -116,7 +154,7 @@ describe("Home display helpers", () => {
         now,
         "UTC",
       ),
-    ).toBe("waiting on you since 13:52 (8m)");
+    ).toBe("waiting on you for 8 min since 13:52");
     expect(
       formatHomeTimeLabel(
         makeThreadFixture({
@@ -136,7 +174,7 @@ describe("Home display helpers", () => {
         now,
         "UTC",
       ),
-    ).toBe("running 27m");
+    ).toBe("running 27 min");
     expect(
       formatHomeTimeLabel(
         makeThreadFixture({
@@ -146,7 +184,7 @@ describe("Home display helpers", () => {
         now,
         "UTC",
       ),
-    ).toBe("done 8m ago");
+    ).toBe("done 8 min ago");
     expect(
       formatHomeTimeLabel(
         makeThreadFixture({
@@ -160,7 +198,7 @@ describe("Home display helpers", () => {
         now,
         "UTC",
       ),
-    ).toBe("stopped 13:47");
+    ).toBe("stopped 13 min ago");
     expect(
       formatHomeTimeLabel(
         makeThreadFixture({
@@ -173,7 +211,36 @@ describe("Home display helpers", () => {
         now,
         "UTC",
       ),
-    ).toBe("running 90m");
+    ).toBe("running 2 h");
+  });
+
+  it("formats durations as rounded relative units with boundaries", () => {
+    const f = formatHomeDuration;
+    expect([f(0), f(1), f(59), f(59.7)]).toEqual(["0 min", "1 min", "59 min", "59 min"]);
+    expect([f(60), f(217), f(23 * 60 + 40)]).toEqual(["1 h", "4 h", "23 h"]);
+    expect([f(1440), f(2 * 1440), f(6.9 * 1440)]).toEqual(["1 day", "2 days", "6 days"]);
+    expect([f(7 * 1440), f(14 * 1440), f(34 * 1440)]).toEqual(["1 week", "2 weeks", "4 weeks"]);
+    expect([f(35 * 1440), f(4500), f(30000)]).toEqual(["1 month", "3 days", "3 weeks"]);
+    expect([f(60 * 1440), f(359 * 1440), f(365 * 1440), f(800 * 1440)]).toEqual([
+      "2 months",
+      "11 months",
+      "1 year",
+      "2 years",
+    ]);
+  });
+
+  it("drops the clock time when the wait began on an earlier day", () => {
+    expect(
+      formatHomeTimeLabel(
+        makeThreadFixture({
+          hasPendingUserInput: true,
+          pendingUserInputAt: "2026-11-19T13:52:00.000Z",
+          updatedAt: "2026-11-19T13:52:00.000Z",
+        }),
+        "2026-11-21T14:00:00.000Z",
+        "UTC",
+      ),
+    ).toBe("waiting on you for 2 days");
   });
 
   it("maps the chosen project chip to the selected scoped project", () => {

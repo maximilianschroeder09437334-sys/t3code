@@ -36,7 +36,7 @@ import { useThreadActions } from "../../hooks/useThreadActions";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { cn } from "../../lib/utils";
 import { sortScopedProjectsForSidebar, resolveSidebarThreadStatus } from "../Sidebar.logic";
-import { useProjects, useVisibleThreadShells } from "../../state/entities";
+import { useDelegatedUnderParent, useProjects, useVisibleThreadShells } from "../../state/entities";
 import { openCommandPalette } from "../../commandPaletteBus";
 import { useUiStateStore } from "../../uiStateStore";
 import { Button } from "../ui/button";
@@ -60,6 +60,7 @@ import { HomeSnoozeMenu } from "./HomeSnoozeMenu";
 import {
   countHomeRows,
   deriveHomeRows,
+  formatHomeDuration,
   formatHomeTimeLabel,
   homeComposerProjectRef,
   homeCountSegments,
@@ -88,6 +89,16 @@ function projectKeyOf(project: EnvironmentProject): string {
   return scopedProjectKey(scopeProjectRef(project.environmentId, project.id));
 }
 
+const ROW_CLICK_IGNORED =
+  "button, a, input, textarea, select, label, [role='button'], [role='menuitem'], [data-home-no-open]";
+
+/** A click opens the thread unless it lands on a control, or is a text selection. */
+function shouldOpenFromRowClick(row: HTMLElement, target: EventTarget): boolean {
+  if (!(target instanceof Element) || !row.contains(target)) return false;
+  if (target.closest(ROW_CLICK_IGNORED) !== null) return false;
+  return window.getSelection()?.toString() === "";
+}
+
 export function HomeView() {
   const projects = useProjects();
   const threads = useVisibleThreadShells();
@@ -96,7 +107,14 @@ export function HomeView() {
   // as local time and every age shifts by the UTC offset.
   const now = `${useNowMinute()}:00.000Z`;
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const rows = deriveHomeRows({ threads, projects, now, lastVisitedAt: null });
+  const delegatedUnderParent = useDelegatedUnderParent();
+  const rows = deriveHomeRows({
+    threads,
+    projects,
+    now,
+    lastVisitedAt: null,
+    delegatedUnderParent,
+  });
   const counts = countHomeRows(rows);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -331,7 +349,7 @@ export function HomeView() {
                     );
                     const timing =
                       group.rows.length >= 2 && (section === "needs" || section === "running")
-                        ? `${section === "needs" ? "oldest waiting" : "longest running"} ${durationLabel(age)}`
+                        ? `${section === "needs" ? "oldest waiting" : "longest running"} ${formatHomeDuration(age)}`
                         : null;
                     const groupKey = project ? projectKeyOf(project) : OTHER_PROJECTS_KEY;
                     return (
@@ -514,7 +532,14 @@ function HomeRowCard({
   return (
     <article
       data-home-item={encodeURIComponent(itemKey)}
-      className="rounded-xl border border-border/70 px-3.5 py-3"
+      tabIndex={0}
+      onClick={(event) => {
+        if (shouldOpenFromRowClick(event.currentTarget, event.target)) onOpen(thread);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && event.target === event.currentTarget) onOpen(thread);
+      }}
+      className="cursor-pointer rounded-xl border border-border/70 px-3.5 py-3 outline-none transition-colors hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-ring"
     >
       {row.section === "needs" ? (
         <>
@@ -726,13 +751,6 @@ function HomeThreadComposer({
       homeProjectControl={projectControl}
     />
   );
-}
-
-function durationLabel(minutes: number): string {
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const remaining = minutes % 60;
-  return remaining === 0 ? `${hours}h` : `${hours}h ${remaining}m`;
 }
 
 function HomeQuestionIndex({

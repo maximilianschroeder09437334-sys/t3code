@@ -924,6 +924,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projects,
     now: `${homeNow}:00.000Z`,
     lastVisitedAt: null,
+    delegatedUnderParent,
   });
   const homeCounts = countHomeRows(homeRows);
   const router = useRouter();

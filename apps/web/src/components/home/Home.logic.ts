@@ -8,6 +8,7 @@ import {
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import type { ScopedProjectRef } from "@t3tools/contracts";
+import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
 import { resolveSidebarThreadStatus } from "../Sidebar.logic";
 
 export type HomeSection = "needs" | "done" | "running";
@@ -48,12 +49,38 @@ export function homeCountSegments(
   ];
 }
 
+const HOUR = 60;
+const DAY = 24 * HOUR;
+const WEEK = 7 * DAY;
+const MONTH = 30 * DAY;
+const YEAR = 365 * DAY;
+
+/** Rounded relative duration shared by every Home time label: "5 min", "3 h", "2 days". */
+export function formatHomeDuration(minutes: number): string {
+  const total = Number.isFinite(minutes) ? Math.max(0, minutes) : 0;
+  const unit = (size: number, max: number, one: string, many: string) => {
+    const value = Math.min(max, Math.max(1, Math.round(total / size)));
+    return `${value} ${value === 1 ? one : many}`;
+  };
+  if (total < HOUR) return `${Math.min(59, Math.round(total))} min`;
+  if (total < DAY) return unit(HOUR, 23, "h", "h");
+  if (total < WEEK) return unit(DAY, 6, "day", "days");
+  if (total < 5 * WEEK) return unit(WEEK, 4, "week", "weeks");
+  if (total < 12 * MONTH) return unit(MONTH, 11, "month", "months");
+  return unit(YEAR, Number.MAX_SAFE_INTEGER, "year", "years");
+}
+
 function elapsedLabel(from: string | null | undefined, now: number): string | null {
   if (!from) return null;
   const timestamp = Date.parse(from);
   if (!Number.isFinite(timestamp)) return null;
-  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
-  return `${minutes}m`;
+  return formatHomeDuration(Math.max(0, (now - timestamp) / 60_000));
+}
+
+function isSameLocalDay(a: string, b: number, timeZone?: string): boolean {
+  const day = (ms: number) =>
+    new Intl.DateTimeFormat("en-CA", timeZone ? { timeZone } : undefined).format(new Date(ms));
+  return day(Date.parse(a)) === day(b);
 }
 
 export function homeDurationMinutes(thread: EnvironmentThreadShell, now: string): number {
@@ -104,12 +131,13 @@ export function formatHomeTimeLabel(
   const status = resolveSidebarThreadStatus(thread);
   if (status === "approval" || status === "input" || status === "request") {
     const since = thread.pendingUserInputAt ?? thread.latestRun?.completedAt ?? thread.updatedAt;
-    const at = clockLabel(since, timeZone) ?? "--:--";
-    const age = elapsedLabel(since, nowMs) ?? "0m";
-    return `waiting on you since ${at} (${age})`;
+    const age = elapsedLabel(since, nowMs) ?? formatHomeDuration(0);
+    const at = isSameLocalDay(since, nowMs, timeZone) ? clockLabel(since, timeZone) : null;
+    return `waiting on you for ${age}${at ? ` since ${at}` : ""}`;
   }
   if (homeThreadWasStopped(thread)) {
-    return `stopped ${clockLabel(thread.latestRun?.completedAt ?? thread.updatedAt, timeZone) ?? "--:--"}`;
+    const at = thread.latestRun?.completedAt ?? thread.updatedAt;
+    return `stopped ${elapsedLabel(at, nowMs) ?? formatHomeDuration(0)} ago`;
   }
   if (
     status === "working" ||
@@ -123,15 +151,14 @@ export function formatHomeTimeLabel(
     });
     const fallback =
       thread.latestRun?.startedAt ?? thread.latestRun?.requestedAt ?? thread.updatedAt;
-    const timestamp = startedAt ?? fallback;
-    const age = elapsedLabel(timestamp, nowMs);
-    return `running ${age ?? "0m"}`;
+    return `running ${elapsedLabel(startedAt ?? fallback, nowMs) ?? formatHomeDuration(0)}`;
   }
   if (status === "failed") {
-    return `failed ${clockLabel(thread.latestRun?.completedAt ?? thread.updatedAt, timeZone) ?? "--:--"}`;
+    const at = thread.latestRun?.completedAt ?? thread.updatedAt;
+    return `failed ${elapsedLabel(at, nowMs) ?? formatHomeDuration(0)} ago`;
   }
   const completedAt = thread.latestRun?.completedAt ?? thread.updatedAt;
-  return `done ${elapsedLabel(completedAt, nowMs) ?? "0m"} ago`;
+  return `done ${elapsedLabel(completedAt, nowMs) ?? formatHomeDuration(0)} ago`;
 }
 
 export function homeComposerProjectRef(
@@ -171,11 +198,15 @@ function activity(thread: EnvironmentThreadShell): number {
   return Date.parse(thread.latestUserMessageAt ?? thread.updatedAt) || 0;
 }
 
+const NO_DELEGATED: ReadonlySet<string> = new Set();
+
 export function deriveHomeRows(input: {
   threads: ReadonlyArray<EnvironmentThreadShell>;
   projects: ReadonlyArray<EnvironmentProject>;
   now: string;
   lastVisitedAt: string | null;
+  /** Tasks delegated from a listed parent; the sidebar shows those under the parent. */
+  delegatedUnderParent?: ReadonlySet<string>;
 }): ReadonlyArray<HomeRow> {
   const projects = new Map(
     input.projects.map((project) => [
@@ -187,7 +218,13 @@ export function deriveHomeRows(input: {
     (thread) =>
       thread.archivedAt === null &&
       thread.deletedAt === null &&
-      thread.lineage.relationshipToParent !== "subagent" &&
+      // Same rule as the sidebar: subagents, side chats and delegated tasks live under their
+      // parent. Forks are ordinary top-level threads and stay.
+      !isShownUnderParent(
+        { environmentId: thread.environmentId, threadId: thread.id },
+        thread.lineage,
+        input.delegatedUnderParent ?? NO_DELEGATED,
+      ) &&
       !effectiveSnoozed(thread, { now: input.now }),
   );
   const active = usable.filter((thread) => thread.settledOverride !== "settled");
