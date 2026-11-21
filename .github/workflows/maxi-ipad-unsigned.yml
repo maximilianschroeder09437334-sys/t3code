@@ -55,14 +55,14 @@ jobs:
           with open(sys.argv[1], encoding="utf-8") as source:
               config = json.load(source)
           assert config["name"] == "T3 Code Maxi"
-          assert config["version"] == "2.2.1"
-          assert config["ios"]["buildNumber"] == "5"
+          assert config["version"] == "2.2.2"
+          assert config["ios"]["buildNumber"] == "6"
           assert config["ios"]["bundleIdentifier"] == "com.maximilian.t3code.mobile"
           assert config["ios"]["supportsTablet"] is True
           assert config["scheme"] == ["t3code-maxi", "t3code-preview"]
           assert config["updates"]["enabled"] is False
           assert "appleTeamId" not in config["ios"]
-          print("Verified resolved Maxi config: 2.2.1 (5), tablet support, updates disabled, personal-team iOS.")
+          print("Verified resolved Maxi config: 2.2.2 (6), tablet support, updates disabled, personal-team iOS.")
           PY
       - name: Generate iOS project
         working-directory: apps/mobile
@@ -100,8 +100,8 @@ jobs:
           schemes = {scheme for entry in info.get("CFBundleURLTypes", []) for scheme in entry.get("CFBundleURLSchemes", [])}
           assert info["CFBundleIdentifier"] == "com.maximilian.t3code.mobile"
           assert info["CFBundleDisplayName"] == "T3 Code Maxi"
-          assert info["CFBundleShortVersionString"] == "2.2.1"
-          assert info["CFBundleVersion"] == "5"
+          assert info["CFBundleShortVersionString"] == "2.2.2"
+          assert info["CFBundleVersion"] == "6"
           assert not os.path.exists(os.path.join(app, "embedded.mobileprovision"))
           expo_plist = os.path.join(app, "Expo.plist")
           with open(expo_plist, "rb") as source:
@@ -124,7 +124,7 @@ jobs:
                   "updatesEnabled": updates_enabled,
               }, out, indent=2)
               out.write("\n")
-          print("Verified Maxi identity, version 2.2.1 (5), disabled updates and no provisioning profile, phone/tablet support and native thread-link schemes.")
+          print("Verified Maxi identity, version 2.2.2 (6), disabled updates and no provisioning profile, phone/tablet support and native thread-link schemes.")
           PY
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "${apps[0]}" "$RUNNER_TEMP/ipa/Payload/"
