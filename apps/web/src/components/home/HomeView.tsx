@@ -19,6 +19,7 @@ import { environmentThreadDetails, threadEnvironment } from "../../state/threads
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { newMessageId } from "../../lib/utils";
+import { HomeSnoozeMenu } from "./HomeSnoozeMenu";
 import { deriveHomeRows, countHomeRows, homeThreadRef, type HomeSection } from "./Home.logic";
 
 const labels: Record<HomeSection, string> = {
@@ -64,7 +65,7 @@ export function HomeView() {
   const [projectKey, setProjectKey] = useState(readHomeProjectKey);
   const router = useRouter();
   const handleNewThread = useNewThreadHandler();
-  const { settleThread, snoozeThread } = useThreadActions();
+  const { settleThread } = useThreadActions();
   const activeProjects = projects.filter((project) => project.archivedAt == null);
   const orderedProjects = sortScopedProjectsForSidebar(activeProjects, threads, "updated_at");
   const selectedProject =
@@ -202,38 +203,16 @@ export function HomeView() {
                               <Button
                                 size="xs"
                                 variant="ghost"
-                                aria-label="Settle"
                                 onClick={() => void settleThread(homeThreadRef(thread))}
                               >
                                 <CheckIcon />
+                                Settle
                               </Button>
-                              <Button
-                                size="xs"
-                                variant="ghost"
-                                aria-label="Snooze"
-                                onClick={() =>
-                                  void snoozeThread(
-                                    homeThreadRef(thread),
-                                    new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-                                  )
-                                }
-                              >
-                                Snooze
-                              </Button>
+                              <HomeSnoozeMenu threadRef={homeThreadRef(thread)} />
                             </>
                           ) : null}
                         </div>
                       </div>
-                      <details
-                        className="mt-1 text-xs text-muted-foreground"
-                        open={
-                          itemKey ===
-                          threadKey({ environmentId: thread.environmentId, threadId: thread.id })
-                        }
-                      >
-                        <summary className="cursor-pointer">Details</summary>
-                        <p className="py-2">{thread.title || "No additional details available."}</p>
-                      </details>
                       {section === "needs" ? <HomeNeedsPanel thread={thread} /> : null}
                       {predecessors.length ? (
                         <details
@@ -249,7 +228,7 @@ export function HomeView() {
                         >
                           <summary className="cursor-pointer inline-flex items-center gap-1">
                             <ChevronDownIcon className="size-3" />
-                            {predecessors.length} threads
+                            {predecessors.length + 1} threads
                           </summary>
                           {predecessors.map((previous) => (
                             <button
@@ -358,7 +337,7 @@ function HomeNeedsPanel({ thread }: { thread: ReturnType<typeof useVisibleThread
   const startTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
-  const { snoozeThread } = useThreadActions();
+
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
   const [rejectReason, setRejectReason] = useState("");
   const [rejecting, setRejecting] = useState(false);
@@ -468,15 +447,7 @@ function HomeNeedsPanel({ thread }: { thread: ReturnType<typeof useVisibleThread
             >
               Reject
             </Button>
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() =>
-                void snoozeThread(ref, new Date(Date.now() + 60 * 60 * 1000).toISOString())
-              }
-            >
-              Snooze
-            </Button>
+            <HomeSnoozeMenu threadRef={ref} />
           </div>
         )}
       </div>
@@ -550,27 +521,14 @@ function HomeNeedsPanel({ thread }: { thread: ReturnType<typeof useVisibleThread
         <Button size="sm" onClick={() => void submitAnswers()}>
           Send answers
         </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() =>
-            void snoozeThread(ref, new Date(Date.now() + 60 * 60 * 1000).toISOString())
-          }
-        >
-          Snooze
-        </Button>
+        <HomeSnoozeMenu threadRef={ref} />
       </div>
     );
   }
   return (
-    <Button
-      className="mt-2"
-      size="xs"
-      variant="ghost"
-      onClick={() => void snoozeThread(ref, new Date(Date.now() + 60 * 60 * 1000).toISOString())}
-    >
-      Snooze
-    </Button>
+    <div className="mt-2">
+      <HomeSnoozeMenu threadRef={ref} />
+    </div>
   );
 }
 
