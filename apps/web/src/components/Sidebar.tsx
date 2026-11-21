@@ -922,7 +922,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const homeRows = deriveHomeRows({
     threads: homeThreads,
     projects,
-    now: homeNow,
+    now: `${homeNow}:00.000Z`,
     lastVisitedAt: null,
   });
   const homeCounts = countHomeRows(homeRows);
@@ -3218,7 +3218,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           </SidebarGroup>
         }
       >
-        <div className="sticky top-0 z-20 bg-sidebar px-2 pb-2">
+        <div className="sticky top-0 z-20 bg-sidebar px-2 pb-3">
           <HomeSidebarLink
             counts={homeCounts}
             active={router.state.location.pathname === "/"}

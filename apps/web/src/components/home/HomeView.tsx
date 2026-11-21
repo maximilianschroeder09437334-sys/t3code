@@ -1,31 +1,40 @@
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { projectKey, threadKey } from "@t3tools/client-runtime/state/entities";
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { ProviderDriverKind } from "@t3tools/contracts";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import {
   CheckIcon,
   ChevronDownIcon,
+  ChevronUpIcon,
   CircleCheckIcon,
   CircleStopIcon,
   Clock3Icon,
   FolderIcon,
   FolderPlusIcon,
   HomeIcon,
+  LayersIcon,
   LoaderCircleIcon,
+  PinIcon,
   SearchIcon,
 } from "lucide-react";
+import { isElectron } from "../../env";
 import {
   LAST_USED_PROJECT_STORAGE_KEY,
-  readLastUsedProjectKey,
+  lastUsedProjectKeySchema,
   resolveDefaultProjectRef,
   useNewThreadHandler,
   type NewThreadHandler,
 } from "../../hooks/useHandleNewThread";
+import { useLocalStorage } from "../../hooks/useLocalStorage";
+import { useScratchProject } from "../../hooks/useScratchProject";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useNowMinute } from "../../hooks/useNowMinute";
+import { cn } from "../../lib/utils";
 import { sortScopedProjectsForSidebar, resolveSidebarThreadStatus } from "../Sidebar.logic";
 import { useProjects, useVisibleThreadShells } from "../../state/entities";
 import { openCommandPalette } from "../../commandPaletteBus";
@@ -41,8 +50,10 @@ import {
   ComboboxTrigger,
 } from "../ui/combobox";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { ComposerControl } from "../chat/ComposerControl";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { useEnvironmentProviders } from "../../state/environments";
+import { useEnvironmentProviders, useEnvironments } from "../../state/environments";
 import { environmentThreadDetails, threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { HomeSnoozeMenu } from "./HomeSnoozeMenu";
@@ -70,22 +81,20 @@ const sectionColors: Record<HomeSection, string> = {
   done: "text-success",
   running: "text-info-foreground",
 };
-const projectKeyStorage = LAST_USED_PROJECT_STORAGE_KEY;
+/** Rows whose project is no longer listed (archived or still loading). */
+const OTHER_PROJECTS_KEY = "__other__";
 
-function persistProjectKey(key: string | null) {
-  try {
-    if (key) localStorage.setItem(projectKeyStorage, key);
-    else localStorage.removeItem(projectKeyStorage);
-  } catch {
-    /* Browser storage may be disabled. */
-  }
+function projectKeyOf(project: EnvironmentProject): string {
+  return scopedProjectKey(scopeProjectRef(project.environmentId, project.id));
 }
 
 export function HomeView() {
   const projects = useProjects();
   const threads = useVisibleThreadShells();
   const providersByEnvironment = useEnvironmentProviders();
-  const now = useNowMinute();
+  // The minute tick is a UTC "YYYY-MM-DDTHH:mm" string; without the zone, Date.parse reads it
+  // as local time and every age shifts by the UTC offset.
+  const now = `${useNowMinute()}:00.000Z`;
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const rows = deriveHomeRows({ threads, projects, now, lastVisitedAt: null });
   const counts = countHomeRows(rows);
@@ -93,40 +102,47 @@ export function HomeView() {
   const [query, setQuery] = useState("");
   const [questionTextByThread, setQuestionTextByThread] = useState<Record<string, string>>({});
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
-  const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(
-    readLastUsedProjectKey,
-  );
-  const [composerProjectKey, setComposerProjectKey] = useState<string | null>(
-    readLastUsedProjectKey,
+  // The app-wide last-used project (also written when a thread or draft opens), so the
+  // Home composer preselects the project used last.
+  const [lastUsedProjectKey, setLastUsedProjectKey] = useLocalStorage(
+    LAST_USED_PROJECT_STORAGE_KEY,
+    null,
+    lastUsedProjectKeySchema,
   );
   const router = useRouter();
   const { settleThread } = useThreadActions();
+  const { scratchEnvironmentId, openScratchProject } = useScratchProject();
+  const { environments } = useEnvironments();
+  // Recognise the scratch ("No project") project from the server config even while the
+  // environment reconnects, as the sidebar does; creating one still needs a live connection.
+  const scratchRootByEnvironment = new Map(
+    environments.map((environment) => [
+      environment.environmentId,
+      environment.serverConfig?.scratchWorkspaceRoot ?? null,
+    ]),
+  );
+  const isScratch = (project: EnvironmentProject) =>
+    isScratchProject(project, scratchRootByEnvironment.get(project.environmentId));
   const activeProjects = projects.filter((project) => project.archivedAt == null);
-  const orderedProjects = sortScopedProjectsForSidebar(activeProjects, threads, "updated_at");
-  useEffect(() => {
-    if (activeProjects.length === 0) return;
-    if (selectedProjectKey && activeProjects.some((project) => projectKeyOf(project) === selectedProjectKey))
-      return;
-    const defaultRef = resolveDefaultProjectRef(
-      activeProjects,
-      projectOrder,
-      readLastUsedProjectKey(),
-    );
-    if (!defaultRef) return;
-    const nextKey = projectKey(scopeProjectRef(defaultRef.environmentId, defaultRef.projectId));
-    setSelectedProjectKey(nextKey);
-    setComposerProjectKey(nextKey);
-    persistProjectKey(nextKey);
-  }, [activeProjects, projectOrder, selectedProjectKey]);
+  const sortedProjects = sortScopedProjectsForSidebar(activeProjects, threads, "updated_at");
+  // "No project" (the scratch project) always comes last.
+  const namedProjects = sortedProjects.filter((project) => !isScratch(project));
+  const scratchProject = sortedProjects.find((project) => isScratch(project)) ?? null;
+  const orderedProjects = scratchProject ? [...namedProjects, scratchProject] : namedProjects;
+  const scratchTargetEnvironmentId = scratchEnvironmentId(null);
+  const canPickNoProject = scratchProject !== null || scratchTargetEnvironmentId !== null;
+  const knownProjectKeys = new Set(orderedProjects.map(projectKeyOf));
+  const rowProjectKey = (row: HomeRow) =>
+    knownProjectKeys.has(row.projectKey) ? row.projectKey : OTHER_PROJECTS_KEY;
 
-  const onQuestionText = useCallback((key: string, text: string) => {
+  const onQuestionText = (key: string, text: string) => {
     setQuestionTextByThread((current) =>
       current[key] === text ? current : { ...current, [key]: text },
     );
-  }, []);
+  };
 
   const search = query.trim().toLocaleLowerCase();
-  const candidates = rows.filter((row) => filter === "all" || row.projectKey === filter);
+  const candidates = rows.filter((row) => filter === "all" || rowProjectKey(row) === filter);
   const visible = candidates.filter((row) => {
     if (!search) return true;
     const key = threadKey({ environmentId: row.thread.environmentId, threadId: row.thread.id });
@@ -139,22 +155,25 @@ export function HomeView() {
   const requestedItem = (router.state.location.search as { item?: unknown }).item;
   const deepLinkedItem = typeof requestedItem === "string" ? requestedItem : null;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolls the DOM node of a notification deep link into view
   useEffect(() => {
     if (!deepLinkedItem) return;
-    setExpandedItems((current) => ({ ...current, [deepLinkedItem]: true }));
     document
       .querySelector<HTMLElement>(`[data-home-item="${encodeURIComponent(deepLinkedItem)}"]`)
       ?.scrollIntoView({ block: "center" });
   }, [deepLinkedItem]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- document listener for the "/" search shortcut while Home is mounted
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const active = document.activeElement as HTMLElement | null;
       if (
         event.key !== "/" ||
         event.ctrlKey ||
         event.metaKey ||
         event.altKey ||
-        /INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? "")
+        /INPUT|TEXTAREA/.test(active?.tagName ?? "") ||
+        active?.isContentEditable === true
       )
         return;
       event.preventDefault();
@@ -164,20 +183,43 @@ export function HomeView() {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const chooseProject = (key: string | null) => {
-    setSelectedProjectKey(key);
-    if (key !== null) setComposerProjectKey(key);
-    persistProjectKey(key);
-  };
-  const activeComposerProjectKey = selectedProjectKey ?? composerProjectKey;
-  const composerProjectRef = homeComposerProjectRef(activeProjects, activeComposerProjectKey);
+  // The last-used project wins; otherwise the first named project in sidebar order.
+  const composerProjectRef =
+    homeComposerProjectRef(activeProjects, lastUsedProjectKey) ??
+    resolveDefaultProjectRef(namedProjects, projectOrder, null);
   const composerProject = composerProjectRef
-    ? activeProjects.find(
+    ? (activeProjects.find(
         (project) =>
           project.environmentId === composerProjectRef.environmentId &&
           project.id === composerProjectRef.projectId,
-      )
+      ) ?? null)
     : null;
+  const chooseNoProject = async () => {
+    const project =
+      scratchProject ??
+      (scratchTargetEnvironmentId !== null
+        ? await openScratchProject(scratchTargetEnvironmentId)
+        : null);
+    if (project) setLastUsedProjectKey(projectKeyOf(project));
+  };
+
+  const filterChip = (key: string, label: string, icon: ReactNode, count: number) => (
+    <Button
+      key={key}
+      size="sm-pill"
+      variant={filter === key ? "secondary" : "outline"}
+      aria-pressed={filter === key}
+      onClick={() => setFilter(key)}
+    >
+      {icon}
+      {label}
+      <span className="text-muted-foreground tabular-nums">{count}</span>
+    </Button>
+  );
+  const otherRowsCount = rows.filter((row) => rowProjectKey(row) === OTHER_PROJECTS_KEY).length;
+  const sections = (["needs", "done", "running"] as const)
+    .map((section) => ({ section, items: sectionRows(section) }))
+    .filter(({ items }) => items.length > 0);
 
   return (
     <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
@@ -191,14 +233,23 @@ export function HomeView() {
             .filter((row) => row.section === "needs")
             .map((row) => (
               <HomeQuestionIndex
-                key={threadKey({ environmentId: row.thread.environmentId, threadId: row.thread.id })}
+                key={threadKey({
+                  environmentId: row.thread.environmentId,
+                  threadId: row.thread.id,
+                })}
                 row={row}
                 onText={onQuestionText}
               />
             ))
         : null}
-      <header className="shrink-0 px-6 pt-8">
-        <div className="mx-auto w-full max-w-3xl">
+      <WorkspacePageHeader electron={isElectron}>
+        <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-foreground">
+          <HomeIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          Home
+        </span>
+      </WorkspacePageHeader>
+      <header className="shrink-0 px-6 pt-5">
+        <div className="mx-auto w-full max-w-(--chat-content-max-width)">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">Home</h1>
@@ -206,7 +257,7 @@ export function HomeView() {
                 <HomeCountSummary counts={counts} doneLabel="done since you looked" />
               </p>
             </div>
-            <label className="flex h-9 w-full max-w-60 items-center gap-2 rounded-lg border border-border/70 bg-background px-3 text-sm text-muted-foreground sm:w-60">
+            <label className="flex h-8 w-full max-w-58 items-center gap-2 rounded-lg border border-border/70 bg-background px-2.5 text-sm text-muted-foreground focus-within:ring-2 focus-within:ring-inset focus-within:ring-ring sm:w-58">
               <SearchIcon className="size-4 shrink-0" aria-hidden="true" />
               <input
                 aria-label="Search Home"
@@ -216,70 +267,51 @@ export function HomeView() {
                 placeholder="Search Home"
                 className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
               />
-              <kbd className="rounded border px-1 text-2xs">/</kbd>
+              <kbd className="rounded border border-border/70 px-1 text-2xs leading-4">/</kbd>
             </label>
           </div>
           <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Filter by project">
-            <Button
-              size="sm"
-              variant={filter === "all" ? "secondary" : "outline"}
-              aria-pressed={filter === "all"}
-              onClick={() => setFilter("all")}
-            >
-              All <span className="ml-1 text-muted-foreground">{rows.length}</span>
-            </Button>
+            {filterChip("all", "All", null, rows.length)}
             {orderedProjects
               .filter((project) => rows.some((row) => row.projectKey === projectKeyOf(project)))
-              .map((project) => {
-                const key = projectKeyOf(project);
-                return (
-                  <Button
-                    key={key}
-                    size="sm"
-                    variant={filter === key ? "secondary" : "outline"}
-                    aria-pressed={filter === key}
-                    onClick={() => setFilter(key)}
-                  >
-                    <ProjectFavicon project={project} className="size-3.5" />
-                    {project.title}
-                    <span className="ml-1 text-muted-foreground">
-                      {rows.filter((row) => row.projectKey === key).length}
-                    </span>
-                  </Button>
-                );
-              })}
-            {rows.some((row) => !activeProjects.some((project) => projectKeyOf(project) === row.projectKey)) ? (
-              <Button
-                size="sm"
-                variant={filter === "none" ? "secondary" : "outline"}
-                aria-pressed={filter === "none"}
-                onClick={() => setFilter("none")}
-              >
-                <FolderIcon className="size-3.5" /> No project
-                <span className="ml-1 text-muted-foreground">
-                  {rows.filter((row) => !activeProjects.some((project) => projectKeyOf(project) === row.projectKey)).length}
-                </span>
-              </Button>
-            ) : null}
+              .map((project) =>
+                filterChip(
+                  projectKeyOf(project),
+                  project.title,
+                  <ProjectFavicon project={project} className="size-4" />,
+                  rows.filter((row) => row.projectKey === projectKeyOf(project)).length,
+                ),
+              )}
+            {otherRowsCount > 0
+              ? filterChip(
+                  OTHER_PROJECTS_KEY,
+                  "Other projects",
+                  <FolderIcon className="size-4" />,
+                  otherRowsCount,
+                )
+              : null}
           </div>
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-44 pt-6 scrollbar-gutter-both">
-        <div className="mx-auto w-full max-w-3xl space-y-7">
-          {(["needs", "done", "running"] as const).map((section) => {
-            const items = sectionRows(section);
-            const projectGroups = orderedProjects
+        <div className="mx-auto w-full max-w-(--chat-content-max-width) space-y-7">
+          {sections.length === 0 ? (
+            <p className="py-2 text-sm text-muted-foreground">
+              {search || filter !== "all" ? "Nothing matches." : "Nothing on Home right now."}
+            </p>
+          ) : null}
+          {sections.map(({ section, items }) => {
+            const projectGroups: Array<{
+              project: EnvironmentProject | null;
+              rows: ReadonlyArray<HomeRow>;
+            }> = orderedProjects
               .map((project) => ({
-                project,
+                project: project as EnvironmentProject | null,
                 rows: items.filter((row) => row.projectKey === projectKeyOf(project)),
               }))
               .filter((group) => group.rows.length > 0);
-            const unknownRows = items.filter(
-              (row) => !activeProjects.some((project) => projectKeyOf(project) === row.projectKey),
-            );
-            if (unknownRows.length > 0) {
-              projectGroups.push({ project: null as never, rows: unknownRows });
-            }
+            const otherRows = items.filter((row) => rowProjectKey(row) === OTHER_PROJECTS_KEY);
+            if (otherRows.length > 0) projectGroups.push({ project: null, rows: otherRows });
             return (
               <section key={section} aria-labelledby={`home-${section}`}>
                 <h2
@@ -287,177 +319,105 @@ export function HomeView() {
                   className={`mb-2 flex items-center gap-2 text-sm font-semibold ${sectionColors[section]}`}
                 >
                   {labels[section]}
-                  <span
-                    className={`rounded-full bg-muted px-2 py-0.5 text-xs ${sectionColors[section]}`}
-                  >
+                  <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground tabular-nums">
                     {items.length}
                   </span>
                 </h2>
-                {items.length === 0 ? (
-                  <p className="py-2 text-sm text-muted-foreground">
-                    {section === "needs" ? "Nothing needs you right now." : "Nothing here."}
-                  </p>
-                ) : (
-                  <div className="space-y-3">
-                    {projectGroups.map((group) => {
-                      const project = group.project as EnvironmentProject | null;
-                      const age = Math.max(...group.rows.map((row) => homeDurationMinutes(row.thread, now)));
-                      const timing =
-                        group.rows.length >= 2 && (section === "needs" || section === "running")
-                          ? `${section === "needs" ? "oldest waiting" : "longest running"} ${durationLabel(age)}`
-                          : null;
-                      const groupKey = project ? projectKeyOf(project) : "none";
-                      return (
-                        <div key={groupKey}>
-                          <div className="mb-1 flex min-h-6 items-center gap-1.5 px-0.5 text-xs text-muted-foreground">
-                            {project ? (
-                              <ProjectFavicon project={project} className="size-4 shrink-0" />
-                            ) : (
-                              <FolderIcon className="size-4 shrink-0" />
-                            )}
-                            <span>{project?.title ?? "No project"}</span>
-                            <span className={sectionColors[section]}>{group.rows.length}</span>
-                            {timing ? <span className="ml-auto tabular-nums">{timing}</span> : null}
-                          </div>
-                          <div className="space-y-2">
-                            {group.rows.map((row) => {
-                              const key = threadKey({
-                                environmentId: row.thread.environmentId,
-                                threadId: row.thread.id,
-                              });
-                              const provider = providersByEnvironment
-                                .get(row.thread.environmentId)
-                                ?.find((entry) => entry.instanceId === row.thread.providerInstanceId);
-                              const status = resolveSidebarThreadStatus(row.thread);
-                              const timeColor =
-                                status === "failed"
-                                  ? "text-error-foreground"
-                                  : row.section === "needs"
-                                    ? "text-warning-foreground"
-                                    : row.section === "done"
-                                      ? "text-success"
-                                      : "text-info-foreground";
-                              const openThread = () =>
-                                void router.navigate({
-                                  to: "/$environmentId/$threadId",
-                                  params: {
-                                    environmentId: row.thread.environmentId,
-                                    threadId: row.thread.id,
-                                  },
-                                });
-                              return (
-                                <article
-                                  key={key}
-                                  data-home-item={encodeURIComponent(key)}
-                                  className="rounded-xl border border-border/70 px-3 py-2.5 hover:bg-muted/30"
-                                >
-                                  <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-                                    <ProviderInstanceIcon
-                                      driverKind={provider?.driver ?? ProviderDriverKind.make("codex")}
-                                      displayName={provider?.displayName ?? String(row.thread.providerInstanceId)}
-                                      size="compact"
-                                    />
-                                    <span className="min-w-0 flex-1 truncate">
-                                      {row.thread.title || "New thread"}
-                                    </span>
-                                    <span className={`flex shrink-0 items-center gap-1.5 tabular-nums ${timeColor}`}>
-                                      {homeThreadWasStopped(row.thread) ? (
-                                        <CircleStopIcon className="size-3.5" aria-hidden="true" />
-                                      ) : status === "failed" ? (
-                                        <CircleStopIcon className="size-3.5" aria-hidden="true" />
-                                      ) : row.section === "needs" ? (
-                                        <Clock3Icon className="size-3.5" aria-hidden="true" />
-                                      ) : row.section === "done" ? (
-                                        <CircleCheckIcon className="size-3.5" aria-hidden="true" />
-                                      ) : (
-                                        <LoaderCircleIcon className="size-3.5" aria-hidden="true" />
-                                      )}
-                                      {formatHomeTimeLabel(row.thread, now)}
-                                    </span>
-                                  </div>
-                                  {row.section === "needs" ? (
-                                    <HomeNeedsPanel
-                                      thread={row.thread}
-                                      onOpen={openThread}
-                                      expanded={expandedItems[key] === true || deepLinkedItem === key}
-                                      onExpandedChange={(open) =>
-                                        setExpandedItems((current) => ({ ...current, [key]: open }))
-                                      }
-                                    />
-                                  ) : (
-                                    <div className="mt-1 flex items-center gap-3">
-                                      <div className="min-w-0 flex-1 truncate text-sm font-medium">
-                                        {row.thread.latestRun?.providerStartingLabel ?? row.thread.title ?? "New thread"}
-                                      </div>
-                                      <div className="flex shrink-0 items-center gap-1">
-                                        <Button size="xs" variant="ghost" onClick={openThread}>
-                                          Open
-                                        </Button>
-                                        {row.section === "done" ? (
-                                          <>
-                                            <Button
-                                              size="xs"
-                                              variant="ghost"
-                                              onClick={() => void settleThread(homeThreadRef(row.thread))}
-                                            >
-                                              <CheckIcon /> Settle
-                                            </Button>
-                                            <HomeSnoozeMenu threadRef={homeThreadRef(row.thread)} />
-                                          </>
-                                        ) : null}
-                                      </div>
-                                    </div>
-                                  )}
-                                  {row.predecessors.length > 0 ? (
-                                    <details className="mt-2 text-xs text-muted-foreground">
-                                      <summary className="inline-flex cursor-pointer items-center gap-1">
-                                        <ChevronDownIcon className="size-3" />
-                                        {row.predecessors.length + 1} threads
-                                      </summary>
-                                      {row.predecessors.map((previous) => (
-                                        <button
-                                          key={previous.id}
-                                          className="block py-1 pl-4 text-left hover:text-foreground"
-                                          onClick={() =>
-                                            void router.navigate({
-                                              to: "/$environmentId/$threadId",
-                                              params: {
-                                                environmentId: previous.environmentId,
-                                                threadId: previous.id,
-                                              },
-                                            })
-                                          }
-                                        >
-                                          {previous.title} · settled by successor
-                                        </button>
-                                      ))}
-                                    </details>
-                                  ) : null}
-                                </article>
-                              );
-                            })}
-                          </div>
+                <div className="space-y-3">
+                  {projectGroups.map((group) => {
+                    const project = group.project;
+                    const age = Math.max(
+                      ...group.rows.map((row) => homeDurationMinutes(row.thread, now)),
+                    );
+                    const timing =
+                      group.rows.length >= 2 && (section === "needs" || section === "running")
+                        ? `${section === "needs" ? "oldest waiting" : "longest running"} ${durationLabel(age)}`
+                        : null;
+                    const groupKey = project ? projectKeyOf(project) : OTHER_PROJECTS_KEY;
+                    return (
+                      <div key={groupKey}>
+                        <div className="mb-1.5 flex min-h-6 items-center gap-1.5 px-0.5 text-xs text-muted-foreground">
+                          {project ? (
+                            <ProjectFavicon project={project} className="size-4 shrink-0" />
+                          ) : (
+                            <FolderIcon className="size-4 shrink-0" />
+                          )}
+                          <span>{project?.title ?? "Other projects"}</span>
+                          <span className={`tabular-nums ${sectionColors[section]}`}>
+                            {group.rows.length}
+                          </span>
+                          {timing ? <span className="ml-auto tabular-nums">{timing}</span> : null}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                        <div className="space-y-2">
+                          {group.rows.map((row) => {
+                            const key = threadKey({
+                              environmentId: row.thread.environmentId,
+                              threadId: row.thread.id,
+                            });
+                            const provider = providersByEnvironment
+                              .get(row.thread.environmentId)
+                              ?.find((entry) => entry.instanceId === row.thread.providerInstanceId);
+                            const openThread = (thread: EnvironmentThreadShell) =>
+                              void router.navigate({
+                                to: "/$environmentId/$threadId",
+                                params: {
+                                  environmentId: thread.environmentId,
+                                  threadId: thread.id,
+                                },
+                              });
+                            return (
+                              <HomeRowCard
+                                key={key}
+                                itemKey={key}
+                                row={row}
+                                now={now}
+                                providerIcon={
+                                  <ProviderInstanceIcon
+                                    driverKind={
+                                      provider?.driver ?? ProviderDriverKind.make("codex")
+                                    }
+                                    displayName={
+                                      provider?.displayName ?? String(row.thread.providerInstanceId)
+                                    }
+                                    size="compact"
+                                  />
+                                }
+                                onOpen={openThread}
+                                onSettle={() => void settleThread(homeThreadRef(row.thread))}
+                                expanded={expandedItems[key] ?? deepLinkedItem === key}
+                                onExpandedChange={(open) =>
+                                  setExpandedItems((current) => ({ ...current, [key]: open }))
+                                }
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </section>
             );
           })}
         </div>
       </div>
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-6 bg-background"
+      />
       <div className="pointer-events-none absolute inset-0 z-30">
-        {composerProject && composerProjectRef ? (
+        {composerProject ? (
           <HomeThreadComposer
-            key={`${composerProject.environmentId}:${composerProject.id}`}
+            key={projectKeyOf(composerProject)}
             project={composerProject}
-            canSend={selectedProjectKey !== null}
             projectControl={
               <HomeProjectPicker
-                projects={orderedProjects}
-                selectedProjectKey={selectedProjectKey}
-                onSelect={chooseProject}
+                projects={namedProjects}
+                selected={composerProject}
+                selectedIsScratch={isScratch(composerProject)}
+                canPickNoProject={canPickNoProject}
+                onSelect={(project) => setLastUsedProjectKey(projectKeyOf(project))}
+                onSelectNoProject={() => void chooseNoProject()}
               />
             }
           />
@@ -486,63 +446,208 @@ function HomeCountSummary({
   );
 }
 
+function HomeRowCard({
+  itemKey,
+  row,
+  now,
+  providerIcon,
+  onOpen,
+  onSettle,
+  expanded,
+  onExpandedChange,
+}: {
+  itemKey: string;
+  row: HomeRow;
+  now: string;
+  providerIcon: ReactNode;
+  onOpen: (thread: EnvironmentThreadShell) => void;
+  onSettle: () => void;
+  expanded: boolean;
+  onExpandedChange: (open: boolean) => void;
+}) {
+  const [chainOpen, setChainOpen] = useState(false);
+  const { thread } = row;
+  const status = resolveSidebarThreadStatus(thread);
+  const stopped = homeThreadWasStopped(thread);
+  const timeColor =
+    status === "failed"
+      ? "text-error-foreground"
+      : row.section === "needs"
+        ? "text-warning-foreground"
+        : row.section === "running"
+          ? "text-info-foreground"
+          : stopped
+            ? "text-muted-foreground"
+            : "text-success";
+  const TimeIcon =
+    row.section === "needs"
+      ? Clock3Icon
+      : stopped || status === "failed"
+        ? CircleStopIcon
+        : row.section === "done"
+          ? CircleCheckIcon
+          : LoaderCircleIcon;
+  const title = thread.title || "New thread";
+  const summary =
+    thread.goal?.objective ??
+    (row.section === "running" ? (thread.latestRun?.providerStartingLabel ?? null) : null);
+  const chainToggle =
+    row.predecessors.length > 0 ? (
+      <button
+        type="button"
+        aria-expanded={chainOpen}
+        onClick={() => setChainOpen((open) => !open)}
+        className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border/70 px-1.5 py-px text-2xs text-muted-foreground hover:bg-accent hover:text-foreground"
+      >
+        <LayersIcon className="size-3" aria-hidden="true" />
+        {row.predecessors.length + 1} threads
+        <ChevronDownIcon className={cn("size-3", chainOpen && "rotate-180")} aria-hidden="true" />
+      </button>
+    ) : null;
+  const time = (
+    <span className={cn("flex shrink-0 items-center gap-1.5 text-xs tabular-nums", timeColor)}>
+      <TimeIcon className="size-3.5" aria-hidden="true" />
+      {formatHomeTimeLabel(thread, now)}
+    </span>
+  );
+
+  return (
+    <article
+      data-home-item={encodeURIComponent(itemKey)}
+      className="rounded-xl border border-border/70 px-3.5 py-3"
+    >
+      {row.section === "needs" ? (
+        <>
+          <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+            {providerIcon}
+            <span className="min-w-0 truncate">{title}</span>
+            {chainToggle}
+            <span className="ml-auto" />
+            {time}
+          </div>
+          <HomeNeedsPanel
+            thread={thread}
+            onOpen={() => onOpen(thread)}
+            expanded={expanded}
+            onExpandedChange={onExpandedChange}
+          />
+        </>
+      ) : (
+        <>
+          <div className="flex min-w-0 items-center gap-2">
+            {providerIcon}
+            <span className="min-w-0 truncate text-sm font-semibold text-foreground">{title}</span>
+            {chainToggle}
+            <span className="ml-auto" />
+            {time}
+          </div>
+          <div className="mt-1 flex min-h-6 items-center gap-3 ps-6">
+            <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{summary}</span>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button size="xs" variant="ghost" onClick={() => onOpen(thread)}>
+                Open
+              </Button>
+              {row.section === "done" ? (
+                <>
+                  <Button size="xs" variant="ghost" onClick={onSettle}>
+                    <CheckIcon /> Settle
+                  </Button>
+                  <HomeSnoozeMenu threadRef={homeThreadRef(thread)} />
+                </>
+              ) : null}
+            </div>
+          </div>
+        </>
+      )}
+      {chainOpen ? (
+        <ul className="mt-2 space-y-0.5 border-t border-border/70 pt-2 text-xs text-muted-foreground">
+          {row.predecessors.map((previous) => (
+            <li key={previous.id}>
+              <button
+                type="button"
+                className="py-0.5 text-left hover:text-foreground"
+                onClick={() => onOpen(previous)}
+              >
+                {previous.title} · settled by successor
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </article>
+  );
+}
+
+type ProjectPickerItem =
+  | { value: string; label: string; action: "project"; project: EnvironmentProject }
+  | { value: string; label: string; action: "none" | "add"; project: null };
+
+const NO_PROJECT_VALUE = "__none__";
+const ADD_PROJECT_VALUE = "__add__";
+
 function HomeProjectPicker({
   projects,
-  selectedProjectKey,
+  selected,
+  selectedIsScratch,
+  canPickNoProject,
   onSelect,
+  onSelectNoProject,
 }: {
   projects: ReadonlyArray<EnvironmentProject>;
-  selectedProjectKey: string | null;
-  onSelect: (key: string | null) => void;
+  selected: EnvironmentProject;
+  selectedIsScratch: boolean;
+  canPickNoProject: boolean;
+  onSelect: (project: EnvironmentProject) => void;
+  onSelectNoProject: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const projectItems = projects.map((project) => ({
-    value: projectKeyOf(project),
-    label: project.title,
-    project,
-    action: "project" as const,
-  }));
-  const items = [
-    ...projectItems,
-    { value: "__none__", label: "No project", project: null, action: "none" as const },
-    { value: "__add__", label: "Add project…", project: null, action: "add" as const },
+  const items: ProjectPickerItem[] = [
+    ...projects.map((project) => ({
+      value: projectKeyOf(project),
+      label: project.title,
+      action: "project" as const,
+      project,
+    })),
+    ...(canPickNoProject
+      ? [{ value: NO_PROJECT_VALUE, label: "No project", action: "none" as const, project: null }]
+      : []),
+    { value: ADD_PROJECT_VALUE, label: "Add project…", action: "add" as const, project: null },
   ];
-  const filteredItems = items.filter(
-    (item) =>
-      item.action !== "add" || query.length === 0
-      ? item.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
-      : false,
-  );
-  const selected =
-    projectItems.find((item) => item.value === selectedProjectKey) ??
-    items.find((item) => item.action === "none")!;
+  const search = query.trim().toLocaleLowerCase();
+  const filteredItems = search
+    ? items.filter(
+        (item) => item.action !== "add" && item.label.toLocaleLowerCase().includes(search),
+      )
+    : items;
+  const selectedValue = selectedIsScratch ? NO_PROJECT_VALUE : projectKeyOf(selected);
+  const selectedItem = items.find((item) => item.value === selectedValue) ?? null;
+  const firstExtra = items.find((item) => item.action !== "project");
 
   return (
     <Combobox
       items={items}
       filteredItems={filteredItems}
-      value={selected}
+      autoHighlight
+      value={selectedItem}
+      onOpenChange={() => setQuery("")}
       onValueChange={(item) => {
         if (!item) return;
-        if (item.action === "add") {
-          openCommandPalette({ open: "add-project" });
-        } else {
-          onSelect(item.action === "none" ? null : item.value);
-        }
+        if (item.action === "add") openCommandPalette({ open: "add-project" });
+        else if (item.action === "none") onSelectNoProject();
+        else if (item.project) onSelect(item.project);
       }}
       itemToStringLabel={(item) => item.label}
       isItemEqualToValue={(a, b) => a.value === b.value}
     >
-      <ComboboxTrigger className="flex h-7 min-w-0 max-w-52 items-center gap-1.5 rounded-md border border-border/70 bg-background/50 px-2 text-xs text-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring">
-        {selected.project ? (
-          <ProjectFavicon project={selected.project} className="size-3.5 shrink-0" />
-        ) : (
-          <FolderIcon className="size-3.5 shrink-0" />
-        )}
-        <span className="truncate">{selected.label}</span>
-        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      <ComboboxTrigger
+        render={<ComposerControl />}
+        aria-label={`Project: ${selectedIsScratch ? "No project" : selected.title}`}
+        className="max-w-48 min-w-0"
+      >
+        <ProjectFavicon project={selected} className="size-4 shrink-0" />
+        <span className="truncate">{selectedIsScratch ? "No project" : selected.title}</span>
       </ComboboxTrigger>
-      <ComboboxPopup className="w-[min(18rem,var(--available-width))] overflow-hidden">
+      <ComboboxPopup side="top" align="start" className="w-72 overflow-hidden">
         <ComboboxSearchInput
           aria-label="Search projects"
           placeholder="Search projects..."
@@ -551,17 +656,22 @@ function HomeProjectPicker({
         />
         <ComboboxEmpty>No matching projects.</ComboboxEmpty>
         <ComboboxList>
-          {(item: (typeof items)[number]) => (
-            <ComboboxItem key={item.value} value={item}>
+          {(item: ProjectPickerItem) => (
+            <ComboboxItem
+              key={item.value}
+              hideIndicator
+              value={item}
+              className={cn(!search && item.value === firstExtra?.value && "mt-1.5")}
+            >
               {item.project ? (
                 <ProjectFavicon project={item.project} className="size-4 shrink-0" />
               ) : item.action === "add" ? (
                 <FolderPlusIcon className="size-4 shrink-0" />
               ) : (
-                <FolderIcon className="size-4 shrink-0" />
+                <NoProjectIcon />
               )}
               <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              {item.value === selected.value ? <CheckIcon className="size-4" /> : null}
+              {item.value === selectedValue ? <CheckIcon className="size-4" /> : null}
             </ComboboxItem>
           )}
         </ComboboxList>
@@ -570,25 +680,37 @@ function HomeProjectPicker({
   );
 }
 
+/** The dashed frame "No project" uses elsewhere in the app. */
+function NoProjectIcon() {
+  return (
+    <span
+      aria-hidden="true"
+      className="mx-px inline-block size-3.5 shrink-0 rounded-xs border border-dashed border-muted-foreground"
+    />
+  );
+}
+
 function HomeThreadComposer({
   project,
-  canSend,
   projectControl,
 }: {
   project: EnvironmentProject;
-  canSend: boolean;
   projectControl: ReactNode;
 }) {
   const handleNewThread = useNewThreadHandler();
-  const [draft, setDraft] = useState<NonNullable<Awaited<ReturnType<NewThreadHandler>>> | null>(null);
+  const [draft, setDraft] = useState<NonNullable<Awaited<ReturnType<NewThreadHandler>>> | null>(
+    null,
+  );
+  // Keyed by project, so this runs once per project: it opens (or reuses) that project's
+  // composer draft in the draft store and keeps its id while Home shows it.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- creates the project's draft in the external composer draft store
   useEffect(() => {
     let active = true;
-    setDraft(null);
-    void handleNewThread(scopeProjectRef(project.environmentId, project.id), { navigate: false }).then(
-      (result) => {
-        if (active && result) setDraft(result);
-      },
-    );
+    void handleNewThread(scopeProjectRef(project.environmentId, project.id), {
+      navigate: false,
+    }).then((result) => {
+      if (active && result) setDraft(result);
+    });
     return () => {
       active = false;
     };
@@ -601,14 +723,9 @@ function HomeThreadComposer({
       routeKind="draft"
       draftId={draft.draftId}
       homeComposerOnly
-      homeComposerProjectSelected={canSend}
       homeProjectControl={projectControl}
     />
   );
-}
-
-function projectKeyOf(project: EnvironmentProject): string {
-  return projectKey(scopeProjectRef(project.environmentId, project.id));
 }
 
 function durationLabel(minutes: number): string {
@@ -618,14 +735,23 @@ function durationLabel(minutes: number): string {
   return remaining === 0 ? `${hours}h` : `${hours}h ${remaining}m`;
 }
 
-function HomeQuestionIndex({ row, onText }: { row: HomeRow; onText: (key: string, text: string) => void }) {
+function HomeQuestionIndex({
+  row,
+  onText,
+}: {
+  row: HomeRow;
+  onText: (key: string, text: string) => void;
+}) {
   const ref = homeThreadRef(row.thread);
   const pending = useAtomValue(environmentThreadDetails.pendingRequestsAtom(ref));
   const key = threadKey({ environmentId: row.thread.environmentId, threadId: row.thread.id });
   const text = [
-    ...((pending?.approvals ?? []).flatMap((item) => [item.requestKind, item.detail ?? ""])),
-    ...((pending?.userInputs ?? []).flatMap((item) => item.questions.map((question) => question.question))),
+    ...(pending?.approvals ?? []).flatMap((item) => [item.requestKind, item.detail ?? ""]),
+    ...(pending?.userInputs ?? []).flatMap((item) =>
+      item.questions.map((question) => question.question),
+    ),
   ].join(" ");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pending-request text lives in per-thread atoms; this reports it to Home's search index
   useEffect(() => onText(key, text), [key, onText, text]);
   return null;
 }
@@ -636,7 +762,7 @@ function HomeNeedsPanel({
   expanded,
   onExpandedChange,
 }: {
-  thread: ReturnType<typeof useVisibleThreadShells>[number];
+  thread: EnvironmentThreadShell;
   onOpen: () => void;
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
@@ -650,22 +776,26 @@ function HomeNeedsPanel({
     reportFailure: false,
   });
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
+  const [otherOpen, setOtherOpen] = useState<Record<string, boolean>>({});
   const [rejectReason, setRejectReason] = useState("");
   const [rejecting, setRejecting] = useState(false);
   const [sent, setSent] = useState(false);
   const approval = pending?.approvals[0];
   const userInput = pending?.userInputs[0];
 
-  const answerQuestion = (question: NonNullable<typeof userInput>["questions"][number]) => {
-    const answer = answers[question.id];
+  const answerQuestion = (
+    question: NonNullable<typeof userInput>["questions"][number],
+    overrides: Record<string, string | string[]> = {},
+  ) => {
+    const answer = overrides[question.id] ?? answers[question.id];
     if (Array.isArray(answer)) return answer;
     if (typeof answer === "string" && answer.length > 0) return answer;
     return question.initialAnswer ?? "";
   };
-  const submitAnswers = async () => {
+  const submitAnswers = async (overrides: Record<string, string | string[]> = {}) => {
     if (!userInput) return;
     const completed = Object.fromEntries(
-      userInput.questions.map((question) => [question.id, answerQuestion(question)]),
+      userInput.questions.map((question) => [question.id, answerQuestion(question, overrides)]),
     );
     if (
       userInput.questions.some((question) => {
@@ -700,131 +830,277 @@ function HomeNeedsPanel({
     setRejectReason("");
     setSent(true);
   };
-  const details = (
-    <details
-      className="ml-auto text-xs text-muted-foreground"
-      open={expanded}
-      onToggle={(event) => onExpandedChange(event.currentTarget.open)}
+  const detailsToggle = (
+    <Button
+      size="xs"
+      variant="ghost-muted"
+      className="ml-auto"
+      aria-expanded={expanded}
+      onClick={() => onExpandedChange(!expanded)}
     >
-      <summary className="flex cursor-pointer list-none items-center gap-1 hover:text-foreground">
-        Details <ChevronDownIcon className="size-3" />
-      </summary>
-      <div className="mt-2 border-t border-border/70 pt-2 text-xs text-muted-foreground">
-        {approval ? (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-            <dt>Request</dt><dd>{approval.requestKind}</dd>
-            <dt>Details</dt><dd className="whitespace-pre-wrap">{approval.detail ?? "No additional details."}</dd>
-            <dt>Thread</dt><dd>{thread.title || "New thread"}</dd>
-          </dl>
-        ) : userInput ? (
-          <div className="space-y-2">
-            {userInput.questions.map((question) => (
-              <div key={question.id}>
-                <p className="font-medium text-foreground">{question.question}</p>
-                {question.options.map((option) => <p key={option.value ?? option.label}>{option.label}</p>)}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p>{thread.pendingSubagentRequest ?? "Additional request details are unavailable."}</p>
-        )}
-      </div>
-    </details>
+      Details
+      {expanded ? <ChevronUpIcon /> : <ChevronDownIcon />}
+    </Button>
   );
+  const detailRow = (label: string, value: ReactNode) => (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 whitespace-pre-wrap break-words text-foreground">{value}</dd>
+    </>
+  );
+  const threadLink = (
+    <button type="button" className="text-info-foreground hover:underline" onClick={onOpen}>
+      {thread.title || "New thread"}
+    </button>
+  );
+  const detailsPanel = expanded ? (
+    <dl className="mt-3 grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 border-t border-border/70 pt-3 text-xs">
+      {approval ? (
+        <>
+          {detailRow("Request", approval.requestKind)}
+          {detailRow("Details", approval.detail ?? "No additional details.")}
+        </>
+      ) : userInput ? (
+        userInput.questions.map((question) => (
+          <div key={question.id} className="contents">
+            {detailRow(
+              question.header,
+              <>
+                {question.question}
+                {question.options.length > 0 ? (
+                  <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                    {question.options.map((option) => (
+                      <li key={option.value ?? option.label}>
+                        {option.label}
+                        {option.description && option.description !== option.label
+                          ? ` – ${option.description}`
+                          : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>,
+            )}
+          </div>
+        ))
+      ) : (
+        detailRow("Request", thread.pendingSubagentRequest ?? "Waiting for your response.")
+      )}
+      {detailRow("Thread", threadLink)}
+    </dl>
+  ) : null;
 
   if (sent) return <p className="mt-2 text-xs text-success">Sent to thread</p>;
   if (approval) {
     return (
-      <div className="mt-2">
-        <h3 className="text-sm font-semibold leading-5">{approval.detail ?? approval.requestKind}</h3>
+      <div className="mt-1.5">
+        <h3 className="text-base font-semibold leading-6 text-foreground">
+          {approval.detail ?? approval.requestKind}
+        </h3>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <Button size="xs" onClick={() => void decideApproval("accept")} disabled={approval.responseCapability !== "live"}>
+          <Button
+            size="xs"
+            onClick={() => void decideApproval("accept")}
+            disabled={approval.responseCapability !== "live"}
+          >
             Approve
           </Button>
-          <Button size="xs" variant="outline" onClick={() => setRejecting(true)} disabled={approval.responseCapability !== "live"}>
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => setRejecting(true)}
+            disabled={approval.responseCapability !== "live"}
+          >
             Reject
           </Button>
           <HomeSnoozeMenu threadRef={ref} />
-          <Button size="xs" variant="ghost" onClick={onOpen}>Open</Button>
-          {details}
+          <Button size="xs" variant="ghost" onClick={onOpen}>
+            Open
+          </Button>
+          {detailsToggle}
         </div>
         {rejecting ? (
           <div className="mt-2 flex flex-wrap gap-2">
             <input
-              className="h-8 min-w-48 flex-1 rounded-md border border-border/70 bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              autoFocus
+              className="h-7 min-w-48 flex-1 rounded-md border border-border/70 bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
               aria-label="Rejection reason (optional)"
               placeholder="Reason, optional. Sent to the thread as a message."
               value={rejectReason}
               onChange={(event) => setRejectReason(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void decideApproval("decline");
+                if (event.key === "Escape") setRejecting(false);
+              }}
             />
-            <Button size="xs" onClick={() => void decideApproval("decline")}>Send rejection</Button>
-            <Button size="xs" variant="ghost" onClick={() => setRejecting(false)}>Cancel</Button>
+            <Button size="xs" onClick={() => void decideApproval("decline")}>
+              Send rejection
+            </Button>
+            <Button size="xs" variant="ghost" onClick={() => setRejecting(false)}>
+              Cancel
+            </Button>
           </div>
         ) : null}
+        {detailsPanel}
       </div>
     );
   }
   if (userInput) {
+    // One single-choice question answers on click; anything larger collects the
+    // choices first and sends them together.
+    const answersOnClick =
+      userInput.questions.length === 1 && userInput.questions[0]?.multiSelect !== true;
+    const actions = (
+      <>
+        <HomeSnoozeMenu threadRef={ref} />
+        <Button size="xs" variant="ghost" onClick={onOpen}>
+          Open
+        </Button>
+        {detailsToggle}
+      </>
+    );
     return (
-      <div className="mt-2 space-y-2">
-        {userInput.questions.map((question) => (
-          <fieldset key={question.id} className="space-y-1">
-            <legend className="text-sm font-semibold leading-5">{question.question}</legend>
-            <div className="flex flex-wrap gap-1.5">
-              {question.options.map((option) => {
-                const value = option.value ?? option.label;
-                const answer = answerQuestion(question);
-                const selected = Array.isArray(answer) ? answer.includes(value) : answer === value;
-                const label = option.label.replace(/\s*\(Recommended\)\s*/iu, "");
-                return (
-                  <label key={value} className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border/70 px-2 py-1 text-xs">
-                    <input
-                      type={question.multiSelect ? "checkbox" : "radio"}
-                      name={`${thread.id}-${question.id}`}
-                      checked={selected}
-                      onChange={() =>
-                        setAnswers((current) => ({
-                          ...current,
-                          [question.id]: question.multiSelect
-                            ? (Array.isArray(current[question.id]) ? current[question.id] as string[] : []).includes(value)
-                              ? (current[question.id] as string[]).filter((entry) => entry !== value)
-                              : [...(Array.isArray(current[question.id]) ? current[question.id] as string[] : []), value]
-                            : value,
-                        }))
+      <div className="mt-1.5 space-y-2">
+        {userInput.questions.map((question) => {
+          const answer = answerQuestion(question);
+          const otherVisible = otherOpen[question.id] === true;
+          const current = answers[question.id];
+          const otherText =
+            typeof current === "string" &&
+            !question.options.some((option) => (option.value ?? option.label) === current)
+              ? current
+              : "";
+          return (
+            <fieldset key={question.id} className="space-y-2">
+              <legend className="text-base font-semibold leading-6 text-foreground">
+                {question.question}
+              </legend>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {question.options.map((option) => {
+                  const value = option.value ?? option.label;
+                  const selected = Array.isArray(answer)
+                    ? answer.includes(value)
+                    : answer === value;
+                  const label = option.label.replace(/\s*\(Recommended\)\s*/iu, "");
+                  const recommended = label !== option.label;
+                  return (
+                    <Button
+                      key={value}
+                      size="xs"
+                      variant={!answersOnClick && selected ? "secondary" : "outline"}
+                      aria-pressed={answersOnClick ? undefined : selected}
+                      onClick={() => {
+                        if (answersOnClick) {
+                          void submitAnswers({ [question.id]: value });
+                          return;
+                        }
+                        setAnswers((previousAnswers) => {
+                          if (!question.multiSelect) {
+                            return { ...previousAnswers, [question.id]: value };
+                          }
+                          const previous = previousAnswers[question.id];
+                          const list = Array.isArray(previous) ? previous : [];
+                          return {
+                            ...previousAnswers,
+                            [question.id]: list.includes(value)
+                              ? list.filter((entry) => entry !== value)
+                              : [...list, value],
+                          };
+                        });
+                      }}
+                    >
+                      {label}
+                      {recommended ? (
+                        <span className="rounded-sm bg-info/12 px-1 py-px text-2xs font-medium text-info-foreground ring-1 ring-info/40 ring-inset">
+                          Recommended
+                        </span>
+                      ) : null}
+                    </Button>
+                  );
+                })}
+                {question.allowCustomAnswer !== false && !otherVisible ? (
+                  <Button
+                    size="xs"
+                    variant="ghost-muted"
+                    onClick={() =>
+                      setOtherOpen((previous) => ({ ...previous, [question.id]: true }))
+                    }
+                  >
+                    Other…
+                  </Button>
+                ) : null}
+                {answersOnClick ? actions : null}
+              </div>
+              {otherVisible ? (
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    autoFocus
+                    className="h-7 min-w-48 flex-1 rounded-md border border-border/70 bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                    aria-label={`Other answer for ${question.question}`}
+                    placeholder="Your answer"
+                    value={otherText}
+                    onChange={(event) =>
+                      setAnswers((previous) => ({ ...previous, [question.id]: event.target.value }))
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && answersOnClick && otherText.trim()) {
+                        void submitAnswers();
                       }
-                    />
-                    {label}
-                    {label !== option.label ? <span className="text-info-foreground">Recommended</span> : null}
-                  </label>
-                );
-              })}
-              {question.allowCustomAnswer !== false ? (
-                <input
-                  className="h-7 min-w-32 flex-1 rounded-md border border-border/70 bg-background px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  aria-label={`Other answer for ${question.question}`}
-                  placeholder="Other…"
-                  value={typeof answers[question.id] === "string" && answers[question.id] !== question.initialAnswer ? answers[question.id] : ""}
-                  onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: event.target.value }))}
-                />
+                    }}
+                  />
+                  {answersOnClick ? (
+                    <Button
+                      size="xs"
+                      disabled={!otherText.trim()}
+                      onClick={() => void submitAnswers()}
+                    >
+                      Send answer
+                    </Button>
+                  ) : null}
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => {
+                      setOtherOpen((previous) => ({ ...previous, [question.id]: false }));
+                      setAnswers((previous) => {
+                        const next = { ...previous };
+                        delete next[question.id];
+                        return next;
+                      });
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
               ) : null}
-            </div>
-          </fieldset>
-        ))}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button size="xs" onClick={() => void submitAnswers()}>Send answer</Button>
-          <HomeSnoozeMenu threadRef={ref} />
-          <Button size="xs" variant="ghost" onClick={onOpen}>Open</Button>
-          {details}
-        </div>
+            </fieldset>
+          );
+        })}
+        {answersOnClick ? null : (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button size="xs" onClick={() => void submitAnswers()}>
+              Send answers
+            </Button>
+            {actions}
+          </div>
+        )}
+        {detailsPanel}
       </div>
     );
   }
   return (
-    <div className="mt-2 flex items-center gap-1.5">
-      <span className="min-w-0 flex-1 text-sm font-medium">{thread.pendingSubagentRequest ?? "Waiting for your response"}</span>
-      <HomeSnoozeMenu threadRef={ref} />
-      <Button size="xs" variant="ghost" onClick={onOpen}>Open</Button>
-      {details}
+    <div className="mt-1.5">
+      <div className="flex items-center gap-1.5">
+        <span className="min-w-0 flex-1 text-base font-semibold leading-6 text-foreground">
+          {thread.pendingSubagentRequest ?? "Waiting for your response"}
+        </span>
+        <HomeSnoozeMenu threadRef={ref} />
+        <Button size="xs" variant="ghost" onClick={onOpen}>
+          Open
+        </Button>
+        {detailsToggle}
+      </div>
+      {detailsPanel}
     </div>
   );
 }
@@ -843,15 +1119,23 @@ export function HomeSidebarLink({
       type="button"
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      className={`sticky top-0 z-10 mb-2 flex w-full items-center gap-3 border-b px-3 py-3 text-left ${active ? "bg-accent" : "bg-sidebar"}`}
+      className={cn(
+        "flex w-full items-center gap-3 rounded-lg px-3 py-3.5 text-left text-sidebar-foreground outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        active ? "bg-sidebar-row-active" : "bg-sidebar-row-selected hover:bg-sidebar-row-hover",
+      )}
     >
-      <HomeIcon className="size-5 shrink-0" />
+      <HomeIcon className="size-4.5 shrink-0" aria-hidden="true" />
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-semibold">Home</span>
-        <span className="block truncate text-2xs text-muted-foreground">
-          <HomeCountSummary counts={counts} doneLabel="done" />
+        <span className="mt-1 block truncate text-xs text-muted-foreground">
+          {counts.needs + counts.done + counts.running > 0 ? (
+            <HomeCountSummary counts={counts} doneLabel="done" />
+          ) : (
+            "All clear"
+          )}
         </span>
       </span>
+      <PinIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
     </button>
   );
 }

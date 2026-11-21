@@ -2,9 +2,13 @@
 @layer theme, base, clerk, components, utilities;
 @import "tailwindcss";
 
+/* Home embeds the real thread composer over its own list: the chat surface itself stays
+   transparent and click-through so only the composer host covers Home. */
 [data-chat-home-composer-only="true"] {
   position: absolute !important;
   inset: 0;
+  background: transparent !important;
+  pointer-events: none;
 }
 
 [data-chat-home-composer-only="true"] [data-home-composer-overlay="true"] {

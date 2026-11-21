@@ -1,8 +1,11 @@
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  scopedProjectKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { projectKey } from "@t3tools/client-runtime/state/entities";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import type { ScopedProjectRef } from "@t3tools/contracts";
 import { resolveSidebarThreadStatus } from "../Sidebar.logic";
@@ -25,7 +28,9 @@ export function formatHomeCounts(
   counts: HomeCounts,
   labels: { readonly done?: string } = {},
 ): string {
-  return homeCountSegments(counts, labels).map((segment) => segment.text).join(" · ");
+  return homeCountSegments(counts, labels)
+    .map((segment) => segment.text)
+    .join(" · ");
 }
 
 export function homeCountSegments(
@@ -56,11 +61,17 @@ export function homeDurationMinutes(thread: EnvironmentThreadShell, now: string)
   const timestamp =
     status === "approval" || status === "input" || status === "request"
       ? (thread.pendingUserInputAt ?? thread.latestRun?.completedAt ?? thread.updatedAt)
-      : status === "working" || status === "preparing" || status === "waiting" || status === "limited"
+      : status === "working" ||
+          status === "preparing" ||
+          status === "waiting" ||
+          status === "limited"
         ? (resolveThreadWorkingStartedAt({
             latestRun: thread.latestRun,
             runtime: thread.runtime,
-          }) ?? thread.latestRun?.startedAt ?? thread.latestRun?.requestedAt ?? thread.updatedAt)
+          }) ??
+          thread.latestRun?.startedAt ??
+          thread.latestRun?.requestedAt ??
+          thread.updatedAt)
         : (thread.latestRun?.completedAt ?? thread.updatedAt);
   const start = Date.parse(timestamp);
   const end = Date.parse(now);
@@ -100,12 +111,18 @@ export function formatHomeTimeLabel(
   if (homeThreadWasStopped(thread)) {
     return `stopped ${clockLabel(thread.latestRun?.completedAt ?? thread.updatedAt, timeZone) ?? "--:--"}`;
   }
-  if (status === "working" || status === "preparing" || status === "waiting" || status === "limited") {
+  if (
+    status === "working" ||
+    status === "preparing" ||
+    status === "waiting" ||
+    status === "limited"
+  ) {
     const startedAt = resolveThreadWorkingStartedAt({
       latestRun: thread.latestRun,
       runtime: thread.runtime,
     });
-    const fallback = thread.latestRun?.startedAt ?? thread.latestRun?.requestedAt ?? thread.updatedAt;
+    const fallback =
+      thread.latestRun?.startedAt ?? thread.latestRun?.requestedAt ?? thread.updatedAt;
     const timestamp = startedAt ?? fallback;
     const age = elapsedLabel(timestamp, nowMs);
     return `running ${age ?? "0m"}`;
@@ -124,7 +141,8 @@ export function homeComposerProjectRef(
   const project = projects.find(
     (candidate) =>
       candidate.archivedAt == null &&
-      projectKey(scopeProjectRef(candidate.environmentId, candidate.id)) === selectedProjectKey,
+      scopedProjectKey(scopeProjectRef(candidate.environmentId, candidate.id)) ===
+        selectedProjectKey,
   );
   return project ? scopeProjectRef(project.environmentId, project.id) : null;
 }
@@ -146,7 +164,7 @@ function workstream(thread: EnvironmentThreadShell): string {
 }
 
 function workstreamKey(thread: EnvironmentThreadShell): string {
-  return `${projectKey(scopeProjectRef(thread.environmentId, thread.projectId))}\u0001${workstream(thread)}`;
+  return `${scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId))}\u0001${workstream(thread)}`;
 }
 
 function activity(thread: EnvironmentThreadShell): number {
@@ -161,7 +179,7 @@ export function deriveHomeRows(input: {
 }): ReadonlyArray<HomeRow> {
   const projects = new Map(
     input.projects.map((project) => [
-      projectKey(scopeProjectRef(project.environmentId, project.id)),
+      scopedProjectKey(scopeProjectRef(project.environmentId, project.id)),
       project,
     ]),
   );
@@ -181,7 +199,9 @@ export function deriveHomeRows(input: {
       newestByWorkstream.set(key, thread);
   }
   const rows: HomeRow[] = active.map((thread) => {
-    const projectKeyValue = projectKey(scopeProjectRef(thread.environmentId, thread.projectId));
+    const projectKeyValue = scopedProjectKey(
+      scopeProjectRef(thread.environmentId, thread.projectId),
+    );
     const project = projects.get(projectKeyValue);
     const predecessors =
       newestByWorkstream.get(workstreamKey(thread))?.id !== thread.id
@@ -206,7 +226,7 @@ export function deriveHomeRows(input: {
   const sectionOrder: Record<HomeSection, number> = { needs: 0, done: 1, running: 2 };
   const projectOrder = new Map(
     [...input.projects].map((project, index) => [
-      projectKey(scopeProjectRef(project.environmentId, project.id)),
+      scopedProjectKey(scopeProjectRef(project.environmentId, project.id)),
       index,
     ]),
   );

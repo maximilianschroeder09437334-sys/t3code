@@ -191,7 +191,7 @@ describe("Home display helpers", () => {
         archivedAt: null,
       },
     ] as never;
-    expect(homeComposerProjectRef(projects, "environment-two\u0000project-two")).toEqual({
+    expect(homeComposerProjectRef(projects, "environment-two:project-two")).toEqual({
       environmentId: "environment-two",
       projectId: "project-two",
     });
