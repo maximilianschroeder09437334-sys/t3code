@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ScheduledTaskThreadMode } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -314,6 +315,24 @@ describe("custom-through-83 histories", () => {
             created_at: "2026-11-02 10:00:00",
           });
         }
+        yield* expectCurrent;
+      }).pipe(Effect.provide(memory)),
+  );
+
+  // Every thread mode the contract accepts must survive upgrade and the startup check,
+  // so a new upstream mode cannot crash-loop the server on launch again.
+  it.effect.each(ScheduledTaskThreadMode.literals)(
+    "preserves %s scheduled tasks across upgrade and restart",
+    (mode) =>
+      Effect.gen(function* () {
+        yield* buildLegacy(4);
+        yield* populate(4);
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE scheduled_tasks SET thread_mode = ${mode} WHERE task_id = 'task-with-thread'`;
+        const before = yield* threadModes;
+
+        yield* runMigrations();
+        assert.deepStrictEqual(yield* threadModes, before);
         yield* expectCurrent;
       }).pipe(Effect.provide(memory)),
   );
