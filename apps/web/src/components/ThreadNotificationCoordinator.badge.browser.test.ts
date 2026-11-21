@@ -1,5 +1,6 @@
 import type { AnyRouter } from "@tanstack/react-router";
-import { EnvironmentId } from "@t3tools/contracts";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { Atom, AtomRegistry } from "effect/reactivity";
@@ -254,8 +255,13 @@ it.each(["hasPendingApprovals", "hasPendingUserInput"] as const)(
     const notification = TestNotification.sent[0]!;
     notification.dispatchEvent(new Event("click"));
     expect(state.navigate).toHaveBeenCalledWith({
-      to: "/$environmentId/$threadId",
-      params: { environmentId: EnvironmentId.make("one"), threadId: "thread" },
+      to: "/",
+      search: {
+        item: threadKey({
+          environmentId: EnvironmentId.make("one"),
+          threadId: ThreadId.make("thread"),
+        }),
+      },
     });
     state.mode = "sound";
     app.changeSettings();

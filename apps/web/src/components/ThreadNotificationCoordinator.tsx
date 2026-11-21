@@ -174,6 +174,17 @@ export function startThreadNotifications(
               : status === "request"
                 ? "Guest request"
                 : "Input needed";
+    // Needs-you items open Home on their row; other notifications still open the thread.
+    const openTarget = () =>
+      void (needsYou
+        ? router.navigate({
+            to: "/",
+            search: { item: threadKey({ environmentId, threadId: thread.id }) },
+          })
+        : router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId, threadId: thread.id },
+          }));
     const pendingRequests = needsYou
       ? registry.get(
           environmentThreadDetails.pendingRequestsAtom({ environmentId, threadId: thread.id }),
@@ -216,17 +227,14 @@ export function startThreadNotifications(
             ) : status === "failed" ? (
               <CircleAlertIcon aria-hidden className="size-4 text-destructive-foreground" />
             ) : (
-              <MessageCircleQuestionIcon aria-hidden className="size-4 text-info-foreground" />
+              <MessageCircleQuestionIcon aria-hidden className="size-4 text-warning-foreground" />
             ),
         },
         actionProps: {
           children: "Open thread",
           onClick: () => {
             toastManager.close(toastId);
-            void router.navigate({
-              to: "/",
-              search: { item: threadKey({ environmentId, threadId: thread.id }) },
-            });
+            openTarget();
           },
         },
       });
@@ -256,10 +264,7 @@ export function startThreadNotifications(
         notification.close();
         window.focus();
         void window.desktopBridge?.revealWindow().catch(() => undefined);
-        void router.navigate({
-          to: "/",
-          search: { item: threadKey({ environmentId, threadId: thread.id }) },
-        });
+        openTarget();
       });
     } catch {
       // Some browsers expose Notification but reject desktop presentation.
