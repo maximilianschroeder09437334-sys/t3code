@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import type { EnvironmentProject, EnvironmentThreadShell } from "./models";
+import type { EnvironmentProject, EnvironmentThreadShell } from "./models.ts";
 
 import {
   countHomeDashboardRows,
   deriveHomeDashboardRows,
   filterHomeDashboardRows,
   homeCountSegments,
-} from "./homeDashboard";
+} from "./homeDashboard.ts";
 
 const rows = [
   { id: "need-a", section: "needs", projectKey: "a" },

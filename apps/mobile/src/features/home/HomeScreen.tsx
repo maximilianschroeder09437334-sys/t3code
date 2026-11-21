@@ -47,6 +47,7 @@ import {
   deriveCenteredContentHorizontalPadding,
 } from "../../lib/layout";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { FloatingActionButton } from "../../components/ui/FloatingActionButton";
 import type { WorkspaceEnvironment, WorkspaceState } from "../../state/workspaceModel";
@@ -400,6 +401,20 @@ export function HomeScreen(props: HomeScreenProps) {
     toggleWorkingShelf,
   } = useThreadListV2ShelfPreferences();
   const now = useThreadListNow(props.threads);
+  const homeCountItems = useMemo(
+    () =>
+      homeCountSegments(
+        countHomeDashboardRows(
+          deriveMobileHomeRows({
+            threads: props.threads,
+            projects: props.projects,
+            now,
+            delegatedUnderParent: props.delegatedUnderParent,
+          }),
+        ),
+      ),
+    [now, props.delegatedUnderParent, props.projects, props.threads],
+  );
   const listEnvironments = useAtomValue(threadListEnvironmentsAtom);
   const {
     providersByEnvironmentId,
@@ -687,41 +702,41 @@ export function HomeScreen(props: HomeScreenProps) {
   const v2ListHeader = (
     <>
       {listHeader}
-      {(() => {
-        const homeRows = deriveMobileHomeRows({
-          threads: props.threads,
-          projects: props.projects,
-          now,
-          delegatedUnderParent: props.delegatedUnderParent,
-        });
-        const counts = countHomeDashboardRows(homeRows);
-        return (
-          <Pressable
-            accessibilityRole="button"
-            onPress={props.onOpenHome}
-            className="mb-2 rounded-xl border border-border bg-card px-3 py-2"
-          >
-            <Text className="text-sm font-semibold text-foreground">Home</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Open Home"
+        onPress={props.onOpenHome}
+        className="mb-2 flex-row items-center gap-3 rounded-xl border border-border bg-card px-3 py-2"
+      >
+        <SymbolView
+          name="house"
+          size={20}
+          tintColorClassName="accent-foreground"
+          type="monochrome"
+        />
+        <View className="flex-1">
+          <Text className="text-sm font-semibold text-foreground">Home</Text>
+          {homeCountItems.length > 0 ? (
             <Text className="text-xs">
-              {homeCountSegments(counts).map((item, index) => (
+              {homeCountItems.map((item, index) => (
                 <Text
                   key={item.section}
                   className={
                     item.section === "needs"
                       ? "text-warning-foreground"
                       : item.section === "running"
-                        ? "text-info-foreground"
-                        : "text-success"
+                        ? "text-adaptive-sky-600-400"
+                        : "text-adaptive-emerald-600-400"
                   }
                 >
-                  {index ? " | " : ""}
+                  {index ? " · " : ""}
                   {item.text}
                 </Text>
               ))}
             </Text>
-          </Pressable>
-        );
-      })()}
+          ) : null}
+        </View>
+      </Pressable>
       {Platform.OS === "ios" && workspace ? (
         <ThreadListFilters
           gutter={sidebarSurface ? 8 : 0}
