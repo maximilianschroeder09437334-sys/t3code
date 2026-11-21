@@ -129,7 +129,11 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
       }
       return;
     }
-    void navigate({ to: "/", replace: true });
+    void navigate({
+      to: "/",
+      replace: true,
+      search: (previous) => ({ ...previous, item: undefined }),
+    });
   };
   const handleDisconnectActiveEnvironmentStable = useStableCallback(
     handleDisconnectActiveEnvironment,

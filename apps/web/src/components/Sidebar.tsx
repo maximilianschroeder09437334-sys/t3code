@@ -149,6 +149,7 @@ import {
   useProjects,
   useServerConfigs,
   useQuietThreadShells,
+  useVisibleThreadShells,
 } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
 import { primaryServerKeybindingsAtom } from "../state/server";
@@ -268,6 +269,8 @@ import {
   type SidebarSweepAction,
 } from "./sidebar/SidebarThreadRow";
 import { SidebarDraftBlock } from "./sidebar/SidebarDraftBlock";
+import { HomeSidebarLink } from "./home/HomeView";
+import { countHomeRows, deriveHomeRows } from "./home/Home.logic";
 import {
   SidebarProjectFolderHeader,
   sidebarFolderRowId,
@@ -914,6 +917,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
   const delegatedUnderParent = useDelegatedUnderParent();
+  const homeThreads = useVisibleThreadShells();
+  const homeNow = useNowMinute();
+  const homeRows = deriveHomeRows({
+    threads: homeThreads,
+    projects,
+    now: homeNow,
+    lastVisitedAt: null,
+  });
+  const homeCounts = countHomeRows(homeRows);
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -1597,7 +1609,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       ? () => navigateToThread(scopeThreadRef(nextThread.environmentId, nextThread.id))
       : shell
         ? () => void handleNewThread(scopeProjectRef(shell.environmentId, shell.projectId))
-        : () => void router.navigate({ to: "/" });
+        : () =>
+            void router.navigate({
+              to: "/",
+              search: (previous) => ({ ...previous, item: undefined }),
+            });
   };
 
   const attemptSettle = (
@@ -3206,6 +3222,19 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           </SidebarGroup>
         }
       >
+        <div className="sticky top-0 z-20 bg-sidebar px-2 pb-2">
+          <HomeSidebarLink
+            counts={homeCounts}
+            active={router.state.location.pathname === "/"}
+            onClick={() => {
+              if (isMobile) setOpenMobile(false);
+              void router.navigate({
+                to: "/",
+                search: (previous) => ({ ...previous, item: undefined }),
+              });
+            }}
+          />
+        </div>
         <SidebarGroup className="flex-1" role="presentation">
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (

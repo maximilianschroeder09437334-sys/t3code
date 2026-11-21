@@ -218,7 +218,7 @@ function registerPullRequestsEscapeCommand(router: AnyRouter): () => void {
           window.history.back();
           return;
         }
-        void router.navigate({ to: "/" });
+        void router.navigate({ to: "/", search: (previous) => ({ ...previous, item: undefined }) });
       },
     },
   );

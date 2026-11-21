@@ -149,7 +149,11 @@ export function ThreadRouteView({
       const { clearPendingFileDropsForThread } = useSidebarPendingFileDropStore.getState();
       clearPendingFileDropsForThread(target.threadRef);
       if (environmentHasAnyThreads && !background) {
-        void navigate({ to: "/", replace: true });
+        void navigate({
+          to: "/",
+          replace: true,
+          search: (previous) => ({ ...previous, item: undefined }),
+        });
       }
     }
   }, [background, bootstrapComplete, environmentHasAnyThreads, navigate, renderState, target]);
@@ -164,7 +168,9 @@ export function ThreadRouteView({
       )
     ) {
       // A draft whose thread is already live and hidden (mid-promotion): never mount it.
-      redirect = <Navigate to="/" replace />;
+      redirect = (
+        <Navigate to="/" replace search={(previous) => ({ ...previous, item: undefined })} />
+      );
     } else if (draftSession) {
       view = (
         <ChatView
@@ -178,7 +184,9 @@ export function ThreadRouteView({
       );
     } else if (draftRedirect && hiddenKeys.has(threadKey(draftRedirect))) {
       // Back to a promoted draft whose thread is now hidden: never mount it.
-      redirect = <Navigate to="/" replace />;
+      redirect = (
+        <Navigate to="/" replace search={(previous) => ({ ...previous, item: undefined })} />
+      );
     } else if (draftRedirect && hidingAnywhere && draftRedirectShell === null) {
       // While hiding, a thread outside the live list is judged by the server route, unmounted here.
       redirect = (
@@ -206,13 +214,20 @@ export function ThreadRouteView({
         />
       );
     } else {
-      redirect = <Navigate to="/" replace />;
+      redirect = (
+        <Navigate to="/" replace search={(previous) => ({ ...previous, item: undefined })} />
+      );
     }
   } else if (hiddenByTagFilter) {
-    redirect = <Navigate to="/" replace />;
+    redirect = (
+      <Navigate to="/" replace search={(previous) => ({ ...previous, item: undefined })} />
+    );
   } else if (offShellBlocked) {
     // Before the shell bootstraps, a listed visible thread can still look off-shell.
-    if (bootstrapComplete && unlistedThread !== null) redirect = <Navigate to="/" replace />;
+    if (bootstrapComplete && unlistedThread !== null)
+      redirect = (
+        <Navigate to="/" replace search={(previous) => ({ ...previous, item: undefined })} />
+      );
   } else if (renderState === "ready" || (renderState === "loading" && serverThreadShell !== null)) {
     view = (
       <ChatView

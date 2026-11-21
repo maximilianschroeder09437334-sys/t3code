@@ -20,7 +20,11 @@ export const Route = createFileRoute("/pair")({
       authGateState.status === "hosted-static" ||
       authGateState.status === "guest"
     ) {
-      throw redirect({ to: "/", replace: true });
+      throw redirect({
+        to: "/",
+        replace: true,
+        search: (previous) => ({ ...previous, item: undefined }),
+      });
     }
     return {
       authGateState,

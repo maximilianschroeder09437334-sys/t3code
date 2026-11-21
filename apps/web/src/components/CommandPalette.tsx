@@ -66,6 +66,7 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderPlusIcon,
+  HomeIcon,
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
@@ -1658,6 +1659,17 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:home",
+    searchTerms: ["home", "overview", "inbox"],
+    title: "Go to Home",
+    icon: <HomeIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/", search: (previous) => ({ ...previous, item: undefined }) });
+    },
+  });
 
   actionItems.push({
     kind: "action",

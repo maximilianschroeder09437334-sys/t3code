@@ -173,6 +173,7 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
         onBackdrop ? "text-white" : "text-foreground",
       )}
       to="/"
+      search={(previous) => ({ ...previous, item: undefined })}
     >
       <SidebarBrandMark onBackdrop={onBackdrop} />
     </Link>
