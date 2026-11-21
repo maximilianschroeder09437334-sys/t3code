@@ -88,7 +88,7 @@ function AgentActivity(
       case "starting":
       case "running":
       default:
-        return secondaryForeground;
+        return isLightScheme ? "#0284c7" : "#7dd3fc";
     }
   };
 

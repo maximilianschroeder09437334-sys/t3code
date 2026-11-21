@@ -440,8 +440,8 @@ describe("resolveThreadStatusPill", () => {
     expect(resolveSidebarThreadStatus(blocked)).toBe("waiting");
     expect(resolveThreadStatusPill({ thread: blocked })).toMatchObject({
       label: "Waiting",
-      colorClass: "text-muted-foreground",
-      dotClass: "bg-muted-foreground",
+      colorClass: "text-info-foreground",
+      dotClass: "bg-info",
       pulse: false,
     });
 
@@ -449,8 +449,8 @@ describe("resolveThreadStatusPill", () => {
     expect(resolveSidebarThreadStatus(resumed)).toBe("working");
     expect(resolveThreadStatusPill({ thread: resumed })).toMatchObject({
       label: "Working",
-      colorClass: "text-muted-foreground",
-      dotClass: "bg-muted-foreground",
+      colorClass: "text-info-foreground",
+      dotClass: "bg-info",
       pulse: true,
     });
 
@@ -487,8 +487,8 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({
       label: "Waiting",
-      colorClass: "text-muted-foreground",
-      dotClass: "bg-muted-foreground",
+      colorClass: "text-info-foreground",
+      dotClass: "bg-info",
       pulse: false,
     });
   });

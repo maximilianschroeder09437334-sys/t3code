@@ -1225,8 +1225,8 @@ export function resolveThreadStatusPill(input: {
   ) {
     return {
       label: "Working",
-      colorClass: "text-muted-foreground",
-      dotClass: "bg-muted-foreground",
+      colorClass: "text-info-foreground",
+      dotClass: "bg-info",
       pulse: true,
     };
   }
@@ -1238,8 +1238,8 @@ export function resolveThreadStatusPill(input: {
   ) {
     return {
       label: "Connecting",
-      colorClass: "text-muted-foreground",
-      dotClass: "bg-muted-foreground",
+      colorClass: "text-info-foreground",
+      dotClass: "bg-info",
       pulse: true,
     };
   }
@@ -1250,8 +1250,8 @@ export function resolveThreadStatusPill(input: {
   ) {
     return {
       label: "Waiting",
-      colorClass: "text-muted-foreground",
-      dotClass: "bg-muted-foreground",
+      colorClass: "text-info-foreground",
+      dotClass: "bg-info",
       pulse: false,
     };
   }

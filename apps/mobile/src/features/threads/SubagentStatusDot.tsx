@@ -4,14 +4,14 @@ import { cn } from "../../lib/cn";
 import type { SubagentRowTone } from "./threadAgentsPresentation";
 
 const TONE_CLASS = {
-  working: "bg-foreground-muted",
+  working: "bg-adaptive-sky-600-400",
   completed: "bg-adaptive-emerald-600-400",
   failed: "bg-danger-foreground",
   stopped: "bg-foreground-muted",
 } as const satisfies Record<SubagentRowTone, string>;
 
 export const SUBAGENT_TONE_TEXT_CLASS = {
-  working: "text-foreground-muted",
+  working: "text-adaptive-sky-600-400",
   completed: "text-adaptive-emerald-600-400",
   failed: "text-danger-foreground",
   stopped: "text-foreground-muted",

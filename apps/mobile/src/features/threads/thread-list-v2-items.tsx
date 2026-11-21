@@ -123,14 +123,14 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
   working: {
     label: null,
     icon: "circle.dashed",
-    className: "text-foreground-muted",
-    iconTintClassName: "accent-foreground-muted",
+    className: "text-adaptive-sky-600-400",
+    iconTintClassName: "accent-adaptive-sky-600-400",
   },
   waiting: {
     label: null,
     icon: "circle.dashed.inset.filled",
-    className: "text-foreground-muted",
-    iconTintClassName: "accent-foreground-muted",
+    className: "text-adaptive-sky-600-400",
+    iconTintClassName: "accent-adaptive-sky-600-400",
   },
   failed: {
     label: "Failed",
@@ -141,8 +141,8 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
   limited: {
     label: "Limited",
     icon: "exclamationmark.circle",
-    className: "text-foreground-muted",
-    iconTintClassName: "accent-foreground-muted",
+    className: "text-adaptive-sky-600-400",
+    iconTintClassName: "accent-adaptive-sky-600-400",
   },
 };
 const DONE_STATUS_LABEL: StatusLabel = {

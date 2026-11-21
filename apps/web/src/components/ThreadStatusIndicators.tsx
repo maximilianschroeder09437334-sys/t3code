@@ -536,7 +536,7 @@ export function terminalStatusFromRunningIds(
   }
   return {
     label: "Terminal process running",
-    colorClass: "text-muted-foreground",
+    colorClass: "text-info-foreground",
     pulse: true,
   };
 }

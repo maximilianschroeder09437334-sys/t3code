@@ -93,7 +93,7 @@ export function ThreadRelationshipIcon({
             status === "in_progress" ||
             status === "pending" ||
             status === "waiting"
-            ? "bg-muted-foreground"
+            ? "bg-info"
             : status === "failed" || status === "error"
               ? "bg-error"
               : status === "completed"

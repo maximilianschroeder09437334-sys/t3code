@@ -176,9 +176,9 @@ const STATUS_VISUALS: Record<
   OrchestrationV2TurnItem["status"],
   { dotClass: string; label: string }
 > = {
-  pending: { dotClass: "bg-muted-foreground", label: "Queued" },
-  running: { dotClass: "bg-muted-foreground", label: "Running" },
-  waiting: { dotClass: "bg-muted-foreground", label: "Waiting" },
+  pending: { dotClass: "bg-info", label: "Queued" },
+  running: { dotClass: "bg-info", label: "Running" },
+  waiting: { dotClass: "bg-info", label: "Waiting" },
   idle: { dotClass: "bg-muted-foreground/50", label: "Idle · resumable" },
   completed: { dotClass: "bg-success", label: "Completed" },
   failed: { dotClass: "bg-error", label: "Failed" },
