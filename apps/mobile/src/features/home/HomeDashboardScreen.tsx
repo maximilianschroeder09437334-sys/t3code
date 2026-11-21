@@ -10,11 +10,13 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import type { ProviderApprovalDecision } from "@t3tools/contracts";
 import { useEffect, useMemo, useState } from "react";
-import { BackHandler, Pressable, ScrollView, TextInput, View } from "react-native";
+import { BackHandler, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ReanimatedSwipeable from "react-native-gesture-handler/ReanimatedSwipeable";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
+import { useContentTopInset } from "../../components/ui/useBarInset";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { environmentThreadDetails, threadEnvironment } from "../../state/threads";
@@ -74,6 +76,10 @@ export function HomeDashboardScreen(props: {
   readonly onNewThread: (project: EnvironmentProject) => void;
 }) {
   const now = useThreadListNow(props.threads);
+  // Home replaces the list and its app bar, so it clears the status bar itself.
+  const insets = useSafeAreaInsets();
+  const contentTopInset = useContentTopInset();
+  const topInset = Platform.OS === "android" ? insets.top : contentTopInset;
   const [section, setSection] = useState<HomeDashboardSection | "all">("all");
   const [projectKey, setProjectKey] = useState("all");
   const [selectedProject, setSelectedProject] = useState<EnvironmentProject | null>(null);
@@ -105,7 +111,7 @@ export function HomeDashboardScreen(props: {
     selectedProject ?? props.projects.find((project) => project.archivedAt == null) ?? null;
 
   return (
-    <View className="flex-1 bg-screen">
+    <View className="flex-1 bg-screen" style={{ paddingTop: topInset }}>
       <ScrollView className="flex-1" contentContainerClassName="gap-4 px-4 pb-4 pt-3">
         <View className="flex-row items-center gap-3">
           <Pressable
