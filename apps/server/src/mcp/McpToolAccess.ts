@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   type OrchestrationV2LinkOrigin,
+  type ProjectId,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
   type ProviderInteractionMode,
@@ -172,6 +173,61 @@ export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.E
       ),
     () => writingCaller,
   );
+
+/** Writes only into the active caller's thread-scoped staging area. */
+export const writesThreadScoped = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) => {
+  const check = requireThreadCaller.pipe(
+    Effect.andThen(writingCaller),
+    Effect.tap((caller) => assertNotLinked(caller, "write to this thread's scoped staging area")),
+  );
+  return declare(
+    (params: P) => check.pipe(Effect.flatMap(() => handle(params))),
+    () => check,
+  );
+};
+
+/** Drafts are inert until a human approves their exact script hash. */
+export const writesHookDraft = <P, A, E, R>(
+  projectId: (params: P) => ProjectId,
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) => {
+  const check = (params: P) =>
+    orchestratingCaller.pipe(
+      Effect.tap((caller) => assertNotLinked(caller, "create hook drafts")),
+      Effect.tap((caller) => {
+        if (caller.caller === undefined) {
+          return assertFullAccess(
+            caller,
+            "Creating hook drafts from an external client requires full access.",
+          );
+        }
+        return caller.caller.projectId === projectId(params) &&
+          caller.limits.interactionMode === "default"
+          ? Effect.void
+          : Effect.fail(
+              new OrchestratorMcpFailure({
+                code: "capability_denied",
+                message:
+                  "Hook drafts are limited to the active thread's project and default interaction mode.",
+              }),
+            );
+      }),
+    );
+  // Forwarding targets another environment's project; retain the full-access boundary.
+  return declare(
+    (params: P) => check(params).pipe(Effect.flatMap(() => handle(params))),
+    () =>
+      orchestratingCaller.pipe(
+        Effect.tap((caller) => assertNotLinked(caller, "create hook drafts")),
+        Effect.tap((caller) =>
+          assertFullAccess(
+            caller,
+            "Creating hook drafts in another environment requires full access.",
+          ),
+        ),
+      ),
+  );
+};
 
 export const writesThreads = <P, A, E, R>(
   threads: (params: P) => ReadonlyArray<ThreadId | undefined>,

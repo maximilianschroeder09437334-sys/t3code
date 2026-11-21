@@ -11,6 +11,7 @@ it("states t3_thread_read page size limits in the parameter descriptions", () =>
   const schema = Tool.getJsonSchema(OrchestratorToolkit.tools.t3_thread_read) as {
     readonly properties: Readonly<Record<string, { readonly description?: string }>>;
   };
+  expect(schema.properties.latest?.description).toContain("newest matching items");
   const limits = { limit: "100", runLimit: "50", maxCharsPerItem: "50000" };
   for (const [name, maximum] of Object.entries(limits)) {
     expect(schema.properties[name]?.description, name).toContain(maximum);

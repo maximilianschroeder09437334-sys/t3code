@@ -44,11 +44,13 @@ describe("offline pull request cache", () => {
         yield* Effect.promise(sqliteDatabase);
         const database = yield* MobileDatabase.make;
         yield* database.saveCache(environmentId, "pull-request", "v1:list", 1, '{"entries":[]}');
+        yield* database.saveCache(environmentId, "hooks", "v1:hooks", 1, '{"hooks":[]}');
         yield* database.saveCache(otherEnvironment, "pull-request", "v1:list", 1, "other");
         expect(yield* database.loadCache(environmentId, "pull-request", "v1:list")).toEqual(
           Option.some('{"entries":[]}'),
         );
         yield* database.clearEnvironmentCache(environmentId);
+        expect((yield* database.loadCache(environmentId, "hooks", "v1:hooks"))._tag).toBe("None");
         expect((yield* database.loadCache(environmentId, "pull-request", "v1:list"))._tag).toBe(
           "None",
         );

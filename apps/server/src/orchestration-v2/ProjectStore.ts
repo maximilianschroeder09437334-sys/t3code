@@ -25,6 +25,12 @@ export class ProjectStoreV2Error extends Schema.TaggedError<ProjectStoreV2Error>
   },
 ) {
   override get message(): string {
+    if (
+      this.operation === "findActiveForHookWorkspace" &&
+      this.cause === "Multiple projects match this hook workspace."
+    ) {
+      return "Multiple projects match this workspace; hook enforcement cannot choose a project.";
+    }
     return `Project store operation '${this.operation}' failed.`;
   }
 }
@@ -89,6 +95,10 @@ export class ProjectStoreV2 extends Context.Service<
     }) => Effect.Effect<ReadonlyArray<ProjectRow>, ProjectStoreV2Error>;
     /** Workspace roots match by exact string; callers normalize before asking. */
     readonly findActiveByWorkspaceRoot: (
+      workspaceRoot: string,
+    ) => Effect.Effect<Option.Option<ProjectRow>, ProjectStoreV2Error>;
+    /** Resolve one active project for hook enforcement, including recorded thread worktrees. */
+    readonly findActiveForHookWorkspace: (
       workspaceRoot: string,
     ) => Effect.Effect<Option.Option<ProjectRow>, ProjectStoreV2Error>;
     readonly getShell: (
@@ -224,6 +234,31 @@ export const make = Effect.gen(function* () {
       mapError("findActiveByWorkspaceRoot"),
     );
 
+  const findActiveForHookWorkspace: ProjectStoreV2["Service"]["findActiveForHookWorkspace"] =
+    Effect.fn("ProjectStoreV2.findActiveForHookWorkspace")(function* (workspaceRoot) {
+      const matches = yield* sql<{ readonly projectId: string }>`
+          SELECT p.project_id AS "projectId"
+          FROM projection_projects p
+          WHERE p.deleted_at IS NULL AND (
+            p.workspace_root = ${workspaceRoot}
+            OR EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_threads t
+              WHERE t.project_id = p.project_id AND t.deleted_at IS NULL
+                AND json_extract(t.payload_json, '$.worktreePath') = ${workspaceRoot}
+            )
+          )
+          ORDER BY p.project_id
+        `.pipe(NodeSqliteClient.readOnly, mapError("findActiveForHookWorkspace"));
+      if (matches.length > 1) {
+        return yield* new ProjectStoreV2Error({
+          operation: "findActiveForHookWorkspace",
+          cause: "Multiple projects match this hook workspace.",
+        });
+      }
+      return matches.length === 0
+        ? Option.none()
+        : yield* get(ProjectId.make(matches[0]!.projectId));
+    });
   const apply: ProjectStoreV2["Service"]["apply"] = Effect.fn("ProjectStoreV2.apply")(
     function* (event) {
       if (event.type === "project.created") {
@@ -282,6 +317,7 @@ export const make = Effect.gen(function* () {
     get,
     list,
     findActiveByWorkspaceRoot,
+    findActiveForHookWorkspace,
     getShell: Effect.fn("ProjectStoreV2.getShell")(function (projectId) {
       return get(projectId).pipe(Effect.map(Option.map(toShell)));
     }),

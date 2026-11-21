@@ -49,10 +49,13 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
+import * as HookRegistry from "../hooks/HookRegistry.ts";
+import * as HookScriptRunner from "../hooks/HookScriptRunner.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
 import * as AttachmentHandlers from "./toolkits/attachment/handlers.ts";
-import { ThreadToolkit } from "./toolkits/thread/tools.ts";
+import { ThreadNotesToolkit, ThreadToolkit } from "./toolkits/thread/tools.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
+import * as ThreadNotesHandlers from "./toolkits/thread/notesHandlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -1089,7 +1092,7 @@ const layerPreviewSnapshotRegistration = imageToolRegistration(
 export const layerPreviewToolkit = Layer.mergeAll(
   layerPreviewStandardToolkitRegistration,
   layerPreviewSnapshotRegistration,
-);
+).pipe(Layer.provide(HookRegistry.layer.pipe(Layer.provide(HookScriptRunner.layer))));
 
 export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorToolkit,
@@ -1097,6 +1100,11 @@ export const layerOrchestratorToolkit = toolkitRegistration(
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
+
+export const layerThreadNotesToolkit = toolkitRegistration(
+  ThreadNotesToolkit,
+  ThreadNotesHandlers.layer,
+);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,
@@ -1113,7 +1121,10 @@ const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
-export const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
+export const layerProjectRegistration = toolkitRegistration(
+  ProjectToolkit,
+  ProjectHandlers.layer,
+).pipe(Layer.provide(HookRegistry.layer.pipe(Layer.provide(HookScriptRunner.layer))));
 
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
@@ -1153,6 +1164,7 @@ export const layerTools = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
+  layerThreadNotesToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,

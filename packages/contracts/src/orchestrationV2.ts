@@ -687,6 +687,9 @@ export const OrchestrationV2Run = Schema.Struct({
   checkpointId: Schema.NullOr(CheckpointId),
   contextHandoffId: Schema.NullOr(ContextHandoffId),
   restartContinuationOfRunId: Schema.optional(RunId),
+  hookContinuationOfRunId: Schema.optional(RunId),
+  hookStageOriginRunId: Schema.optional(RunId),
+  hookStageWorkspaceRoot: Schema.optional(Schema.String),
   delegatedTaskId: Schema.optional(NodeId),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
@@ -1654,6 +1657,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("command_execution"),
     input: Schema.String,
+    /** Provider-reported launch directory; shell commands may change directories afterward. */
+    reportedCwd: Schema.optional(Schema.String),
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
@@ -1795,6 +1800,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("dynamic_tool"),
+    providerSessionId: Schema.optional(ProviderSessionId),
     toolName: Schema.NullOr(TrimmedNonEmptyString),
     viewedImagePath: Schema.optional(TrimmedNonEmptyString),
     input: Schema.Unknown,
@@ -2483,6 +2489,8 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("command_execution"),
     input: Schema.String,
+    /** Provider-reported launch directory; shell commands may change directories afterward. */
+    reportedCwd: Schema.optional(Schema.String),
     output: Schema.optional(Schema.String),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
@@ -2617,6 +2625,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("dynamic_tool"),
+    providerSessionId: Schema.optional(ProviderSessionId),
     toolName: Schema.NullOr(TrimmedNonEmptyString),
     viewedImagePath: Schema.optional(TrimmedNonEmptyString),
     input: Schema.Unknown,
@@ -3137,6 +3146,8 @@ export const OrchestrationV2Command = Schema.Union([
     modelSelection: Schema.optional(ModelSelection),
     sourcePlanRef: Schema.optional(Schema.Struct({ threadId: ThreadId, planId: PlanId })),
     restartContinuationOfRunId: Schema.optional(RunId),
+    hookContinuationOfRunId: Schema.optional(RunId),
+    hookStageWorkspaceRoot: Schema.optional(Schema.String),
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),

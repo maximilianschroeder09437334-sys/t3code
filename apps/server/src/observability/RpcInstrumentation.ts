@@ -50,6 +50,10 @@ const RPC_AGGREGATES = {
   [WS_METHODS.providerInstallCancel]: "provider",
   [WS_METHODS.providerInstallSubscribe]: "provider",
   [WS_METHODS.providerInstallRemove]: "provider",
+  [WS_METHODS.hooksList]: "hooks",
+  [WS_METHODS.hooksUpdateDraft]: "hooks",
+  [WS_METHODS.hooksApprove]: "hooks",
+  [WS_METHODS.hooksSetEnabled]: "hooks",
   [WS_METHODS.serverUpdateServer]: "server",
   [WS_METHODS.serverUpdateServerWithProgress]: "server",
   [WS_METHODS.serverCommitDesktopUpdate]: "server",
@@ -219,6 +223,9 @@ const RPC_AGGREGATES = {
   [WS_METHODS.subscribeServerConfig]: "server",
   [WS_METHODS.subscribeServerLifecycle]: "server",
   [WS_METHODS.subscribeAuthAccess]: "auth",
+  [WS_METHODS.threadNotesRead]: "orchestration",
+  [WS_METHODS.threadNotesSave]: "orchestration",
+  [WS_METHODS.threadNotesDelete]: "orchestration",
 } as const satisfies Readonly<Record<WsRpcMethod, string>>;
 
 const RPC_SPAN_PREFIX = "ws.rpc";

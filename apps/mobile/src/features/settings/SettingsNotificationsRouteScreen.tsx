@@ -4,6 +4,7 @@ import { readEnvironmentScope } from "../../state/session";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAuth } from "@clerk/expo";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
 import { useNavigation } from "@react-navigation/native";
 import * as Effect from "effect/Effect";
@@ -112,8 +113,11 @@ function ConfiguredSettingsNotificationsRouteScreen() {
   const savePreferences = useAtomSet(updateMobilePreferencesAtom);
   const agentAwarenessPushAvailable = supportsAgentAwarenessPush();
   const agentAwarenessPlatform = resolveAgentAwarenessPlatformPresentation(Platform.OS);
-  const agentAwarenessSubtitle =
-    Platform.OS === "android" && !agentAwarenessPushAvailable
+  const isPersonalTeamIosBuild =
+    Platform.OS === "ios" && Constants.expoConfig?.extra?.iosPersonalTeamBuild === true;
+  const agentAwarenessSubtitle = isPersonalTeamIosBuild
+    ? "Remote agent push and Live Activities need signing capabilities unavailable to this Personal Team build."
+    : Platform.OS === "android" && !agentAwarenessPushAvailable
       ? "Install a newer app build to enable notifications"
       : agentAwarenessPlatform.subtitle;
   const insets = useSafeAreaInsets();

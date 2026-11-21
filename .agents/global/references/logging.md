@@ -1,0 +1,7 @@
+## Project logging and Pipeline benchmark reporting
+
+Keep Current status Pipeline (405f6c71fa5e817b968fd1c9bb709456) separate from Current status T3 Code (40cf6c71fa5e815eae7fee0fdf5f2e89). Pipeline history uses collection://35892779-d49c-4c67-a071-4e08fd78285c; T3 history uses collection://a4724bff-77a3-4cac-bfab-884b13a528df. Use native Week -> Day -> individual Topic sub-items with correct ISO weeks and recorded Europe/Berlin times. Each meaningful distinct checkpoint gets its own Topic; update the same Topic only for the same bounded work/correction and keep its title/time range current. Keep Day Summary/Last step concise and current, detailed evidence in Topic bodies, and hub pages to navigation. Preserve unknown dates and source archives. Do not put T3 progress in Pipeline status or bury later work in a morning entry. The existing T3 logging rule is https://app.notion.com/p/40cf6c71fa5e817d91b6f598c9e07cad.
+
+Every scheduled Pipeline report repeats measured Inventory, conform and full-enabled-run minutes per footage hour plus clearly labeled defensible estimates and unknown remainder. This numeric requirement overrides only-what-changed for these reports. A component subtotal is not a complete full-run time; untimed or quality-rejected changes receive no invented speed credit.
+
+- Use the next-step ownership and waits syntax above for deferred handoffs. Verify the real condition and delivery; continue immediately executable work instead of inventing a wait.

@@ -1,4 +1,5 @@
 export * from "./baseSchemas.ts";
+export * from "./hooks.ts";
 export * from "./assistantCitations.ts";
 export * from "./composerContext.ts";
 export * from "./composerContextClipboard.ts";
@@ -70,3 +71,4 @@ export * from "./secretRequest.ts";
 export * from "./secretReference.ts";
 export * from "./settingsSecretValue.ts";
 export * from "./clientRpcPermissions.ts";
+export * from "./threadNotes.ts";

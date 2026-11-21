@@ -35,6 +35,77 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("round-trips a Codex tool's source session while accepting older items without one", () => {
+    const dynamicTool = {
+      id: "tool-1",
+      type: "dynamic_tool",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      providerThreadId: "provider-thread-1",
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: DateTime.formatIso(now),
+      toolName: "codex_apps.notion.fetch",
+      input: { id: "page-1" },
+      output: { id: "page-1" },
+      providerSessionId: "provider-session-source",
+    };
+    const decoded = decodeOrchestrationV2TurnItemJson(dynamicTool);
+    expect(encodeOrchestrationV2TurnItemJson(decoded)).toMatchObject({
+      providerSessionId: "provider-session-source",
+    });
+
+    const wireCodec = Schema.toCodecJson(OrchestrationV2TurnItem);
+    const encodeWire = Schema.encodeSync(wireCodec);
+    const decodeWire = Schema.decodeUnknownSync(wireCodec);
+    expect(decodeWire(encodeWire(decoded))).toMatchObject({
+      type: "dynamic_tool",
+      providerSessionId: "provider-session-source",
+    });
+
+    const { providerSessionId: _omitted, ...olderItem } = dynamicTool;
+    expect(decodeOrchestrationV2TurnItemJson(olderItem)).not.toHaveProperty("providerSessionId");
+    expect(decodeWire(encodeWire(decodeOrchestrationV2TurnItemJson(olderItem)))).not.toHaveProperty(
+      "providerSessionId",
+    );
+  });
+  it("round-trips a provider-reported command directory and accepts older items without one", () => {
+    const base = {
+      id: "command-1",
+      type: "command_execution",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: DateTime.formatIso(now),
+      input: "run checks",
+      exitCode: 0,
+    };
+    const decoded = decodeOrchestrationV2TurnItemJson({
+      ...base,
+      reportedCwd: "/workspace/staged",
+    });
+    expect(encodeOrchestrationV2TurnItemJson(decoded)).toMatchObject({
+      reportedCwd: "/workspace/staged",
+      exitCode: 0,
+    });
+    expect(decodeOrchestrationV2TurnItemJson(base)).not.toHaveProperty("reportedCwd");
+  });
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),

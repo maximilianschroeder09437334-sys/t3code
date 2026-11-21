@@ -1,11 +1,21 @@
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type HookDefinition } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type {
   SidebarProjectGroupMember,
   SidebarProjectSnapshot,
 } from "../../sidebarProjectGrouping";
-import { resolveSettingsScope, validateSettingsScopeSearch } from "./settingsScope";
+import {
+  resolveSettingsScope,
+  singleScopedProject,
+  validateSettingsScopeSearch,
+} from "./settingsScope";
+import {
+  hookEnvironmentRepresentatives,
+  hookProjectsForScope,
+  hooksInScope,
+  visibleHookProjects,
+} from "./hookProjects";
 
 const laptopId = EnvironmentId.make("laptop");
 const serverId = EnvironmentId.make("server");
@@ -60,6 +70,80 @@ function group(
 }
 
 const groups = [group("t3code", [first, second, third]), group("other", [other])];
+
+describe("hook overview targets", () => {
+  it("hides archived projects in the overview while retaining shared and explicitly selected hooks", () => {
+    const archived = { ...group("other", [other]), archived: true };
+    const mixedGroups = [groups[0]!, archived];
+    const allScope = resolveSettingsScope({}, mixedGroups, environments);
+    const allProjects = hookProjectsForScope(allScope, mixedGroups);
+    const visible = visibleHookProjects(allScope, mixedGroups, allProjects);
+    expect(visible).toEqual([first, second, third]);
+    expect(hookEnvironmentRepresentatives([...visible, ...allProjects])).toEqual([first, third]);
+    const archivedScope = resolveSettingsScope({ project: "other" }, mixedGroups, environments);
+    expect(
+      visibleHookProjects(
+        archivedScope,
+        mixedGroups,
+        hookProjectsForScope(archivedScope, mixedGroups),
+      ),
+    ).toEqual([other]);
+    const onlyArchived = [archived];
+    const onlyScope = resolveSettingsScope({}, onlyArchived, environments);
+    const targets = hookProjectsForScope(onlyScope, onlyArchived);
+    expect(visibleHookProjects(onlyScope, onlyArchived, targets)).toEqual([]);
+    expect(hookEnvironmentRepresentatives(targets)).toEqual([other]);
+  });
+  it("shows shared hooks once per environment and keeps project hooks separate", () => {
+    expect(hookEnvironmentRepresentatives([first, second, third, other])).toEqual([first, third]);
+    const base: HookDefinition = {
+      id: "shared",
+      projectId: first.id,
+      name: "Shared hook",
+      event: "turn_end",
+      script: "return { decision: 'allow' };",
+      scriptSha256: "a".repeat(64),
+      status: "draft",
+      enabled: false,
+      createdAt: 0,
+      scope: "all-projects",
+    };
+    const projectHook: HookDefinition = { ...base, id: "project", scope: "project" };
+    const { scope: _scope, ...legacy } = base;
+    const legacyHook: HookDefinition = { ...legacy, id: "legacy" };
+    expect(hooksInScope([base, projectHook, legacyHook], "all-projects")).toEqual([base]);
+    expect(hooksInScope([base, projectHook, legacyHook], "project")).toEqual([
+      projectHook,
+      legacyHook,
+    ]);
+  });
+  it("shows all projects, filters environments, and keeps a selected project narrow", () => {
+    expect(hookProjectsForScope(resolveSettingsScope({}, groups, environments), groups)).toEqual([
+      first,
+      second,
+      third,
+      other,
+    ]);
+    expect(
+      hookProjectsForScope(
+        resolveSettingsScope({ machine: laptopId }, groups, environments),
+        groups,
+      ),
+    ).toEqual([first, second]);
+    expect(
+      hookProjectsForScope(
+        resolveSettingsScope({ project: "other" }, groups, environments),
+        groups,
+      ),
+    ).toEqual([other]);
+    expect(
+      hookProjectsForScope(
+        resolveSettingsScope({ project: "missing" }, groups, environments),
+        groups,
+      ),
+    ).toEqual([]);
+  });
+});
 
 describe("settings scope search", () => {
   it("retains an orphan checkout so it cannot turn into all environments", () => {
@@ -158,5 +242,33 @@ describe("settings scope resolution", () => {
       members: [],
       environmentIds: [],
     });
+  });
+});
+
+describe("single scoped project", () => {
+  it("requires an unambiguous project even when multiple checkouts share an environment", () => {
+    expect(
+      singleScopedProject(
+        resolveSettingsScope({ project: "t3code", machine: laptopId }, groups, environments),
+      ),
+    ).toBeNull();
+    expect(
+      singleScopedProject(
+        resolveSettingsScope({ project: "t3code", machine: serverId }, groups, environments),
+      ),
+    ).toEqual(third);
+    expect(
+      singleScopedProject(
+        resolveSettingsScope(
+          { project: "t3code", checkout: second.physicalProjectKey },
+          groups,
+          environments,
+        ),
+      ),
+    ).toEqual(second);
+    expect(singleScopedProject(resolveSettingsScope({}, groups, environments))).toBeNull();
+    expect(
+      singleScopedProject(resolveSettingsScope({ project: "missing" }, groups, environments)),
+    ).toBeNull();
   });
 });

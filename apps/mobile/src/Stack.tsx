@@ -96,6 +96,7 @@ import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppea
 import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
 import { SettingsDiagnosticsRouteScreen } from "./features/diagnostics/SettingsDiagnosticsRouteScreen";
 import { SettingsProviderAccountsRouteScreen } from "./features/settings/SettingsProviderAccountsRouteScreen";
+import { SettingsHooksRouteScreen } from "./features/settings/SettingsHooksRouteScreen";
 import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteScreen";
 import { SettingsEnvironmentDetailRouteScreen } from "./features/settings/SettingsEnvironmentDetailRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
@@ -266,6 +267,11 @@ const SETTINGS_SCREENS = {
     screen: SettingsEnvironmentSourceControlRouteScreen,
     linking: "settings/source-control",
     options: { ...SETTINGS_PAGE_OPTIONS, title: "Source control" },
+  }),
+  SettingsHooks: createNativeStackScreen({
+    screen: SettingsHooksRouteScreen,
+    linking: "settings/hooks",
+    options: { ...SETTINGS_PAGE_OPTIONS, title: "Hooks and safeguards" },
   }),
   SettingsEnvironmentAgentBehavior: createNativeStackScreen({
     screen: SettingsThreadsRouteScreen,

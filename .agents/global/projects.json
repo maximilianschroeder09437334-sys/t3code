@@ -1,0 +1,30 @@
+{
+  "roots": [
+    "C:\\Users\\maximilian\\Desktop\\EDITING\\highlight editing pipeline app\\git",
+    "C:\\Users\\maximilian\\Desktop\\EDITING\\highlight editing pipeline app\\git\\git highlight pipeline",
+    "C:\\Users\\maximilian\\Desktop\\EDITING\\highlight editing pipeline app\\git\\t3-code-hooks",
+    "C:\\Users\\maximilian\\Documents\\Codex\\T3 Code Hooks",
+    "C:\\Users\\maximilian\\Desktop\\EDITING\\highlight editing pipeline app\\git\\t3 code\\source",
+    "C:\\Users\\maximilian\\Documents\\Codex\\safeguard-control-20261101",
+    "C:\\Users\\maximilian\\.t3\\scratch",
+    "C:\\Users\\maximilian\\Desktop",
+    "C:\\Users\\maximilian\\.t3\\worktrees\\t3-code-hooks\\relay-p2-enforcement-998c2b0b26920670",
+    "C:\\Users\\maximilian\\.t3\\worktrees\\t3-code-hooks\\relay-p3-notion-sync-c85f06c8d4ec9484",
+    "C:\\Users\\maximilian\\.t3\\worktrees\\t3-code-hooks\\relay-p5-usage-compare-b1c29613aad9641e",
+    "C:\\Users\\maximilian\\.t3\\worktrees\\t3-code-hooks\\relay-p6-safe-update-e7eec15e86e171dc"
+  ],
+  "excluded": [
+    {
+      "root": "C:\\Users\\maximilian\\Desktop\\EDITING\\highlight editing pipeline app\\git\\t3 code\\test-tmp\\hook-live-smoke-ccbf53e1\\repo",
+      "reason": "Frozen smoke fixture"
+    },
+    {
+      "root": "C:\\Users\\maximilian\\Desktop\\EDITING\\highlight editing pipeline app\\git\\t3-code-hooks\\backups\\notion-browser-safeguards-integration-20261103",
+      "reason": "Preserved staged source"
+    },
+    {
+      "root": "C:\\Users\\maximilian\\Desktop\\EDITING\\highlight editing pipeline app\\git\\backups\\T3 Code\\staging\\hooks-nightly-review-20261109-d1017b20\\native-mobile-followup\\publish-worktree",
+      "reason": "Preserved merge/publication checkpoint"
+    }
+  ]
+}

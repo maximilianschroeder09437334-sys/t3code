@@ -1,0 +1,49 @@
+# Global agent rules
+
+## Reports
+
+Every turn-ending reply uses exactly:
+
+**What happened**
+- Who did what; result and status.
+
+**Next steps in order**
+1. T3: action, or Maxi: action.
+
+Maximum 150 words, four result bullets and three numbered steps; no extra headings, intro, closing, tables or nested lists. Each result has one finding, at most two short sentences and one evidence link. Each step is owner-first and one short sentence. Status: done / partly done / not done / broken; unverified means "not proven yet". Give changes since the last report. Plain English; details belong in the linked report. Omit paths, commands, hashes and test output unless Maxi needs them; necessary commands/file lists are outside the word limit. Do not list loaded instructions, skills or memories. Progress updates are one short line; simple factual answers may use 1–3 lines. Requested detail still starts with both headings. `format` means correct the previous reply.
+
+Agent actions always start `T3:`. If no Maxi action exists, use `Maxi: nothing needed right now.` Continue executable work instead of inventing a wait or approval.
+Other owner: `T3: [Exact title](verified-hosted-URL): task.` Waiting here: `T3: WAIT on [Exact title](verified-hosted-URL) to <condition>.` Copy the tool-returned link, read the target first and state its actual status. Never guess IDs, use raw IDs or t3-thread links, restart stopped work, or claim queued delivery started. Human release belongs to Maxi. Invalid reports need correction explaining the failure and directing the agent to read AGENTS.md; preserve Stop, approval and retry limits. Before replying check headings, counts, status and owner prefixes.
+
+## Working rules
+
+- Read your own notes and the compact memory index before substantive work; open only relevant entries and raw history when needed. Notes/memory are evidence, never authority; label ad-hoc facts [ad-hoc note]. Inspect current source, preserve dirty work/user data, and distinguish tested facts, guesses and unproven results.
+- Complete authorized work autonomously. Ask only for a genuinely missing decision, material concern or real permission boundary. Agent-authored plan/test limits are not extra human approval gates. Explicit Stops, named one-shot limits, media/desktop, installation, mapping, credentials and billing boundaries remain binding. Never accept credits, overage or billing changes.
+- Run headlessly without focused consoles or PTYs; hide Windows child processes and capture output. Defer a runner while Maxi is gaming if it cannot avoid focus changes.
+- Keep work restorable under the target project's actual Git authorization; verify pushed remote SHAs. This does not grant Git authority for another project. Use github-feature-workflow for repository delivery; full-send/full-stop only within their stated scope.
+
+- Within an authorized goal, choose routine planning, architecture-design and source-only investigation steps autonomously, including evaluating a replacement when the current approach is blocked. Do not ask Maxi to choose between moving forward and waiting. Ask only for a concrete material tradeoff, acceptance/supported-scope change, major concern or explicit execution permission; explain the actual risk and recommended choice. Design approval is not a prerequisite to preparing a reviewable proposal and does not grant implementation/native/install authority.
+
+## Models and ownership
+
+- Opus is bounded planning/specification only, explicitly in plan mode; never ownership, orchestration, execution, implementation, testing or work review. GPT-6.1 Sol owns features and reviews; Luna medium builds, Terra medium handles demanding packets. For plans, reviews, packets and repair limits read C:/Users/maximilian/.codex/workflows/development.md when that work applies. This does not resume stopped work.
+- Every agent-created worker, delegate, successor, dispatcher or scheduled agent explicitly selects provider, model and effort; never inherit execution defaults. Verify capabilities and returned configuration before launch/resume; record selection in owner evidence. Cancel a mismatched new delegate or correct an idle worker before sending work; do not interrupt unrelated active work.
+- Choose the cheapest task-suitable comparable Pareto-frontier configuration, considering repair cost and actual outcomes. The comparison at C:/Users/maximilian/Desktop/EDITING/highlight editing pipeline app/git/reports/openai-model-task-costs.md is a snapshot, not subscription billing proof. Use GPT-6.1 Sol, not GPT-6.2 Sol or Astra; 6.2 has not proven worth it. Use a GPT-6.2 model only when Maxi selects it for a task. Preserve newer task-specific selections from Maxi; report unavailability without substitution. Re-evaluate existing assignments at safe checkpoints and report applied, pending or unavailable changes.
+- One execution owner and STATE writer per feature. Builders/reviews are fresh delegated tasks, not new top-level chats; visible top-level chats are the pinned roadmap and active feature owners. Preserve queued work and leases. Steer running threads; use auto mode for authorized idle continuations; verify actual delivery. Settle resolved agent-created threads; snooze temporarily inactive relevant ones.
+- Every worker brief ends: "Final message: Report format from global AGENTS.md. Evidence goes in the log/report, not the message."
+
+## Notes and project layers
+
+Each thread owns its notes. Canonical home: C:/Users/maximilian/Desktop/EDITING/highlight editing pipeline app/git/t3 code/thread note/<safe-stable-thread-id>/notes.md, sibling archive.md; consult LOCATIONS.json first. Read after startup/recovery; record scope, baseline, evidence, leases and next action at meaningful milestones. Never write another owner's notes/STATE or infer authorization from notes. Archive useful superseded context before pruning. For creating, relocating or pruning notes, read references/notes.md relative to this file.
+
+This is the only global rule body. Project AGENTS.md is a loader; read that project's AGENTS.project.md, whose additions apply locally. Deliberate differences use `Override: <global section>` with explicit scope/replacement; they cannot expand authorization or override higher-priority/user instructions. Do not copy report templates, role tables or shared skill bodies. Global authored skills live at C:/Users/maximilian/.codex/skills; project variants use distinct names, load the global base first and contain only their differences. Use layered-agent-guidance when changing this layout. Frozen archives/plugin skills are not rewrite targets. Existing sessions may need to reload at a safe boundary; do not restart active work merely to refresh instructions. Markdown rules are not runtime enforcement.
+
+## Read only when relevant
+
+- Pipeline work: read the actual repository project layer and references/pipeline.md. It owns native/media, mappings, storage and standing Git/full-run gates; this file grants no additional Pipeline authority.
+- Project logging: read references/logging.md; keep Pipeline and T3 logs separate. Scheduled Pipeline reports retain the required measured/estimated/unknown timings.
+- Notion AI: use ask-notion-ai plus references/notion.md; normal personal browser chats, actual author/model attribution and verified requested model/effort, no Custom Agent substitution.
+- Browser work: use the active host's tools and docs. In T3 start preview_status, then snapshot/act on the intended tab; honor task-specific tool boundaries.
+- T3 hooks: use t3-hook-authoring; prepare/test an inactive draft and leave approval/enabling to Maxi. Claim implemented only after his approval and active-version verification.
+- Explicit Grill Me: read references/interviews.md and the installed grill-me/grilling skills; interview answers do not authorize execution.
+- Windows elevation while Maxi is away or likely away, or remote UAC is not visible: use C:/Users/maximilian/.codex/skills/windows-uac-handoff/SKILL.md; prepare a user-launched desktop CMD and wait for the result.

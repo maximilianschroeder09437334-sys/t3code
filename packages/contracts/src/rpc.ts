@@ -403,6 +403,22 @@ import {
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
+import {
+  HookApproveInput,
+  HookUpdateDraftInput,
+  HookDefinition,
+  HookListInput,
+  HookRegistryError,
+  HookSetEnabledInput,
+} from "./hooks.ts";
+import {
+  ThreadNotesCreateInput,
+  ThreadNotesDeleteInput,
+  ThreadNotesListInput,
+  ThreadNotesListResult,
+  ThreadNotesMutationResult,
+} from "./threadNotes.ts";
+import { OrchestratorMcpFailure } from "./orchestratorMcp.ts";
 
 export const WS_METHODS = {
   projectsListEntries: "projects.listEntries",
@@ -423,6 +439,9 @@ export const WS_METHODS = {
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   assetsCreateUrl: "assets.createUrl",
+  threadNotesRead: "threadNotes.read",
+  threadNotesSave: "threadNotes.save",
+  threadNotesDelete: "threadNotes.delete",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -512,6 +531,10 @@ export const WS_METHODS = {
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
+  hooksList: "hooks.list",
+  hooksUpdateDraft: "hooks.updateDraft",
+  hooksApprove: "hooks.approve",
+  hooksSetEnabled: "hooks.setEnabled",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -816,6 +839,30 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksListRpc = Rpc.make(WS_METHODS.hooksList, {
+  payload: HookListInput,
+  success: Schema.Array(HookDefinition),
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksApproveRpc = Rpc.make(WS_METHODS.hooksApprove, {
+  payload: HookApproveInput,
+  success: HookDefinition,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksUpdateDraftRpc = Rpc.make(WS_METHODS.hooksUpdateDraft, {
+  payload: HookUpdateDraftInput,
+  success: HookDefinition,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
+});
+
+const WsHooksSetEnabledRpc = Rpc.make(WS_METHODS.hooksSetEnabled, {
+  payload: HookSetEnabledInput,
+  success: HookDefinition,
+  error: Schema.Union([HookRegistryError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1385,6 +1432,22 @@ const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
   error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError]),
+});
+
+const WsThreadNotesReadRpc = Rpc.make(WS_METHODS.threadNotesRead, {
+  payload: ThreadNotesListInput,
+  success: ThreadNotesListResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+const WsThreadNotesSaveRpc = Rpc.make(WS_METHODS.threadNotesSave, {
+  payload: ThreadNotesCreateInput,
+  success: ThreadNotesMutationResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
+});
+const WsThreadNotesDeleteRpc = Rpc.make(WS_METHODS.threadNotesDelete, {
+  payload: ThreadNotesDeleteInput,
+  success: ThreadNotesMutationResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
 });
 
 const WsAssetsPersistChatAttachmentsRpc = Rpc.make(WS_METHODS.assetsPersistChatAttachments, {
@@ -1998,6 +2061,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRunStorageCleanupRpc,
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
+  WsHooksListRpc,
+  WsHooksUpdateDraftRpc,
+  WsHooksApproveRpc,
+  WsHooksSetEnabledRpc,
   WsServerUpdateSettingsRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
@@ -2100,6 +2167,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
+  WsThreadNotesReadRpc,
+  WsThreadNotesSaveRpc,
+  WsThreadNotesDeleteRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,

@@ -23,16 +23,25 @@ export type SettingsTarget = EnvironmentPresentation & {
 // Several mounted Settings components read the scope at once (the list, its header, a page and
 // its editor), so share the derived lists across them for the same inputs.
 const targetsCache = new WeakMap<readonly EnvironmentPresentation[], readonly SettingsTarget[]>();
+const offlineTargetsCache = new WeakMap<
+  readonly EnvironmentPresentation[],
+  readonly SettingsTarget[]
+>();
 const groupsCache = new WeakMap<object, Map<string, ReturnType<typeof buildProjectGroups>>>();
 
-function connectedSettingsTargets(environments: readonly EnvironmentPresentation[]) {
-  let targets = targetsCache.get(environments);
+function connectedSettingsTargets(
+  environments: readonly EnvironmentPresentation[],
+  includeDisconnected: boolean,
+) {
+  const cache = includeDisconnected ? offlineTargetsCache : targetsCache;
+  let targets = cache.get(environments);
   if (!targets) {
     targets = environments.filter(
       (entry): entry is SettingsTarget =>
-        entry.connection.phase === "connected" && entry.serverConfig !== null,
+        (includeDisconnected || entry.connection.phase === "connected") &&
+        entry.serverConfig !== null,
     );
-    targetsCache.set(environments, targets);
+    cache.set(environments, targets);
   }
   return targets;
 }
@@ -106,7 +115,7 @@ export function SettingsEnvironmentFilterProvider(props: {
   );
 }
 
-export function useSettingsEnvironmentFilter() {
+export function useSettingsEnvironmentFilter(options?: { readonly includeDisconnected?: boolean }) {
   const selection = useContext(SettingsEnvironmentSelectionContext);
   if (selection === null) throw new Error("Settings environment filter provider is missing.");
   const { selectedIds, selectedProjectKey, setSelectedIds, selectProject, getSelectedProjectKey } =
@@ -116,7 +125,10 @@ export function useSettingsEnvironmentFilter() {
   const groupingSettings = useMobileProjectGroupingSettings();
   const groupingMode = groupingSettings.sidebarProjectGroupingMode;
   const projectGroups = settingsProjectGroups(projects, groupingMode);
-  const availableTargets = connectedSettingsTargets(environments);
+  const availableTargets = connectedSettingsTargets(
+    environments,
+    options?.includeDisconnected === true,
+  );
   const selectedTargets = useMemo(
     () =>
       availableTargets.filter(

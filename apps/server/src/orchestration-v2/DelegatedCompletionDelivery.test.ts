@@ -1,5 +1,6 @@
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
@@ -14,6 +15,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderTurnId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -42,6 +44,7 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import { continueHookRun } from "./HookContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
@@ -1233,7 +1236,9 @@ const seedRestartCancelledChild = (input: {
   readonly name: string;
   readonly completionWake: "always" | "settled_only";
   readonly continuationPending: boolean;
-  readonly runStatus?: "cancelled" | "completed";
+  readonly runStatus?: "cancelled" | "completed" | "failed";
+  readonly hookContinuationPending?: boolean;
+  readonly hookOriginalText?: string;
   readonly lostWork?: OrchestrationV2Run["restartCancelledBackgroundWork"];
   readonly now: DateTime.Utc;
 }) =>
@@ -1322,23 +1327,95 @@ const seedRestartCancelledChild = (input: {
     yield* eventSink.writeWithEffects({
       commandId: reconcileCommandId(input.name),
       events: [
-        input.lostWork === undefined
-          ? childRun
-          : {
+        ...(input.hookContinuationPending
+          ? [
+              {
+                id: EventId.make(`event:${input.name}:original-message`),
+                type: "message.updated" as const,
+                threadId: childThreadId,
+                runId: childRunId,
+                occurredAt: input.now,
+                payload: {
+                  id: childRun.payload.userMessageId,
+                  threadId: childThreadId,
+                  runId: childRunId,
+                  nodeId: null,
+                  role: "user" as const,
+                  text: input.hookOriginalText ?? "Complete the task.",
+                  attachments: [],
+                  streaming: false,
+                  createdBy: "agent" as const,
+                  creationSource: "server" as const,
+                  createdAt: input.now,
+                  updatedAt: input.now,
+                },
+              },
+            ]
+          : []),
+        input.hookContinuationPending
+          ? {
               ...childRun,
-              payload: { ...childRun.payload, restartCancelledBackgroundWork: input.lostWork },
-            },
+              payload: {
+                ...childRun.payload,
+                rootNodeId: NodeId.make(`node:${input.name}:root`),
+                delegatedTaskId: taskId,
+              },
+            }
+          : input.lostWork === undefined
+            ? childRun
+            : {
+                ...childRun,
+                payload: { ...childRun.payload, restartCancelledBackgroundWork: input.lostWork },
+              },
+        ...(input.hookContinuationPending
+          ? [
+              {
+                id: EventId.make(`event:${input.name}:hook-failure`),
+                type: "turn-item.updated" as const,
+                threadId: childThreadId,
+                runId: childRunId,
+                nodeId: NodeId.make(`node:${input.name}:root`),
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: input.now,
+                payload: makeProviderFailureTurnItem({
+                  driver,
+                  threadId: childThreadId,
+                  runId: childRunId,
+                  nodeId: NodeId.make(`node:${input.name}:root`),
+                  providerThreadId: ProviderThreadId.make(`provider:${input.name}`),
+                  providerTurnId: ProviderTurnId.make(`turn:${input.name}`),
+                  itemOrdinal: 100,
+                  failure: {
+                    code: "hook_blocked",
+                    class: "unknown",
+                    message: "Follow the rule.",
+                    retryable: false,
+                  },
+                  occurredAt: input.now,
+                }),
+              },
+            ]
+          : []),
       ],
-      effects: input.continuationPending
+      effects: input.hookContinuationPending
         ? [
             {
-              id: `effect:restart-continuation:${childRunId}`,
+              id: `effect:hook.continue:${childRunId}`,
               commandId: reconcileCommandId(input.name),
               threadId: childThreadId,
-              request: { type: "provider-runtime.continue", sourceRunId: childRunId },
+              request: { type: "hook.continue", sourceRunId: childRunId },
             },
           ]
-        : [],
+        : input.continuationPending
+          ? [
+              {
+                id: `effect:restart-continuation:${childRunId}`,
+                commandId: reconcileCommandId(input.name),
+                threadId: childThreadId,
+                request: { type: "provider-runtime.continue", sourceRunId: childRunId },
+              },
+            ]
+          : [],
     });
     return { taskId, childThreadId, childRunId };
   });
@@ -2214,6 +2291,149 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
 );
 
 it.layer(layerTest)("delegated tasks across a server restart", (it) => {
+  it.effect("settles a hook-blocked child when a pause declines its correction", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:hook-paused-parent");
+      const projectId = ProjectId.make("project:hook-paused-parent");
+      const runId = RunId.make("run:hook-paused-parent");
+      const rootNodeId = NodeId.make("node:hook-paused-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:hook-paused-parent-seed"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "hook-paused-child",
+        completionWake: "always",
+        continuationPending: false,
+        hookContinuationPending: true,
+        hookOriginalText: "Stop now",
+        runStatus: "failed",
+        now,
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+          (row) => row.id === child.taskId,
+        )?.status,
+        "running",
+      );
+      yield* continueHookRun({
+        threadId: child.childThreadId,
+        sourceRunId: child.childRunId,
+        messages: ["Follow the rule."],
+      });
+      const task = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (row) => row.id === child.taskId,
+      );
+      assert.equal(task?.status, "failed");
+      assert.lengthOf((yield* orchestrator.getThreadProjection(child.childThreadId)).runs, 1);
+    }),
+  );
+  it.effect("holds a hook-blocked child until its correction settles", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:hook-correction-parent");
+      const projectId = ProjectId.make("project:hook-correction-parent");
+      const runId = RunId.make("run:hook-correction-parent");
+      const rootNodeId = NodeId.make("node:hook-correction-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:hook-correction-parent-seed"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "hook-correction-child",
+        completionWake: "always",
+        continuationPending: false,
+        hookContinuationPending: true,
+        runStatus: "failed",
+        now,
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      const task = parent.subagents.find((row) => row.id === child.taskId);
+      assert.equal(task?.status, "running");
+      assert.isNull(task?.result ?? null);
+      assert.isTrue(yield* orchestrator.delegatedTaskResultPending(child.childThreadId));
+      assert.isFalse(
+        parent.contextTransfers.some((transfer) => transfer.sourceThreadId === child.childThreadId),
+      );
+      const correctionId = MessageId.make(`message:hook-continuation:${child.childRunId}`);
+      yield* continueHookRun({
+        threadId: child.childThreadId,
+        sourceRunId: child.childRunId,
+        messages: ["Follow the rule."],
+      });
+      const corrected = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
+        (run) => run.userMessageId === correctionId,
+      );
+      assert.isDefined(corrected);
+      assert.equal(corrected?.delegatedTaskId, child.taskId);
+      assert.equal(corrected?.hookContinuationOfRunId, child.childRunId);
+      if (!corrected) throw new Error("Expected a correction run");
+      const sink = yield* EventSink.EventSinkV2;
+      yield* sink.write({
+        commandId: CommandId.make("command:child-hook-corrected"),
+        events: [
+          {
+            id: EventId.make("event:child-hook-corrected-message"),
+            type: "message.updated",
+            threadId: child.childThreadId,
+            runId: corrected.id,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make("message:child-hook-corrected-result"),
+              threadId: child.childThreadId,
+              runId: corrected.id,
+              nodeId: null,
+              role: "assistant",
+              text: "Corrected result.",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            id: EventId.make("event:child-hook-corrected-run"),
+            type: "run.updated",
+            threadId: child.childThreadId,
+            runId: corrected.id,
+            occurredAt: now,
+            payload: { ...corrected, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      const finished = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (row) => row.id === child.taskId,
+      );
+      assert.equal(finished?.status, "completed");
+      assert.equal(finished?.result, "Corrected result.");
+    }),
+  );
   it.effect("queues a child result without creating a provider history handoff", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

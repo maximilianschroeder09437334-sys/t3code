@@ -101,6 +101,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/scheduled-tasks": CalendarClockIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/worktrees": FolderTreeIcon,
+  "/settings/hooks": ShieldCheckIcon,
   "/settings/connections": ServerIcon,
   "/settings/access": ShieldCheckIcon,
   "/settings/secrets": KeyRoundIcon,
