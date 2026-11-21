@@ -479,6 +479,8 @@ export interface ChatComposerProps {
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
+  /** A project selector shown next to Attach on Home's otherwise unchanged composer. */
+  homeProjectControl?: React.ReactNode;
 }
 
 const NO_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -3722,6 +3724,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               >
                 {composerAttachButton && !dictationTakesFooter ? (
                   <div className="me-2">{composerAttachButton}</div>
+                ) : null}
+                {props.homeProjectControl ? (
+                  <div className="me-auto min-w-0">{props.homeProjectControl}</div>
                 ) : null}
                 <div
                   data-chat-composer-actions="right"

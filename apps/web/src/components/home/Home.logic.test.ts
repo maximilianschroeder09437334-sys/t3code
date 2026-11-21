@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ThreadId } from "@t3tools/contracts";
 import { makeThreadFixture } from "../../test-fixtures";
-import { countHomeRows, deriveHomeRows } from "./Home.logic";
+import {
+  countHomeRows,
+  deriveHomeRows,
+  formatHomeCounts,
+  formatHomeTimeLabel,
+  homeComposerProjectRef,
+} from "./Home.logic";
 
 const project = {
   environmentId: "environment-test",
@@ -89,5 +95,106 @@ describe("deriveHomeRows", () => {
     expect(rows[0]?.thread.id).toBe("newer-successor");
     expect(rows[0]?.predecessors.map((thread) => thread.id)).toEqual(["settled-predecessor"]);
     expect(rows[1]?.predecessors).toEqual([]);
+  });
+});
+
+describe("Home display helpers", () => {
+  it("hides zero count categories", () => {
+    expect(formatHomeCounts({ needs: 0, done: 14, running: 1 })).toBe("14 done · 1 running");
+    expect(formatHomeCounts({ needs: 0, done: 0, running: 0 })).toBe("");
+  });
+
+  it("formats waiting, running, completed, and stopped timestamps", () => {
+    const now = "2026-11-21T14:00:00.000Z";
+    expect(
+      formatHomeTimeLabel(
+        makeThreadFixture({
+          hasPendingUserInput: true,
+          pendingUserInputAt: "2026-11-21T13:52:00.000Z",
+          updatedAt: "2026-11-21T13:52:00.000Z",
+        }),
+        now,
+        "UTC",
+      ),
+    ).toBe("waiting on you since 13:52 (8m)");
+    expect(
+      formatHomeTimeLabel(
+        makeThreadFixture({
+          runtime: {
+            status: "running",
+            activeRunId: "run-home" as never,
+            activityStartedAt: "2026-11-21T13:33:00.000Z",
+          } as never,
+          latestRun: {
+            runId: "run-home",
+            status: "running",
+            requestedAt: "2026-11-21T13:33:00.000Z",
+            startedAt: "2026-11-21T13:33:00.000Z",
+            completedAt: null,
+          } as never,
+        }),
+        now,
+        "UTC",
+      ),
+    ).toBe("running 27m");
+    expect(
+      formatHomeTimeLabel(
+        makeThreadFixture({
+          latestRun: { completedAt: "2026-11-21T13:52:00.000Z" } as never,
+          updatedAt: "2026-11-21T13:52:00.000Z",
+        }),
+        now,
+        "UTC",
+      ),
+    ).toBe("done 8m ago");
+    expect(
+      formatHomeTimeLabel(
+        makeThreadFixture({
+          runtime: { status: "stopped" } as never,
+          latestRun: {
+            status: "cancelled",
+            completedAt: "2026-11-21T13:47:00.000Z",
+          } as never,
+          updatedAt: "2026-11-21T13:47:00.000Z",
+        }),
+        now,
+        "UTC",
+      ),
+    ).toBe("stopped 13:47");
+    expect(
+      formatHomeTimeLabel(
+        makeThreadFixture({
+          runtime: {
+            status: "running",
+            activeRunId: "run-long-home" as never,
+            activityStartedAt: "2026-11-21T12:30:00.000Z",
+          } as never,
+        }),
+        now,
+        "UTC",
+      ),
+    ).toBe("running 90m");
+  });
+
+  it("maps the chosen project chip to the selected scoped project", () => {
+    const projects = [
+      {
+        environmentId: "environment-one",
+        id: "project-one",
+        title: "One",
+        archivedAt: null,
+      },
+      {
+        environmentId: "environment-two",
+        id: "project-two",
+        title: "Two",
+        archivedAt: null,
+      },
+    ] as never;
+    expect(homeComposerProjectRef(projects, "environment-two\u0000project-two")).toEqual({
+      environmentId: "environment-two",
+      projectId: "project-two",
+    });
+    expect(homeComposerProjectRef(projects, null)).toBeNull();
   });
 });

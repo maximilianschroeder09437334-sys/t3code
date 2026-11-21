@@ -3,6 +3,8 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { projectKey } from "@t3tools/client-runtime/state/entities";
+import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import type { ScopedProjectRef } from "@t3tools/contracts";
 import { resolveSidebarThreadStatus } from "../Sidebar.logic";
 
 export type HomeSection = "needs" | "done" | "running";
@@ -17,6 +19,114 @@ export interface HomeCounts {
   readonly needs: number;
   readonly done: number;
   readonly running: number;
+}
+
+export function formatHomeCounts(
+  counts: HomeCounts,
+  labels: { readonly done?: string } = {},
+): string {
+  return homeCountSegments(counts, labels).map((segment) => segment.text).join(" · ");
+}
+
+export function homeCountSegments(
+  counts: HomeCounts,
+  labels: { readonly done?: string } = {},
+): ReadonlyArray<{ readonly section: HomeSection; readonly text: string }> {
+  return [
+    ...(counts.needs > 0 ? [{ section: "needs" as const, text: `${counts.needs} need you` }] : []),
+    ...(counts.done > 0
+      ? [{ section: "done" as const, text: `${counts.done} ${labels.done ?? "done"}` }]
+      : []),
+    ...(counts.running > 0
+      ? [{ section: "running" as const, text: `${counts.running} running` }]
+      : []),
+  ];
+}
+
+function elapsedLabel(from: string | null | undefined, now: number): string | null {
+  if (!from) return null;
+  const timestamp = Date.parse(from);
+  if (!Number.isFinite(timestamp)) return null;
+  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
+  return `${minutes}m`;
+}
+
+export function homeDurationMinutes(thread: EnvironmentThreadShell, now: string): number {
+  const status = resolveSidebarThreadStatus(thread);
+  const timestamp =
+    status === "approval" || status === "input" || status === "request"
+      ? (thread.pendingUserInputAt ?? thread.latestRun?.completedAt ?? thread.updatedAt)
+      : status === "working" || status === "preparing" || status === "waiting" || status === "limited"
+        ? (resolveThreadWorkingStartedAt({
+            latestRun: thread.latestRun,
+            runtime: thread.runtime,
+          }) ?? thread.latestRun?.startedAt ?? thread.latestRun?.requestedAt ?? thread.updatedAt)
+        : (thread.latestRun?.completedAt ?? thread.updatedAt);
+  const start = Date.parse(timestamp);
+  const end = Date.parse(now);
+  return Number.isFinite(start) && Number.isFinite(end)
+    ? Math.max(0, Math.floor((end - start) / 60_000))
+    : 0;
+}
+
+export function homeThreadWasStopped(thread: EnvironmentThreadShell): boolean {
+  const status = thread.latestRun?.status;
+  return status === "cancelled" || status === "interrupted" || status === "rolled_back";
+}
+
+function clockLabel(value: string | null | undefined, timeZone?: string): string | null {
+  if (!value || !Number.isFinite(Date.parse(value))) return null;
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    ...(timeZone ? { timeZone } : {}),
+  }).format(new Date(value));
+}
+
+export function formatHomeTimeLabel(
+  thread: EnvironmentThreadShell,
+  now: string,
+  timeZone?: string,
+): string {
+  const nowMs = Date.parse(now);
+  const status = resolveSidebarThreadStatus(thread);
+  if (status === "approval" || status === "input" || status === "request") {
+    const since = thread.pendingUserInputAt ?? thread.latestRun?.completedAt ?? thread.updatedAt;
+    const at = clockLabel(since, timeZone) ?? "--:--";
+    const age = elapsedLabel(since, nowMs) ?? "0m";
+    return `waiting on you since ${at} (${age})`;
+  }
+  if (homeThreadWasStopped(thread)) {
+    return `stopped ${clockLabel(thread.latestRun?.completedAt ?? thread.updatedAt, timeZone) ?? "--:--"}`;
+  }
+  if (status === "working" || status === "preparing" || status === "waiting" || status === "limited") {
+    const startedAt = resolveThreadWorkingStartedAt({
+      latestRun: thread.latestRun,
+      runtime: thread.runtime,
+    });
+    const fallback = thread.latestRun?.startedAt ?? thread.latestRun?.requestedAt ?? thread.updatedAt;
+    const timestamp = startedAt ?? fallback;
+    const age = elapsedLabel(timestamp, nowMs);
+    return `running ${age ?? "0m"}`;
+  }
+  if (status === "failed") {
+    return `failed ${clockLabel(thread.latestRun?.completedAt ?? thread.updatedAt, timeZone) ?? "--:--"}`;
+  }
+  const completedAt = thread.latestRun?.completedAt ?? thread.updatedAt;
+  return `done ${elapsedLabel(completedAt, nowMs) ?? "0m"} ago`;
+}
+
+export function homeComposerProjectRef(
+  projects: ReadonlyArray<EnvironmentProject>,
+  selectedProjectKey: string | null,
+): ScopedProjectRef | null {
+  const project = projects.find(
+    (candidate) =>
+      candidate.archivedAt == null &&
+      projectKey(scopeProjectRef(candidate.environmentId, candidate.id)) === selectedProjectKey,
+  );
+  return project ? scopeProjectRef(project.environmentId, project.id) : null;
 }
 
 function sectionFor(thread: EnvironmentThreadShell): HomeSection {

@@ -2,6 +2,46 @@
 @layer theme, base, clerk, components, utilities;
 @import "tailwindcss";
 
+[data-chat-home-composer-only="true"] {
+  position: absolute !important;
+  inset: 0;
+}
+
+[data-chat-home-composer-only="true"] [data-home-composer-overlay="true"] {
+  inset: 0 !important;
+}
+
+[data-chat-home-composer-only="true"]
+  :is(
+    [data-home-composer-stack="true"],
+    [data-home-composer-anchor="true"],
+    [data-home-composer-shell-wrapper="true"],
+    [data-home-composer-shell="true"]
+  ) {
+  position: static !important;
+}
+
+[data-chat-home-composer-only="true"] [data-home-composer-shell="true"]::before {
+  display: none;
+}
+
+[data-chat-home-composer-only="true"]
+  *:not([data-home-composer-host="true"]):not([data-home-composer-host="true"] *):not(
+    :has([data-home-composer-host="true"])
+  ) {
+  display: none !important;
+}
+
+[data-chat-home-composer-only="true"] [data-home-composer-host="true"] {
+  position: absolute !important;
+  inset-inline: max(1.5rem, var(--workspace-gutter-start, 1.5rem));
+  inset-block-start: auto !important;
+  bottom: 0.75rem;
+  width: min(calc(100% - 3rem), var(--chat-content-max-width));
+  margin-inline: auto !important;
+  pointer-events: auto !important;
+}
+
 @custom-variant dark (&:is(.dark, .dark *));
 @custom-variant light (&:not(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */

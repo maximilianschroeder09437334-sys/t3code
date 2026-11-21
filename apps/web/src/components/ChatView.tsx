@@ -34,6 +34,7 @@ import { useThreadLifecycle } from "./chat/useThreadLifecycle";
 import { useRightPanelActions } from "./chat/useRightPanelActions";
 import { type TerminalLaunchContext, useChatTerminalActions } from "./chat/useChatTerminalActions";
 import { useComposerSend } from "./chat/useComposerSend";
+import type { ReactNode } from "react";
 import { useComposerResume } from "./chat/useComposerResume";
 import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
@@ -435,6 +436,9 @@ type ChatViewProps =
       embedded?: never;
       routeKind: "draft";
       draftId: DraftId;
+      homeComposerOnly?: boolean;
+      homeComposerProjectSelected?: boolean;
+      homeProjectControl?: ReactNode;
     };
 
 const DismissedFallbackWindowSchema = Schema.NullOr(Schema.String);
@@ -451,6 +455,10 @@ export default function ChatView(props: ChatViewProps) {
     forceExpandedMobileComposer = false,
     embedded: parentPanel,
   } = props;
+  const homeComposerOnly = routeKind === "draft" && props.homeComposerOnly === true;
+  const homeComposerProjectSelected =
+    routeKind !== "draft" || props.homeComposerProjectSelected !== false;
+  const homeProjectControl = routeKind === "draft" ? props.homeProjectControl : undefined;
   const embedded = parentPanel !== undefined;
   const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const canOperateTerminal = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
@@ -3331,6 +3339,7 @@ export default function ChatView(props: ChatViewProps) {
     <div
       ref={setWorkspaceLayoutElement}
       className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
+      data-chat-home-composer-only={homeComposerOnly ? "true" : undefined}
     >
       {embedded ? null : (
         <DeviceSetupDialogHost
@@ -3560,6 +3569,7 @@ export default function ChatView(props: ChatViewProps) {
               }}
               inert={isRevertingCheckpoint}
               data-chat-composer-overlay="true"
+              data-home-composer-overlay={homeComposerOnly ? "true" : undefined}
               className={
                 isDraftHeroState
                   ? "pointer-events-none absolute inset-0 z-20 flex items-center [@media(max-height:34rem)]:items-end"
@@ -3569,6 +3579,7 @@ export default function ChatView(props: ChatViewProps) {
               <div ref={draftHeroTransitionGroupRef} className="chat-composer-lane w-full">
                 <div
                   data-chat-composer-stack="true"
+                data-home-composer-stack={homeComposerOnly ? "true" : undefined}
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
                   {mayHaveParkedHandoff ? (
@@ -3607,6 +3618,7 @@ export default function ChatView(props: ChatViewProps) {
                   ) : null}
                   <div
                     ref={draftHeroComposerAnchorRef}
+                    data-home-composer-anchor={homeComposerOnly ? "true" : undefined}
                     className="relative z-10"
                     style={
                       forceExpandedMobileComposer
@@ -3615,11 +3627,19 @@ export default function ChatView(props: ChatViewProps) {
                     }
                   >
                     <ChildThreadApprovals threadRef={activeThreadRef} />
-                    <div className="relative">
-                      <ComposerSurface.Shell contextRow={showComposerContextStrip}>
+                    <div
+                      className="relative"
+                      data-home-composer-shell-wrapper={homeComposerOnly ? "true" : undefined}
+                    >
+                      <ComposerSurface.Shell
+                        contextRow={showComposerContextStrip}
+                        data-home-composer-shell={homeComposerOnly ? "true" : undefined}
+                        className={homeComposerOnly ? "max-w-3xl" : undefined}
+                      >
                         <ComposerSurface.Host
                           inert={queuedRunEdit.isSaving}
                           aria-busy={queuedRunEdit.isSaving}
+                          data-home-composer-host={homeComposerOnly ? "true" : undefined}
                         >
                           <div className="relative z-10">
                             {showProviderSubagentBar ? (
@@ -3689,7 +3709,9 @@ export default function ChatView(props: ChatViewProps) {
                                 canResume={canResume}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
                                 sendDisabledReason={
-                                  !canOperateThread
+                                  !homeComposerProjectSelected
+                                    ? "Choose a project before sending."
+                                    : !canOperateThread
                                     ? "This connection cannot change threads."
                                     : isEnvironmentChanging
                                       ? "Preparing machine"
@@ -3800,6 +3822,7 @@ export default function ChatView(props: ChatViewProps) {
                                 onRemoveEditingQueuedAttachment={
                                   queuedRunEdit.removeEditingAttachment
                                 }
+                                homeProjectControl={homeProjectControl}
                               />
                             )}
                           </div>
