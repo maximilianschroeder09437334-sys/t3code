@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { appAtomRegistry } from "../../state/atom-registry";
 import {
+  HOME_COMPOSER_FLOW_KEY,
   INITIAL_NEW_TASK_FLOW_STATE,
   newTaskFlowKey,
   newTaskFlowStateAtom,
@@ -41,6 +42,23 @@ describe("new task flow state", () => {
     unmountB();
     pruneNewTaskFlowStates({ routes: [{ key: "home", name: "Home" }, routeA] });
     expect(readNewTaskFlowState(flowA).projectKey).toBe("env:project-a");
+  });
+
+  it("keeps the Home composer's flow, which belongs to no route", () => {
+    updateNewTaskFlowState(HOME_COMPOSER_FLOW_KEY, {
+      projectKey: "env:project-a",
+      draftKey: "draft-home",
+    });
+
+    pruneNewTaskFlowStates({
+      routes: [{ key: "route-a", name: "Thread", params: { environmentId: "env", threadId: "t" } }],
+    });
+
+    expect(readNewTaskFlowState(HOME_COMPOSER_FLOW_KEY)).toMatchObject({
+      projectKey: "env:project-a",
+      draftKey: "draft-home",
+    });
+    updateNewTaskFlowState(HOME_COMPOSER_FLOW_KEY, INITIAL_NEW_TASK_FLOW_STATE);
   });
 
   it("drops a flow when its route is popped or promoted to a live thread", () => {

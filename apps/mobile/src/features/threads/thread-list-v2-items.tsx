@@ -10,6 +10,7 @@ import {
 } from "./thread-list-v2-row-appearance";
 import { RowPressable } from "../../components/ui/RowPressable";
 import { CustomSnoozeSheet } from "./CustomSnoozeSheet";
+import { ThreadDraftTag } from "./ThreadDraftTag";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
 import { threadEnvironment } from "../../state/threads";
@@ -495,31 +496,7 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
         >
           {pendingTask.title}
         </Text>
-        {isDraft ? (
-          <View className="flex-row items-center gap-1" style={{ minHeight: titleLineHeight }}>
-            <SymbolView
-              name="square.and.pencil"
-              size={13}
-              tintColorClassName={
-                selected
-                  ? selectedThreadRowColors.iconTintClassName
-                  : "accent-adaptive-amber-700-300"
-              }
-              type="monochrome"
-              weight="semibold"
-            />
-            <Text
-              className={cn(
-                "text-xs font-t3-bold",
-                selected
-                  ? selectedThreadRowColors.foregroundClassName
-                  : "text-adaptive-amber-700-300",
-              )}
-            >
-              Draft
-            </Text>
-          </View>
-        ) : null}
+        {isDraft ? <ThreadDraftTag selected={selected} minHeight={titleLineHeight} /> : null}
       </View>
       {!isDraft ? (
         <View className="mt-1" style={{ paddingLeft: titleTextInset }}>
@@ -1268,9 +1245,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         >
           {thread.title}
         </Text>
-        {hasUnsentDraft ? (
-          <Text className="text-xs font-t3-bold text-adaptive-amber-700-300">Draft</Text>
-        ) : null}
+        {hasUnsentDraft ? <ThreadDraftTag selected={selected} minHeight={titleLineHeight} /> : null}
         <View className="flex-row items-center gap-1.5" style={{ minHeight: titleLineHeight }}>
           {props.hasQueuedMessages ? <QueuedMessageIcon selected={selected} /> : null}
           {pinnedRow ? (
@@ -1604,6 +1579,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               />
             ) : null}
           </View>
+          {hasUnsentDraft ? <ThreadDraftTag selected={selected} /> : null}
           {props.hasQueuedMessages ? <QueuedMessageIcon selected={selected} /> : null}
           <Text
             className={cn(

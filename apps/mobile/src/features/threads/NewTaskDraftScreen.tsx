@@ -26,7 +26,7 @@ import {
   usePreventRemove,
   useRoute,
 } from "@react-navigation/native";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Platform, Pressable, View } from "react-native";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { KeyboardController } from "react-native-keyboard-controller";
@@ -61,7 +61,6 @@ import {
   getComposerDraftSnapshot,
   updateComposerDraftSettings,
   scheduleUnusedComposerAttachmentCleanup,
-  setComposerDraftText,
 } from "../../state/use-composer-drafts";
 import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
 import { useProjectClone } from "../../state/projectClones";
@@ -158,7 +157,6 @@ export function NewTaskDraftScreen(props: {
   };
   readonly draftId?: string;
   readonly incomingShareId?: string;
-  readonly initialMessage?: string;
 }) {
   const [creationMetadata] = useState(makeTurnCommandMetadata);
   const projects = useProjects();
@@ -407,8 +405,6 @@ export function NewTaskDraftScreen(props: {
   ]);
 
   const lastInitialProjectRefRef = useRef(props.initialProjectRef);
-  const homeMessageSubmittedRef = useRef<string | null>(null);
-  const homeMessageSubmittingRef = useRef<string | null>(null);
   const initialPickerRef = useRef<"open" | "dismissed" | null>(null);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- applies the route or catalog project to the draft once projects load, or opens the picker in the navigator
@@ -696,47 +692,6 @@ export function NewTaskDraftScreen(props: {
     scheduleUnusedComposerAttachmentCleanup(draftSnapshot.attachments);
     return message.messageId;
   }
-
-  const sendInitialHomeMessage = useEffectEvent(async (draftKey: string, message: string) => {
-    if (homeMessageSubmittingRef.current === draftKey) return;
-    homeMessageSubmittingRef.current = draftKey;
-    setComposerDraftText(draftKey, message);
-    try {
-      if (await handleStart()) homeMessageSubmittedRef.current = draftKey;
-    } finally {
-      homeMessageSubmittingRef.current = null;
-    }
-  });
-  useEffect(() => {
-    const draftKey = flow.draftKey;
-    if (
-      !props.initialMessage ||
-      !draftKey ||
-      flow.selectedProject?.environmentId !== props.initialProjectRef?.environmentId ||
-      flow.selectedProject?.id !== props.initialProjectRef?.projectId ||
-      !isIncomingShareReady ||
-      isComposerInteractionLocked ||
-      flow.submitting ||
-      homeMessageSubmittedRef.current === draftKey ||
-      homeMessageSubmittingRef.current === draftKey
-    ) {
-      return;
-    }
-    void sendInitialHomeMessage(draftKey, props.initialMessage);
-  }, [
-    flow.draftKey,
-    flow.prompt,
-    flow.selectedProject,
-    flow.selectedModel,
-    flow.submitting,
-    environmentConnected,
-    isComposerInteractionLocked,
-    isIncomingShareReady,
-    props.initialMessage,
-    props.initialProjectRef?.environmentId,
-    props.initialProjectRef?.projectId,
-    sendInitialHomeMessage,
-  ]);
 
   // Keep the current surface until the local draft selection is ready. Publishing
   // an empty loading surface here flashes between two already-cached threads.

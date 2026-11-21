@@ -223,6 +223,8 @@ export function NewTaskFlowProvider(
     /** Identifies the draft route this flow serves; a new key starts a fresh flow. */
     flowKey?: string;
     routeDraftId?: string;
+    /** False for a flow that is not a new-task screen (the Home composer), so no list row reads as open. */
+    publishesActiveTask?: boolean;
   }>,
 ) {
   const projects = useProjects();
@@ -360,7 +362,10 @@ export function NewTaskFlowProvider(
         : selectedProjectDraftKey
           ? `draft-task:${selectedProjectDraftKey}`
           : null;
-  const activeNewTask = props.active === false ? null : { pendingKey: activePendingKey };
+  const activeNewTask =
+    props.active === false || props.publishesActiveTask === false
+      ? null
+      : { pendingKey: activePendingKey };
   const selectedProjectDraft = useComposerDraft(selectedProjectDraftKey);
   const prompt = selectedProjectDraft.text;
   const attachments = selectedProjectDraft.attachments;

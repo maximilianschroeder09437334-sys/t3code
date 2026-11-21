@@ -207,9 +207,6 @@ export function NewTaskDraftRouteScreen({ route }: StaticScreenProps<NewTaskDraf
       ) : (
         <NewTaskDraftScreen
           initialProjectRef={preparedProjectRef}
-          initialMessage={
-            Array.isArray(params.initialMessage) ? params.initialMessage[0] : params.initialMessage
-          }
           incomingShareId={
             Array.isArray(params.incomingShareId)
               ? params.incomingShareId[0]

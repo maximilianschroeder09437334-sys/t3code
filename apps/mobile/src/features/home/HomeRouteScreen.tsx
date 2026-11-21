@@ -158,19 +158,14 @@ export function HomeRouteScreen() {
         delegatedUnderParent={delegatedUnderParent}
         onBack={() => setShowHomeDashboard(false)}
         onOpenThread={handleSelectThread}
+        onOpenStartedThread={(thread) =>
+          selectThreadRoute({
+            environmentId: String(thread.environmentId),
+            threadId: String(thread.threadId),
+          })
+        }
         onSettleThread={settleThread}
         onSnoozeThread={snoozeThread}
-        onSendNewThread={(project, message) => {
-          selectThreadRoute({
-            draft: {
-              requestId: uuidv4(),
-              environmentId: String(project.environmentId),
-              projectId: String(project.id),
-              title: project.title,
-              initialMessage: message,
-            },
-          });
-        }}
       />
     );
   }

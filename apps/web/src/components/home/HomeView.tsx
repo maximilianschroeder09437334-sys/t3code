@@ -21,6 +21,7 @@ import {
   LoaderCircleIcon,
   PinIcon,
   SearchIcon,
+  SquarePenIcon,
 } from "lucide-react";
 import { isElectron } from "../../env";
 import {
@@ -465,6 +466,19 @@ function HomeCountSummary({
   );
 }
 
+/** The sidebar's unsent-draft mark: the yellow pen, with its label. */
+function HomeDraftTag() {
+  return (
+    <span
+      aria-label="Unsent draft"
+      className="inline-flex shrink-0 items-center gap-1 text-2xs font-semibold text-warning-foreground"
+    >
+      <SquarePenIcon aria-hidden className="size-3 shrink-0" />
+      Draft
+    </span>
+  );
+}
+
 function HomeRowCard({
   itemKey,
   row,
@@ -541,18 +555,14 @@ function HomeRowCard({
       onKeyDown={(event) => {
         if (event.key === "Enter" && event.target === event.currentTarget) onOpen(thread);
       }}
-      className="cursor-pointer rounded-xl border border-border/70 px-3.5 py-3 outline-none transition-colors hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-ring"
+      className="cursor-pointer rounded-xl border border-border/70 px-3.5 py-3 outline-none transition-colors hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
     >
       {row.section === "needs" ? (
         <>
           <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
             {providerIcon}
             <span className="min-w-0 truncate">{title}</span>
-            {hasUnsentDraft ? (
-              <span className="shrink-0 text-2xs font-semibold text-amber-600 dark:text-amber-400">
-                Draft
-              </span>
-            ) : null}
+            {hasUnsentDraft ? <HomeDraftTag /> : null}
             {chainToggle}
             <span className="ml-auto" />
             {time}
@@ -569,11 +579,7 @@ function HomeRowCard({
           <div className="flex min-w-0 items-center gap-2">
             {providerIcon}
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">{title}</span>
-            {hasUnsentDraft ? (
-              <span className="shrink-0 text-2xs font-semibold text-amber-600 dark:text-amber-400">
-                Draft
-              </span>
-            ) : null}
+            {hasUnsentDraft ? <HomeDraftTag /> : null}
             {chainToggle}
             <span className="ml-auto" />
             {time}

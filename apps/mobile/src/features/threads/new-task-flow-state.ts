@@ -15,6 +15,22 @@ import {
 /** The flow a provider serves while no draft route is on the stack. */
 export const INACTIVE_FLOW_KEY = "inactive";
 
+/**
+ * The flow behind the phone Home composer. It is not a route, so it outlives
+ * navigation: text typed on Home stays until it is sent.
+ */
+export const HOME_COMPOSER_FLOW_KEY = "home-composer";
+
+/** True while the phone Home dashboard, and so its composer, is on screen. */
+export const homeComposerOpenAtom = Atom.make(false).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("mobile:home-composer-open"),
+);
+
+export function setHomeComposerOpen(open: boolean): void {
+  appAtomRegistry.set(homeComposerOpenAtom, open);
+}
+
 /** The flow key for a draft Thread route: its key plus the draft it opened. */
 export function newTaskFlowKey(route: {
   readonly key: string;
@@ -159,12 +175,15 @@ export function liveNewTaskFlowKeys(state: NavigationRoutes): ReadonlySet<string
 
 /**
  * Drops the flow of every draft route that left the stack: popped (discarded)
- * or promoted to a live thread, whose params no longer carry the draft.
+ * or promoted to a live thread, whose params no longer carry the draft. The
+ * Home composer's flow belongs to no route and is always kept.
  */
 export function pruneNewTaskFlowStates(state: NavigationRoutes): void {
   const flows = appAtomRegistry.get(flowStatesAtom);
   const live = liveNewTaskFlowKeys(state);
-  const kept = Object.entries(flows).filter(([flowKey]) => live.has(flowKey));
+  const kept = Object.entries(flows).filter(
+    ([flowKey]) => flowKey === HOME_COMPOSER_FLOW_KEY || live.has(flowKey),
+  );
   if (kept.length === Object.keys(flows).length) return;
   appAtomRegistry.set(flowStatesAtom, Object.fromEntries(kept));
 }

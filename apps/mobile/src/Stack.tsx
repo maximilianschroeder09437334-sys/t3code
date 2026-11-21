@@ -85,7 +85,12 @@ import {
   NewTaskThreadSettingsRouteScreen,
 } from "./features/threads/ThreadSettingsSheet";
 import { NewTaskFlowProvider } from "./features/threads/new-task-flow-provider";
-import { newTaskFlowKey } from "./features/threads/new-task-flow-state";
+import {
+  HOME_COMPOSER_FLOW_KEY,
+  homeComposerOpenAtom,
+  newTaskFlowKey,
+} from "./features/threads/new-task-flow-state";
+import { useAtomValue } from "@effect/atom-react";
 import { NewTaskRouteScreen } from "./features/threads/NewTaskRouteScreen";
 import { SettingsNavigationRouteScreen } from "./features/settings/SettingsNavigationRouteScreen";
 import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppearanceRouteScreen";
@@ -411,12 +416,27 @@ function RootStackLayout(props: {
   const routeDraftId = Array.isArray(draftParams?.draftId)
     ? draftParams.draftId[0]
     : draftParams?.draftId;
+  // The phone Home composer starts threads through the same flow. It serves Home while
+  // Home is the top page, so sheets it opens (model settings) edit the Home draft.
+  const homeComposerOpen = useAtomValue(homeComposerOpenAtom);
+  const servesHomeComposer =
+    !draftRouteOnTop &&
+    homeComposerOpen &&
+    props.state.routes.findLast((route) => route.name === "Thread" || route.name === "Home")
+      ?.name === "Home";
 
   return (
     <NewTaskFlowProvider
-      active={draftRouteOnTop}
-      flowKey={draftRoute === undefined ? undefined : newTaskFlowKey(draftRoute)}
-      routeDraftId={routeDraftId}
+      active={draftRouteOnTop || servesHomeComposer}
+      flowKey={
+        servesHomeComposer
+          ? HOME_COMPOSER_FLOW_KEY
+          : draftRoute === undefined
+            ? undefined
+            : newTaskFlowKey(draftRoute)
+      }
+      routeDraftId={servesHomeComposer ? undefined : routeDraftId}
+      publishesActiveTask={!servesHomeComposer}
     >
       <HardwareKeyboardCommandProvider pathname={pathname}>
         <ShowcaseReadyMarker />

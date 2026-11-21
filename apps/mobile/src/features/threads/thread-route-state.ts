@@ -5,7 +5,6 @@ export type NewTaskDraftRouteParams = {
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
   readonly title?: string | string[];
-  readonly initialMessage?: string | string[];
   readonly cloning?: string | string[];
   readonly draftId?: string | string[];
   readonly incomingShareId?: string | string[];
@@ -35,7 +34,6 @@ export function draftRouteIdentity(draft: NewTaskDraftRouteParams): string {
     first(draft.draftId),
     first(draft.environmentId),
     first(draft.projectId),
-    first(draft.initialMessage),
     draft.branch ?? null,
     draft.worktreePath ?? null,
     first(draft.incomingShareId),
