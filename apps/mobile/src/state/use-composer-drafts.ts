@@ -690,6 +690,11 @@ export function isComposerDraftEmpty(draft: ComposerDraft): boolean {
   return isEmptyDraft(draft);
 }
 
+/** True when an existing thread has unsent user content in its composer. */
+export function composerDraftHasUserContent(draft: ComposerDraft): boolean {
+  return draft.text.trim().length > 0 || draft.attachments.length > 0;
+}
+
 function isEmptyDraft(draft: ComposerDraft): boolean {
   return (
     draft.text.length === 0 &&

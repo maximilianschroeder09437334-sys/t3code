@@ -15,9 +15,9 @@ const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 const isMaxiAndroidBuild = repoEnv.T3CODE_MAXI_ANDROID === "1";
 const isMaxiBuild = isIosPersonalTeamBuild || isMaxiAndroidBuild;
 // Maxi marketing version on both platforms; each build must raise its platform build number.
-const MAXI_MARKETING_VERSION = "2.2.4";
-const MAXI_IOS_BUILD_NUMBER = "8";
-const MAXI_ANDROID_VERSION_CODE = 12;
+const MAXI_MARKETING_VERSION = "2.2.5";
+const MAXI_IOS_BUILD_NUMBER = "9";
+const MAXI_ANDROID_VERSION_CODE = 13;
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");

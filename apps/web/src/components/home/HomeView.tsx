@@ -71,6 +71,7 @@ import {
   type HomeSection,
 } from "./Home.logic";
 import ChatView from "../ChatView";
+import { useThreadHasUnsentDraft } from "../../composerDraftStore";
 
 const labels: Record<HomeSection, string> = {
   needs: "Needs you",
@@ -485,6 +486,7 @@ function HomeRowCard({
 }) {
   const [chainOpen, setChainOpen] = useState(false);
   const { thread } = row;
+  const hasUnsentDraft = useThreadHasUnsentDraft(homeThreadRef(thread));
   const status = resolveSidebarThreadStatus(thread);
   const stopped = homeThreadWasStopped(thread);
   const timeColor =
@@ -546,6 +548,11 @@ function HomeRowCard({
           <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
             {providerIcon}
             <span className="min-w-0 truncate">{title}</span>
+            {hasUnsentDraft ? (
+              <span className="shrink-0 text-2xs font-semibold text-amber-600 dark:text-amber-400">
+                Draft
+              </span>
+            ) : null}
             {chainToggle}
             <span className="ml-auto" />
             {time}
@@ -562,6 +569,11 @@ function HomeRowCard({
           <div className="flex min-w-0 items-center gap-2">
             {providerIcon}
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">{title}</span>
+            {hasUnsentDraft ? (
+              <span className="shrink-0 text-2xs font-semibold text-amber-600 dark:text-amber-400">
+                Draft
+              </span>
+            ) : null}
             {chainToggle}
             <span className="ml-auto" />
             {time}

@@ -93,6 +93,8 @@ import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 import { pullRequestStatus } from "../pull-requests/pullRequestStatus";
+import { composerDraftHasUserContent, useComposerDraft } from "../../state/use-composer-drafts";
+import { scopedThreadKey } from "../../lib/scopedEntities";
 
 interface StatusLabel {
   // Null when the icon and timer carry the status on their own.
@@ -741,6 +743,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const dormant = useSwipeRowDormant(props.activationKey);
 
   const selectThread = () => onSelectThread(thread);
+  const composerDraft = useComposerDraft(scopedThreadKey(thread.environmentId, thread.id));
+  const hasUnsentDraft = composerDraftHasUserContent(composerDraft);
   const { providerDrivers, providerIconUrl } = useMemo(() => {
     const provider = props.providers?.find(
       (candidate) =>
@@ -1264,6 +1268,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         >
           {thread.title}
         </Text>
+        {hasUnsentDraft ? (
+          <Text className="text-xs font-t3-bold text-adaptive-amber-700-300">Draft</Text>
+        ) : null}
         <View className="flex-row items-center gap-1.5" style={{ minHeight: titleLineHeight }}>
           {props.hasQueuedMessages ? <QueuedMessageIcon selected={selected} /> : null}
           {pinnedRow ? (

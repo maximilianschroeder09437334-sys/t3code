@@ -99,10 +99,10 @@ it.each([
   // The version override must win over the ordinary env override.
   const config = await loadConfig(variant, { ...MAXI_IOS_ENV, T3CODE_MOBILE_VERSION: "3.0.0" });
   expect(config.name).toBe("T3 Code Maxi");
-  expect(config.version).toBe("2.2.4");
+  expect(config.version).toBe("2.2.5");
   expect(config.ios).toMatchObject({
     bundleIdentifier: "com.maximilian.t3code.mobile",
-    buildNumber: "8",
+    buildNumber: "9",
     supportsTablet: true,
   });
   expect(config.android?.versionCode).toBeUndefined();
@@ -126,10 +126,10 @@ it("keeps the Maxi iOS personal-team restrictions", async () => {
 it("pins the Maxi Android build without touching iOS", async () => {
   const config = await loadConfig("production", { T3CODE_MAXI_ANDROID: "1" });
   expect(config.name).toBe("T3 Code Maxi");
-  expect(config.version).toBe("2.2.4");
+  expect(config.version).toBe("2.2.5");
   expect(config.android).toMatchObject({
     package: "com.maximilian.t3code.mobile",
-    versionCode: 12,
+    versionCode: 13,
   });
   expect(config.ios?.bundleIdentifier).toBe("com.t3tools.t3code");
   expect(config.ios?.buildNumber).toBeUndefined();

@@ -160,13 +160,14 @@ export function HomeRouteScreen() {
         onOpenThread={handleSelectThread}
         onSettleThread={settleThread}
         onSnoozeThread={snoozeThread}
-        onNewThread={(project) => {
+        onSendNewThread={(project, message) => {
           selectThreadRoute({
             draft: {
               requestId: uuidv4(),
               environmentId: String(project.environmentId),
               projectId: String(project.id),
               title: project.title,
+              initialMessage: message,
             },
           });
         }}

@@ -30,6 +30,17 @@ import { onTestFinished, vi } from "vite-plus/test";
 
 import { buildIncomingShareDraft } from "../features/sharing/incoming-share-model";
 import { composerContextSendBlockReason } from "../lib/composerContext";
+import { composerDraftHasUserContent } from "./use-composer-drafts";
+
+describe("composerDraftHasUserContent", () => {
+  it("shows a draft only for unsent text or attachments", () => {
+    expect(composerDraftHasUserContent({ text: "  ", attachments: [] })).toBe(false);
+    expect(composerDraftHasUserContent({ text: "keep this", attachments: [] })).toBe(true);
+    expect(composerDraftHasUserContent({ text: "", attachments: [{ id: "image" } as never] })).toBe(
+      true,
+    );
+  });
+});
 
 const composerDraftFileMocks = vi.hoisted(() => {
   let document = JSON.stringify({ schemaVersion: 1, drafts: {} });

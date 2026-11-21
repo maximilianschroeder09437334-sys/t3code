@@ -10,18 +10,24 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import type { ProviderApprovalDecision } from "@t3tools/contracts";
 import { useEffect, useMemo, useState } from "react";
-import { BackHandler, Platform, Pressable, ScrollView, TextInput, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { BackHandler, Pressable, ScrollView, TextInput, View } from "react-native";
 import ReanimatedSwipeable from "react-native-gesture-handler/ReanimatedSwipeable";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
-import { useContentTopInset } from "../../components/ui/useBarInset";
-import { scopedProjectKey } from "../../lib/scopedEntities";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { environmentThreadDetails, threadEnvironment } from "../../state/threads";
 import { useThreadListNow } from "../threads/use-thread-list-now";
 import { deriveMobileHomeRows } from "./homeDashboardRows";
+import { composerDraftHasUserContent, useComposerDraft } from "../../state/use-composer-drafts";
+import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
+import { CustomSnoozeSheet } from "../threads/CustomSnoozeSheet";
+import {
+  resolveThreadListV2SnoozeMenuSelection,
+  resolveThreadListV2SnoozePresets,
+} from "../threads/threadListV2";
+import { Menu } from "../../components/ui/Menu";
+import type { MenuAction } from "@react-native-menu/menu";
 
 const sectionColor: Record<HomeDashboardSection, string> = {
   needs: "text-warning-foreground",
@@ -73,16 +79,14 @@ export function HomeDashboardScreen(props: {
   readonly onOpenThread: (thread: EnvironmentThreadShell) => void;
   readonly onSettleThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly onSnoozeThread: (thread: EnvironmentThreadShell, until: string) => Promise<boolean>;
-  readonly onNewThread: (project: EnvironmentProject) => void;
+  readonly onSendNewThread: (project: EnvironmentProject, message: string) => void;
 }) {
   const now = useThreadListNow(props.threads);
   // Home replaces the list and its app bar, so it clears the status bar itself.
-  const insets = useSafeAreaInsets();
-  const contentTopInset = useContentTopInset();
-  const topInset = Platform.OS === "android" ? insets.top : contentTopInset;
   const [section, setSection] = useState<HomeDashboardSection | "all">("all");
   const [projectKey, setProjectKey] = useState("all");
   const [selectedProject, setSelectedProject] = useState<EnvironmentProject | null>(null);
+  const [newThreadMessage, setNewThreadMessage] = useState("");
   const rows = useMemo(
     () =>
       deriveMobileHomeRows({
@@ -111,7 +115,7 @@ export function HomeDashboardScreen(props: {
     selectedProject ?? props.projects.find((project) => project.archivedAt == null) ?? null;
 
   return (
-    <View className="flex-1 bg-screen" style={{ paddingTop: topInset }}>
+    <View className="flex-1 bg-screen">
       <ScrollView className="flex-1" contentContainerClassName="gap-4 px-4 pb-4 pt-3">
         <View className="flex-row items-center gap-3">
           <Pressable
@@ -193,12 +197,7 @@ export function HomeDashboardScreen(props: {
                         now={now}
                         onOpen={() => props.onOpenThread(row.thread)}
                         onSettle={() => props.onSettleThread(row.thread)}
-                        onSnooze={() =>
-                          props.onSnoozeThread(
-                            row.thread,
-                            new Date(Date.parse(now) + 60 * 60_000).toISOString(),
-                          )
-                        }
+                        onSnooze={(until) => props.onSnoozeThread(row.thread, until)}
                       />
                     ))}
                   </View>
@@ -208,29 +207,68 @@ export function HomeDashboardScreen(props: {
           );
         })}
       </ScrollView>
-      <View className="flex-row items-center gap-2 border-t border-border px-3 py-2">
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} className="max-w-[42%]">
-          <View className="flex-row gap-1">
-            {props.projects
-              .filter((project) => project.archivedAt == null)
-              .map((project) => (
-                <Pressable
-                  key={`${project.environmentId}:${project.id}`}
-                  onPress={() => setSelectedProject(project)}
-                  className={`rounded-full border px-2.5 py-2 ${composerProject?.environmentId === project.environmentId && composerProject.id === project.id ? "border-foreground" : "border-border"}`}
-                >
-                  <Text className="text-xs text-foreground">{project.title}</Text>
-                </Pressable>
-              ))}
-          </View>
-        </ScrollView>
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => composerProject && props.onNewThread(composerProject)}
-          className="flex-1 rounded-xl border border-border px-3 py-3"
+      <View className="gap-2 border-t border-border px-3 py-2">
+        <Menu
+          actions={props.projects
+            .filter((project) => project.archivedAt == null)
+            .map((project) => ({
+              id: scopedProjectKey(project.environmentId, project.id),
+              title: project.title,
+              state:
+                composerProject?.environmentId === project.environmentId &&
+                composerProject.id === project.id
+                  ? "on"
+                  : "off",
+            }))}
+          onPressAction={({ nativeEvent }) => {
+            setSelectedProject(
+              props.projects.find(
+                (project) =>
+                  scopedProjectKey(project.environmentId, project.id) === nativeEvent.event,
+              ) ?? null,
+            );
+          }}
         >
-          <Text className="text-sm text-foreground-muted">Ask anything</Text>
-        </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            className="flex-row items-center gap-2 self-start rounded-full border border-border px-3 py-2"
+          >
+            <Text className="text-xs text-foreground">
+              {composerProject?.title ?? "Choose project"}
+            </Text>
+            <SymbolView
+              name="chevron.down"
+              size={12}
+              tintColorClassName="accent-icon-muted"
+              type="monochrome"
+            />
+          </Pressable>
+        </Menu>
+        <View className="flex-row items-center gap-2 rounded-xl border border-border px-3 py-2">
+          <TextInput
+            accessibilityLabel="New thread message"
+            placeholder="Ask anything"
+            placeholderTextColor="#8b8b8b"
+            value={newThreadMessage}
+            onChangeText={setNewThreadMessage}
+            multiline
+            className="max-h-24 min-h-9 flex-1 text-sm text-foreground"
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Send message"
+            disabled={!composerProject || newThreadMessage.trim().length === 0}
+            onPress={() => {
+              const message = newThreadMessage.trim();
+              if (!composerProject || !message) return;
+              props.onSendNewThread(composerProject, message);
+              setNewThreadMessage("");
+            }}
+            className="rounded-full bg-primary px-3 py-2 disabled:opacity-40"
+          >
+            <Text className="text-xs text-primary-foreground">Send</Text>
+          </Pressable>
+        </View>
       </View>
     </View>
   );
@@ -242,21 +280,19 @@ function HomeDashboardRow(props: {
   readonly now: string;
   readonly onOpen: () => void;
   readonly onSettle: () => Promise<boolean>;
-  readonly onSnooze: () => Promise<boolean>;
+  readonly onSnooze: (until: string) => Promise<boolean>;
 }) {
+  const draft = useComposerDraft(scopedThreadKey(props.thread.environmentId, props.thread.id));
+  const hasUnsentDraft = composerDraftHasUserContent(draft);
   const actions = () => (
-    <View className="h-full flex-row" style={{ width: 152 }}>
-      <Pressable
-        accessibilityRole="button"
-        onPress={() => void props.onSnooze()}
-        className="w-[76px] items-center justify-center bg-secondary"
-      >
-        <Text className="text-xs text-foreground">Snooze</Text>
-      </Pressable>
+    <View className="h-full flex-row items-center gap-2 px-2" style={{ width: 168 }}>
+      <View className="w-[72px] items-center justify-center rounded-xl border border-border bg-secondary">
+        <HomeSnoozeMenu now={props.now} onSnooze={props.onSnooze} />
+      </View>
       <Pressable
         accessibilityRole="button"
         onPress={() => void props.onSettle()}
-        className="w-[76px] items-center justify-center bg-primary"
+        className="w-[72px] items-center justify-center rounded-xl bg-primary"
       >
         <Text className="text-xs text-primary-foreground">Settle</Text>
       </Pressable>
@@ -272,6 +308,9 @@ function HomeDashboardRow(props: {
           <Text numberOfLines={1} className="flex-1 text-sm font-semibold text-foreground">
             {props.thread.title || "New thread"}
           </Text>
+          {hasUnsentDraft ? (
+            <Text className="text-xs font-semibold text-adaptive-amber-700-300">Draft</Text>
+          ) : null}
           <Text className={`${sectionColor[props.section]} text-xs`}>
             {ageLabel(props.thread, props.section, props.now)}
           </Text>
@@ -280,6 +319,58 @@ function HomeDashboardRow(props: {
         {props.section === "needs" ? <HomeDashboardRequest thread={props.thread} /> : null}
       </Pressable>
     </ReanimatedSwipeable>
+  );
+}
+
+function HomeSnoozeMenu(props: {
+  readonly now: string;
+  readonly onSnooze: (until: string) => Promise<boolean>;
+}) {
+  const [customOpen, setCustomOpen] = useState(false);
+  const presets = resolveThreadListV2SnoozePresets({
+    secondary: "snooze",
+    now: props.now,
+    presets: undefined,
+  });
+  const actions = [
+    ...presets.map((preset) => ({
+      id: `snooze:${preset.id}`,
+      title: preset.label,
+      subtitle: preset.whenLabel,
+    })),
+    { id: "snooze:custom", title: "Custom…" },
+  ] satisfies MenuAction[];
+  return (
+    <>
+      <Menu
+        actions={actions}
+        onPressAction={({ nativeEvent }) => {
+          if (nativeEvent.event === "snooze:custom") setCustomOpen(true);
+          else {
+            const selection = resolveThreadListV2SnoozeMenuSelection({
+              event: nativeEvent.event,
+              displayedPresets: presets,
+              now: new Date(),
+              presets: undefined,
+            });
+            if (selection._tag === "selected") void props.onSnooze(selection.preset.snoozedUntil);
+          }
+        }}
+      >
+        <Pressable accessibilityRole="button" className="items-center justify-center px-2 py-2.5">
+          <Text className="text-xs text-foreground">Snooze</Text>
+        </Pressable>
+      </Menu>
+      {customOpen ? (
+        <CustomSnoozeSheet
+          onClose={() => setCustomOpen(false)}
+          onSnooze={(until) => {
+            setCustomOpen(false);
+            void props.onSnooze(until);
+          }}
+        />
+      ) : null}
+    </>
   );
 }
 
