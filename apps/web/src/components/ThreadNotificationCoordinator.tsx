@@ -24,7 +24,7 @@ import { getClientSettings, subscribeClientSettings } from "../hooks/useSettings
 import { isWindowsPlatform } from "../lib/utils";
 import { environmentSummaries } from "../state/presentation";
 import { environmentShell } from "../state/shell";
-import { environmentThreadShells } from "../state/threads";
+import { environmentThreadDetails, environmentThreadShells } from "../state/threads";
 import {
   hasDesktopNotifications,
   hasNotificationSound,
@@ -137,6 +137,8 @@ export function startThreadNotifications(
     kind: ThreadNotificationKind,
   ) => {
     const { thread, status } = state;
+    const needsYou =
+      kind === "input" && (status === "approval" || status === "input" || status === "request");
     if (
       !shouldNotifyThread({
         kind:
@@ -159,7 +161,7 @@ export function startThreadNotifications(
       return;
     const { notificationMode: mode, inAppNotificationsEnabled } = getClientSettings();
     const active = activeThread();
-    const title = state.explicitPing
+    const fallbackTitle = state.explicitPing
       ? (state.raw.agentPing?.title ?? "Agent update")
       : kind === "completion"
         ? "Thread completed"
@@ -172,6 +174,17 @@ export function startThreadNotifications(
               : status === "request"
                 ? "Guest request"
                 : "Input needed";
+    const pendingRequests = needsYou
+      ? registry.get(
+          environmentThreadDetails.pendingRequestsAtom({ environmentId, threadId: thread.id }),
+        )
+      : null;
+    const title =
+      status === "input"
+        ? (pendingRequests?.userInputs[0]?.questions[0]?.question ?? fallbackTitle)
+        : status === "approval"
+          ? (pendingRequests?.approvals[0]?.detail ?? fallbackTitle)
+          : fallbackTitle;
     if (hasNotificationSound(mode)) {
       void playNotificationSound(kind, () =>
         hasNotificationSound(getClientSettings().notificationMode),
@@ -211,8 +224,8 @@ export function startThreadNotifications(
           onClick: () => {
             toastManager.close(toastId);
             void router.navigate({
-              to: "/$environmentId/$threadId",
-              params: { environmentId, threadId: thread.id },
+              to: "/",
+              search: { item: threadKey({ environmentId, threadId: thread.id }) },
             });
           },
         },
@@ -235,7 +248,8 @@ export function startThreadNotifications(
         tag: threadNotificationTag(environmentId, thread.id),
         silent: true,
         // Windows drops clicks after a toast moves into Notification Center.
-        requireInteraction: kind === "completion" && isWindowsPlatform(navigator.platform),
+        requireInteraction:
+          (kind === "completion" || needsYou) && isWindowsPlatform(navigator.platform),
       });
       trackNotification(environmentId, thread.id, notification);
       notification.addEventListener("click", () => {
@@ -243,8 +257,8 @@ export function startThreadNotifications(
         window.focus();
         void window.desktopBridge?.revealWindow().catch(() => undefined);
         void router.navigate({
-          to: "/$environmentId/$threadId",
-          params: { environmentId, threadId: thread.id },
+          to: "/",
+          search: { item: threadKey({ environmentId, threadId: thread.id }) },
         });
       });
     } catch {
