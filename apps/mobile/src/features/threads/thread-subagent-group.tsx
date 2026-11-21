@@ -170,7 +170,7 @@ export function ThreadSubagentGroup(props: {
               className={cn(
                 "text-2xs text-foreground-muted",
                 agents.some((agent) => isActiveSubagentStatus(agent.status))
-                  ? "text-adaptive-sky-600-400"
+                  ? "text-foreground-muted"
                   : agents.some((agent) => agent.status === "failed") &&
                       "text-adaptive-rose-600-400",
               )}
