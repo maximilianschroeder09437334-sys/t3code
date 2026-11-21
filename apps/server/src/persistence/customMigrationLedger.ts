@@ -554,7 +554,7 @@ export const validateCustomMigrationState = Effect.fn("customMigrationLedger.val
   yield* validateMigrationSchema("custom", present);
   if ((yield* effectsState(81)) === "present") {
     const invalid =
-      yield* sql`SELECT 1 FROM scheduled_tasks WHERE thread_mode IS NULL OR thread_mode NOT IN ('new_thread', 'continue') LIMIT 1`;
+      yield* sql`SELECT 1 FROM scheduled_tasks WHERE thread_mode IS NULL OR thread_mode NOT IN ('new_thread', 'continue', 'fresh_session') LIMIT 1`;
     if (invalid.length)
       return yield* badState("Invalid scheduled task thread mode. Nothing was changed.");
   }
