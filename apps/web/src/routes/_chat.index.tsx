@@ -27,8 +27,7 @@ function IndexDraftLanding() {
 }
 
 export const Route = createFileRoute("/_chat/")({
-  validateSearch: (raw: Record<string, unknown>) => ({
-    item: typeof raw.item === "string" ? raw.item : undefined,
-  }),
+  validateSearch: (raw: Record<string, unknown>): { item?: string } =>
+    typeof raw.item === "string" ? { item: raw.item } : {},
   component: ChatIndexRouteView,
 });

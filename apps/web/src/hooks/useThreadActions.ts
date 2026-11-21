@@ -642,11 +642,7 @@ export function useThreadActions() {
               ),
               replace: true,
             })
-          : router.navigate({
-              to: "/",
-              replace: true,
-              search: (previous) => ({ ...previous, item: undefined }),
-            }),
+          : router.navigate({ to: "/", replace: true }),
       );
     }
 

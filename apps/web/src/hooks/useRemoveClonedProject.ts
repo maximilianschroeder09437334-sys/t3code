@@ -45,12 +45,7 @@ export function useRemoveClonedProject() {
     const projectDraft = draftStore.getDraftThreadByProjectRef(projectRef);
     if (projectDraft) draftStore.clearDraftThread(projectDraft.draftId);
     draftStore.clearProjectDraftThreadId(projectRef);
-    if (viewingThisProject)
-      void router.navigate({
-        to: "/",
-        replace: true,
-        search: (previous) => ({ ...previous, item: undefined }),
-      });
+    if (viewingThisProject) void router.navigate({ to: "/", replace: true });
     return true;
   };
 }

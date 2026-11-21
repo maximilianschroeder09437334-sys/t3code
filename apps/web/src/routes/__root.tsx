@@ -123,11 +123,7 @@ function RootRouteNotFoundView() {
           This link doesn't point to a page in {APP_DISPLAY_NAME}. Go home to choose a project or
           start a thread.
         </p>
-        <Button
-          render={<Link to="/" replace search={(previous) => ({ ...previous, item: undefined })} />}
-        >
-          Go home
-        </Button>
+        <Button render={<Link to="/" replace />}>Go home</Button>
       </div>
     </main>
   );

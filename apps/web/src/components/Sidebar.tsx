@@ -1609,11 +1609,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       ? () => navigateToThread(scopeThreadRef(nextThread.environmentId, nextThread.id))
       : shell
         ? () => void handleNewThread(scopeProjectRef(shell.environmentId, shell.projectId))
-        : () =>
-            void router.navigate({
-              to: "/",
-              search: (previous) => ({ ...previous, item: undefined }),
-            });
+        : () => void router.navigate({ to: "/" });
   };
 
   const attemptSettle = (
@@ -3228,10 +3224,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             active={router.state.location.pathname === "/"}
             onClick={() => {
               if (isMobile) setOpenMobile(false);
-              void router.navigate({
-                to: "/",
-                search: (previous) => ({ ...previous, item: undefined }),
-              });
+              void router.navigate({ to: "/" });
             }}
           />
         </div>

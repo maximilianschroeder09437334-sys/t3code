@@ -51,19 +51,11 @@ function WelcomeRouteView() {
         setDismissed(true);
         if (projectRef !== undefined) {
           await openNewThread(projectRef, { replace: true }).catch(() =>
-            navigate({
-              to: "/",
-              replace: true,
-              search: (previous) => ({ ...previous, item: undefined }),
-            }),
+            navigate({ to: "/", replace: true }),
           );
           return;
         }
-        await navigate({
-          to: "/",
-          replace: true,
-          search: (previous) => ({ ...previous, item: undefined }),
-        });
+        await navigate({ to: "/", replace: true });
       }}
     />
   );

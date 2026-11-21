@@ -1667,7 +1667,7 @@ function OpenCommandPaletteDialog(props: {
     title: "Go to Home",
     icon: <HomeIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
-      await navigate({ to: "/", search: (previous) => ({ ...previous, item: undefined }) });
+      await navigate({ to: "/" });
     },
   });
 

@@ -6,11 +6,7 @@ import { ConnectCliAuthorizeSurface } from "../components/cloud/ConnectCliAuthSu
 export const Route = createFileRoute("/connect")({
   beforeLoad: () => {
     if (!connectCliAuthRoutesEnabled()) {
-      throw redirect({
-        to: "/",
-        replace: true,
-        search: (previous) => ({ ...previous, item: undefined }),
-      });
+      throw redirect({ to: "/", replace: true });
     }
   },
   component: ConnectCliAuthorizeSurface,
