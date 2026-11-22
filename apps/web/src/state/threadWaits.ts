@@ -30,7 +30,8 @@ function sameTarget(a: ResolvedWaitTarget, b: ResolvedWaitTarget): boolean {
     a.taskId === b.taskId &&
     a.source === b.source &&
     a.state === b.state &&
-    a.suffix === b.suffix
+    a.suffix === b.suffix &&
+    a.pullRequestUrl === b.pullRequestUrl
   );
 }
 

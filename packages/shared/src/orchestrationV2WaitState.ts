@@ -10,8 +10,13 @@ import type {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 
+import {
+  backgroundWorkHoldsCompletion,
+  isPullRequestWatchTask,
+} from "./orchestrationV2PendingBackgroundWork.ts";
 import { resolveT3McpToolId } from "./t3McpToolPresentation.ts";
 
 // Same execution set as deriveBlockedOnThreadWait: work that keeps a run busy.
@@ -25,10 +30,17 @@ const EXECUTION_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
   "compaction",
 ]);
 
-const TERMINAL_RUN_STATUSES = new Set<OrchestrationV2ShellThreadStatus>([
+const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set<OrchestrationV2ShellThreadStatus>([
   "failed",
   "cancelled",
   "interrupted",
+]);
+
+// Turn items a roster task can come from; the same set both shell builders read as pending work.
+const ROSTER_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
+  "command_execution",
+  "dynamic_tool",
+  "subagent",
 ]);
 
 const LIVE_SESSION_STATUSES = new Set<OrchestrationV2ProviderSession["status"]>([
@@ -103,6 +115,54 @@ function stringField(value: unknown, key: string): string | null {
   if (!Predicate.isObject(value)) return null;
   const field = Reflect.get(value, key);
   return typeof field === "string" && field.trim().length > 0 ? field.trim() : null;
+}
+
+/** The lifecycle facts that end a thread's wait whatever it still holds. */
+export interface WaitLifecycleInput {
+  readonly archivedOrDeleted: boolean;
+  readonly settled: boolean;
+  readonly latestRunStatus: string;
+  /** Some activity run (including `waiting`) is open; never inferred from a parked runtime. */
+  readonly hasActivityRun: boolean;
+}
+
+/** Archived, deleted or settled: ended before anything else, needs-you included. */
+export function waitEndedByClosure(input: WaitLifecycleInput): boolean {
+  return input.archivedOrDeleted || input.settled;
+}
+
+/** A failed, cancelled or interrupted latest run with no activity run left: stale holds end. */
+export function waitEndedByFailedRun(input: WaitLifecycleInput): boolean {
+  return TERMINAL_RUN_STATUSES.has(input.latestRunStatus) && !input.hasActivityRun;
+}
+
+/**
+ * Whether a thread's lifecycle alone ends its wait. The server's phase checks needs-you between
+ * the two parts; a client that only promotes `ended` shells can use the whole predicate.
+ */
+export function waitEndsByLifecycle(input: WaitLifecycleInput): boolean {
+  return waitEndedByClosure(input) || waitEndedByFailedRun(input);
+}
+
+const PULL_REQUEST_NUMBER = /#(\d+)$/u;
+
+/** "PR #<n> checks" from a watch's roster id, which ends in the link's number. */
+function pullRequestWatchTitle(taskId: string): string {
+  const number = PULL_REQUEST_NUMBER.exec(taskId)?.[1];
+  return number === undefined ? "PR checks" : `PR #${number} checks`;
+}
+
+function rosterKindLabel(kind: OrchestrationV2PendingBackgroundTask["kind"]): string {
+  switch (kind) {
+    case "command":
+      return "background command";
+    case "monitor":
+      return "monitor";
+    case "background_task":
+      return "background task";
+    case "subagent":
+      return "a subagent";
+  }
 }
 
 function shortTitle(text: string | null | undefined): string | null {
@@ -198,19 +258,68 @@ export function deriveThreadWaitState(input: ThreadWaitStateInput): ThreadWaitSt
 
   const sessionLive =
     input.providerSessionStatus !== null && LIVE_SESSION_STATUSES.has(input.providerSessionStatus);
+  // Roster ids name their turn item by id or native id; built once, only when a roster needs it.
+  let rosterItemIds: Map<string, TurnItemId> | undefined;
+  const rosterItemId = (taskId: string): TurnItemId | undefined => {
+    if (rosterItemIds === undefined) {
+      rosterItemIds = new Map();
+      for (const item of input.turnItems) {
+        if (!ROSTER_TURN_ITEM_TYPES.has(item.type) || !isOrchestrationV2WorkActive(item.status)) {
+          continue;
+        }
+        const id = item.id as TurnItemId;
+        if (!rosterItemIds.has(String(item.id))) rosterItemIds.set(String(item.id), id);
+        const nativeId = item.nativeItemRef?.nativeId;
+        if (typeof nativeId === "string" && nativeId.length > 0 && !rosterItemIds.has(nativeId)) {
+          rosterItemIds.set(nativeId, id);
+        }
+      }
+    }
+    return rosterItemIds.get(taskId);
+  };
   for (const task of input.pendingBackgroundTasks) {
-    if (task.kind !== "subagent") continue;
-    const childThreadId = "childThreadId" in task ? (task.childThreadId ?? null) : null;
-    // A roster entry without a child has nothing else to end it, so it lasts only as long as
-    // the session that reports it.
-    if (childThreadId === null && !sessionLive) continue;
+    const childThreadId =
+      task.kind === "subagent" && "childThreadId" in task ? (task.childThreadId ?? null) : null;
+    if (childThreadId !== null) {
+      // Thread-backed: the child's own phase ends it, so no session gate.
+      push({
+        source: "awaited_child",
+        environmentId: null,
+        threadId: childThreadId,
+        title: titleOf(childThreadId) ?? shortTitle(task.description),
+        taskId: task.taskId,
+        ...(task.itemId === undefined ? {} : { itemId: task.itemId }),
+      });
+      continue;
+    }
+    if (isPullRequestWatchTask(task)) {
+      // Server-owned: it holds while the PR's checks run, whatever the provider session does,
+      // and leaves the roster once the PR merges, is dismissed or stops being watched.
+      if (task.awaited !== true) continue;
+      push({
+        source: "awaited_child",
+        environmentId: null,
+        threadId: null,
+        title: pullRequestWatchTitle(task.taskId),
+        taskId: task.taskId,
+      });
+      continue;
+    }
+    // Provider-native work lives in the provider process: it holds only while it holds completion
+    // and the session that reports it is live, since a stopped session took it down.
+    if (!sessionLive || !backgroundWorkHoldsCompletion([task])) continue;
+    const itemId =
+      task.itemId ??
+      (task.nativeItemId === undefined ? undefined : rosterItemId(task.nativeItemId)) ??
+      rosterItemId(task.taskId);
     push({
       source: "awaited_child",
       environmentId: null,
-      threadId: childThreadId,
-      title: titleOf(childThreadId) ?? shortTitle(task.description),
+      threadId: null,
+      title:
+        shortTitle(task.description) ?? shortTitle(task.command) ?? rosterKindLabel(task.kind),
       taskId: task.taskId,
-      ...(task.itemId === undefined ? {} : { itemId: task.itemId }),
+      ...(itemId === undefined ? {} : { itemId }),
     });
   }
 
@@ -240,9 +349,9 @@ function waitPhaseFor(
   hasTargets: boolean,
   hasOtherWork: boolean,
 ): OrchestrationV2WaitPhase {
-  if (input.archivedOrDeleted || input.settled) return "ended";
+  if (waitEndedByClosure(input)) return "ended";
   if (input.needsYou) return "needs";
-  if (TERMINAL_RUN_STATUSES.has(input.latestRunStatus) && !input.hasActivityRun) return "ended";
+  if (waitEndedByFailedRun(input)) return "ended";
   if (hasOtherWork) return "working";
   if (hasTargets) return "waiting";
   return input.hasActivityRun ? "working" : "ended";

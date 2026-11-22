@@ -114,6 +114,15 @@ export const isPullRequestWatchTask = (task: Pick<PendingBackgroundWorkTask, "ta
   task.taskId.startsWith(PULL_REQUEST_WATCH_TASK_ID);
 
 /**
+ * The roster id of a pull request link's watch. Links store their normalized identity, and this id
+ * only has to be unique within the thread, so it reads those fields instead of parsing the URL.
+ */
+export const pullRequestWatchTaskId = (
+  link: Pick<ThreadPullRequestLink, "host" | "repository" | "number">,
+) =>
+  `${PULL_REQUEST_WATCH_TASK_ID}${link.host.toLowerCase()}/${link.repository.toLowerCase()}#${link.number}`;
+
+/**
  * A monitor wakes the agent once per line, so a progress wake run's completion waits for the
  * monitor to end. A pull request watch wakes only on news and holds while its checks run.
  */
@@ -321,9 +330,7 @@ function pullRequestWatchTasks(
       ? []
       : [
           {
-            // Links store their normalized identity, and this id only has to be unique within the
-            // thread, so it reads those fields instead of parsing the URL.
-            taskId: `${PULL_REQUEST_WATCH_TASK_ID}${link.host.toLowerCase()}/${link.repository.toLowerCase()}#${link.number}`,
+            taskId: pullRequestWatchTaskId(link),
             description: `Watching pull request #${link.number}`,
             kind: "monitor" as const,
             // Once every check finished, a person moves the PR next: the watch stays on but holds nothing.

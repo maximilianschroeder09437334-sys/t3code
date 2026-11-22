@@ -39,6 +39,7 @@ import { sortScopedProjectsForSidebar, resolveSidebarThreadStatus } from "../Sid
 import { useDelegatedUnderParent, useProjects, useVisibleThreadShells } from "../../state/entities";
 import { useThreadWaits } from "../../state/threadWaits";
 import { HomeWaitingOnLine } from "./HomeWaitingOnLine";
+import { liveWaitTargets } from "../WaitingOn.logic";
 import { openCommandPalette } from "../../commandPaletteBus";
 import { useUiStateStore } from "../../uiStateStore";
 import { Button } from "../ui/button";
@@ -604,6 +605,10 @@ function HomeRowCard({
           <div className="mt-1 flex min-h-6 items-center gap-3 ps-6">
             {row.wait?.waiting === true ? (
               <HomeWaitingOnLine thread={thread} wait={row.wait} />
+            ) : row.section === "running" &&
+              row.wait !== undefined &&
+              liveWaitTargets(row.wait).length > 0 ? (
+              <HomeWaitingOnLine thread={thread} wait={row.wait} label="Also running" />
             ) : row.wait === undefined && row.section === "waiting" && row.waitingOn ? (
               <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                 Waiting on{" "}

@@ -231,12 +231,16 @@ export function deriveHomeRows(input: {
   });
 }
 
-/** A resolved wait owns the waiting section: in while a target runs, out once all ended. */
+/**
+ * A resolved wait owns the waiting section: in while a target runs, out once all ended. A thread
+ * parked at idle without a live target is done, so its section agrees with its "done" label.
+ */
 function homeWaitSection(row: HomeDashboardRow, wait: ResolvedThreadWait): HomeSection {
   if (row.section === "needs") return "needs";
   if (wait.waiting) return "waiting";
-  if (row.section !== "waiting") return row.section;
   const runtime = row.thread.runtime?.status;
+  if (row.section === "running" && runtime === "idle") return "done";
+  if (row.section !== "waiting") return row.section;
   return runtime === "preparing" ||
     runtime === "queued" ||
     runtime === "starting" ||

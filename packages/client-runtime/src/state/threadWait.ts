@@ -1,9 +1,16 @@
 import type {
   EnvironmentId,
+  OrchestrationV2ThreadShell,
+  OrchestrationV2WaitPhase,
   OrchestrationV2WaitTarget,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import {
+  isPullRequestWatchTask,
+  pullRequestWatchTaskId,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { waitEndsByLifecycle } from "@t3tools/shared/orchestrationV2WaitState";
 
 import { type EnvironmentThreadShell, threadRuntimeIsActive } from "./models.ts";
 
@@ -20,7 +27,13 @@ export type ThreadWaitShell = Pick<
   | "runtime"
   | "waitingOn"
   | "waitPhase"
->;
+  | "lineage"
+  | "pullRequests"
+> &
+  Partial<Pick<EnvironmentThreadShell, "latestRunSenderThreadId">> & {
+    /** Read only for whether an activity run is open; a parked runtime hides a waiting run. */
+    readonly source?: Partial<Pick<OrchestrationV2ThreadShell, "activityRunStatus">>;
+  };
 
 export type ResolvedWaitTargetState = "live" | "unknown" | "ended";
 
@@ -36,6 +49,8 @@ export interface ResolvedWaitTarget {
   readonly source: OrchestrationV2WaitTarget["source"];
   readonly state: ResolvedWaitTargetState;
   readonly suffix?: "needs you" | "starting" | "not connected";
+  /** A watched pull request's link, for Open to show it in the pull request view. */
+  readonly pullRequestUrl?: string;
 }
 
 export interface ResolvedThreadWait {
@@ -70,6 +85,41 @@ function legacyTargetState(shell: ThreadWaitShell): ResolvedWaitTargetState {
   return threadRuntimeIsActive(shell.runtime) ? "live" : "ended";
 }
 
+/** An activity run is open: the server's own report when it sends one, else the runtime. */
+function hasActivityRun(shell: ThreadWaitShell): boolean {
+  return (
+    (shell.source?.activityRunStatus ?? null) !== null || threadRuntimeIsActive(shell.runtime)
+  );
+}
+
+/** The server's lifecycle precedence (see `waitEndsByLifecycle`), from the shell's own fields. */
+function lifecycleEnded(shell: ThreadWaitShell): boolean {
+  return waitEndsByLifecycle({
+    archivedOrDeleted: shell.archivedAt !== null || shell.deletedAt !== null,
+    settled: shell.settledOverride === "settled",
+    latestRunStatus: shell.latestRun?.status ?? "idle",
+    hasActivityRun: hasActivityRun(shell),
+  });
+}
+
+/**
+ * The thread a subagent child keeps waiting: the thread whose agent started the child's open run,
+ * else its lineage parent. A sender other than the parent drives only that run, so once the run
+ * ends nobody waits on the child: the parent does not take back a run it did not start.
+ */
+function waitDriverOf(shell: ThreadWaitShell): ThreadId | null {
+  if (shell.lineage.relationshipToParent !== "subagent") return null;
+  // A closed child holds nothing: its own wait ends before anything it waits on.
+  if (shell.archivedAt !== null || shell.deletedAt !== null) return null;
+  if (shell.settledOverride === "settled") return null;
+  const parent = shell.lineage.parentThreadId;
+  const sender = shell.latestRunSenderThreadId ?? null;
+  if (sender !== null && sender !== shell.id && sender !== parent) {
+    return hasActivityRun(shell) ? sender : null;
+  }
+  return parent;
+}
+
 function fallbackTitle(target: OrchestrationV2WaitTarget): string {
   if (target.source === "delegate_wait") return "starting delegate";
   if (target.source === "subagent" || target.source === "awaited_child") return "a subagent";
@@ -99,8 +149,10 @@ const edgeKey = (waiter: string, target: string) => `${waiter}\u0001${target}`;
 /**
  * Joins each waiting thread's targets with the targets' own phases across every environment,
  * independent of shell order: waiting holds while a path through waiting threads reaches a live
- * target. Linear in shells plus edges, without recursion. Only threads whose shell has
- * `waitPhase` (new servers) get an entry.
+ * target. A subagent child is also an implicit target of the thread that drives it (see
+ * `waitDriverOf`), so a parent or sender with nothing of its own left waits on its live child.
+ * Linear in shells plus edges, without recursion. Only threads whose shell has `waitPhase` (new
+ * servers) get an entry.
  */
 export function resolveThreadWaits(input: {
   readonly threads: Iterable<ThreadWaitShell>;
@@ -125,9 +177,42 @@ export function resolveThreadWaits(input: {
     return value;
   };
 
+  // Pre-pass, one loop over shells: driver -> the subagent children it implicitly waits on.
+  const implicitChildren = new Map<string, Array<string>>();
+  for (const [key, shell] of shells) {
+    count();
+    const driver = waitDriverOf(shell);
+    if (driver === null) continue;
+    const driverKey = threadWaitKey(shell.environmentId, driver);
+    if (driverKey === key || !shells.has(driverKey)) continue;
+    const children = implicitChildren.get(driverKey);
+    if (children === undefined) implicitChildren.set(driverKey, [key]);
+    else children.push(key);
+  }
+  // Effective phase: an ended thread its lifecycle does not end waits on its children that may
+  // still hold it (not ended by their own phase, or holding children of their own).
+  const implicitTargets = new Map<string, ReadonlyArray<string>>();
+  const phases = new Map<string, OrchestrationV2WaitPhase>();
+  for (const [key, shell] of shells) {
+    if (shell.waitPhase === undefined) continue;
+    let phase = shell.waitPhase;
+    const children = phase === "needs" ? undefined : implicitChildren.get(key);
+    if (children !== undefined) {
+      const holding = children.filter((child) => {
+        count();
+        return shells.get(child)!.waitPhase !== "ended" || implicitChildren.has(child);
+      });
+      if (holding.length > 0 && phase === "ended" && !lifecycleEnded(shell)) phase = "waiting";
+      if (holding.length > 0 && phase !== "ended") implicitTargets.set(key, holding);
+    }
+    phases.set(key, phase);
+  }
+  const phaseOf = (key: string, shell: ThreadWaitShell) => phases.get(key) ?? shell.waitPhase;
+
   const classify = (
     waiter: ThreadWaitShell,
     target: OrchestrationV2WaitTarget,
+    pullRequestUrlOf: (taskId: string) => string | undefined,
   ): ClassifiedTarget => {
     count();
     const environmentId = target.environmentId ?? waiter.environmentId;
@@ -141,9 +226,17 @@ export function resolveThreadWaits(input: {
     };
     // The waiter's own projection emits these only while they run; they clear at the source.
     if (target.threadId === null) {
+      const pullRequestUrl =
+        target.taskId !== undefined && isPullRequestWatchTask({ taskId: target.taskId })
+          ? pullRequestUrlOf(target.taskId)
+          : undefined;
       return {
         kind: "final",
-        base: { ...ids, title: target.title ?? fallbackTitle(target) },
+        base: {
+          ...ids,
+          title: target.title ?? fallbackTitle(target),
+          ...(pullRequestUrl === undefined ? {} : { pullRequestUrl }),
+        },
         state: "live",
         ...(target.source === "delegate_wait" ? { suffix: "starting" as const } : {}),
       };
@@ -156,7 +249,7 @@ export function resolveThreadWaits(input: {
     }
     // Ready snapshots keep every waiting, working or needs-you thread, so absent means gone.
     if (shell === undefined) return { kind: "final", base, state: "ended" };
-    switch (shell.waitPhase) {
+    switch (phaseOf(key, shell)) {
       case undefined:
         return { kind: "final", base, state: legacyTargetState(shell) };
       case "working":
@@ -170,6 +263,48 @@ export function resolveThreadWaits(input: {
     }
   };
 
+  /** The explicit targets, then implicit children not already listed, each classified once. */
+  const classifyAll = (key: string, shell: ThreadWaitShell): Array<ClassifiedTarget> => {
+    let pullRequestUrls: Map<string, string> | undefined;
+    const pullRequestUrlOf = (taskId: string) => {
+      if (pullRequestUrls === undefined) {
+        pullRequestUrls = new Map();
+        for (const link of shell.pullRequests) {
+          count();
+          pullRequestUrls.set(pullRequestWatchTaskId(link), link.url);
+        }
+      }
+      return pullRequestUrls.get(taskId);
+    };
+    const explicit = shell.waitingOn ?? [];
+    const targets = explicit.map((target) => classify(shell, target, pullRequestUrlOf));
+    const implicit = implicitTargets.get(key);
+    if (implicit === undefined) return targets;
+    const listed = new Set<string>();
+    for (const target of explicit) {
+      count();
+      if (target.threadId === null) continue;
+      listed.add(threadWaitKey(target.environmentId ?? shell.environmentId, target.threadId));
+    }
+    for (const childKey of implicit) {
+      if (listed.has(childKey)) continue;
+      listed.add(childKey);
+      targets.push(
+        classify(
+          shell,
+          {
+            source: "awaited_child",
+            environmentId: null,
+            threadId: shells.get(childKey)!.id,
+            title: null,
+          },
+          pullRequestUrlOf,
+        ),
+      );
+    }
+    return targets;
+  };
+
   // Pass 1: classify every target once; waiting threads with a final live target are live.
   const classified = new Map<string, ReadonlyArray<ClassifiedTarget>>();
   /** Waiting thread -> the waiting threads it waits on. */
@@ -181,9 +316,9 @@ export function resolveThreadWaits(input: {
   for (const [key, shell] of shells) {
     if (shell.waitPhase === undefined) continue;
     count();
-    const targets = (shell.waitingOn ?? []).map((target) => classify(shell, target));
+    const targets = classifyAll(key, shell);
     classified.set(key, targets);
-    if (shell.waitPhase !== "waiting") continue;
+    if (phaseOf(key, shell) !== "waiting") continue;
     const next: Array<string> = [];
     let hasLiveExit = false;
     for (const target of targets) {
@@ -302,7 +437,7 @@ export function resolveThreadWaits(input: {
   for (const [key, targets] of classified) {
     const shell = shells.get(key)!;
     result.set(key, {
-      waiting: shell.waitPhase === "waiting" && live.has(key),
+      waiting: phaseOf(key, shell) === "waiting" && live.has(key),
       targets: targets.map((target): ResolvedWaitTarget => {
         if (target.kind === "final") {
           return {

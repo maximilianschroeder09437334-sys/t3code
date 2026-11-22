@@ -19,10 +19,20 @@ export interface WaitingOnWaiter {
   readonly threadId: ThreadId;
 }
 
-/** Opens a wait target: its thread, or the waiter's timeline at the target's item. */
+/**
+ * Opens a wait target: its thread, a watched pull request in the pull request view, or the
+ * waiter's timeline at the target's item.
+ */
 export function useOpenWaitTarget() {
   const navigate = useNavigate();
   return (route: WaitTargetRoute) => {
+    if ("pullRequestUrl" in route) {
+      void navigate({
+        to: "/pull-requests",
+        search: { involvement: "all", state: "all", selectedUrl: route.pullRequestUrl },
+      });
+      return;
+    }
     void navigate({
       to: "/$environmentId/$threadId",
       params: { environmentId: route.environmentId, threadId: route.threadId },
@@ -89,6 +99,10 @@ export function WaitTargetOpenButton(props: {
 export function WaitingOnPopover(props: {
   waiter: WaitingOnWaiter;
   wait: ResolvedThreadWait | undefined;
+  /** The lines to list instead of the open targets, under `label`. */
+  targets?: ReadonlyArray<ResolvedWaitTarget>;
+  /** What each line says before its title; "Waiting on" unless given. */
+  label?: string;
   trigger: ReactElement;
   children?: ReactNode;
   side?: "top" | "bottom";
@@ -100,7 +114,8 @@ export function WaitingOnPopover(props: {
     setOpen(next);
     props.onOpenChange?.(next);
   };
-  const targets = openWaitTargets(props.wait);
+  const targets = props.targets ?? openWaitTargets(props.wait);
+  const label = props.label ?? "Waiting on";
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger render={props.trigger}>{props.children}</PopoverTrigger>
@@ -119,14 +134,14 @@ export function WaitingOnPopover(props: {
         {targets.length === 0 ? (
           <p className="text-xs text-muted-foreground">Nothing left to wait on</p>
         ) : (
-          <ul className="flex flex-col gap-0.5 text-xs" aria-label="Waiting on">
+          <ul className="flex flex-col gap-0.5 text-xs" aria-label={label}>
             {targets.map((target, index) => (
               <li
                 key={`${target.environmentId}:${target.threadId ?? target.itemId ?? target.taskId ?? index}`}
                 className="flex min-w-0 items-center gap-2"
               >
                 <span className="min-w-0 flex-1 truncate">
-                  <span className="text-muted-foreground">Waiting on: </span>
+                  <span className="text-muted-foreground">{label}: </span>
                   <span className="text-foreground">{target.title}</span>
                 </span>
                 <WaitTargetSuffix target={target} />
