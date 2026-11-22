@@ -15,6 +15,16 @@ export interface MobileSurfaceItem {
   readonly reason?: string;
 }
 
+export function formatContextUsage(usedTokens: number, maxTokens: number | null): string {
+  const format = (value: number) =>
+    value >= 1_000_000
+      ? `${Number((value / 1_000_000).toFixed(1))}m`
+      : value >= 1_000
+        ? `${Math.round(value / 1_000)}k`
+        : String(value);
+  return `${format(usedTokens)} / ${maxTokens === null ? "unknown" : format(maxTokens)}`;
+}
+
 export function mobileThreadSurfaces(input: {
   readonly canOpenTerminal: boolean;
   readonly canOpenFiles: boolean;

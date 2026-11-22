@@ -1,4 +1,5 @@
 import { GlassView } from "expo-glass-effect";
+import { type ReactNode } from "react";
 import { Pressable, View } from "react-native";
 import { withUniwind } from "uniwind";
 
@@ -16,6 +17,7 @@ export function Chip(props: {
   readonly label: string;
   readonly selected?: boolean;
   readonly icon?: AppSymbolName;
+  readonly leading?: ReactNode;
   readonly trailingIcon?: AppSymbolName;
   readonly size?: "small" | "default";
   readonly glass?: boolean;
@@ -32,6 +34,7 @@ export function Chip(props: {
   const iconColor = props.selected ? "accent-primary-foreground" : "accent-icon-muted";
   const content = (
     <>
+      {props.leading}
       {props.icon ? (
         <SymbolView name={props.icon} size={15} tintColorClassName={iconColor} />
       ) : null}

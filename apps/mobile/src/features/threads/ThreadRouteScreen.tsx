@@ -139,6 +139,11 @@ import { useStartSideChat } from "./useStartSideChat";
 import { useThreadStatusAnnouncements } from "./useThreadStatusAnnouncements";
 import type { ThreadInspectorMode, ThreadInspectorTarget } from "./thread-inspector-navigation";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
+import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import {
+  deriveLatestContextWindowSnapshot,
+  latestProviderTurnTokenUsage,
+} from "@t3tools/client-runtime/state/context-window";
 
 function firstRouteParam(value: string | string[] | undefined): string | null {
   const first = Array.isArray(value) ? value[0] : value;
@@ -390,6 +395,26 @@ function ThreadRouteContent(
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const selectedStructure = useQuietThreadStructure(selectedThreadDetailRef);
+  const threadAgents = useThreadTurnSubagents(
+    selectedThread
+      ? { environmentId: selectedThread.environmentId, threadId: selectedThread.id }
+      : null,
+  );
+  const threadProjection = selectedStructure?.projection;
+  const activeProviderThread = threadProjection?.providerThreads.find(
+    (thread) => thread.id === threadProjection.thread.activeProviderThreadId,
+  );
+  const activeContextUsage = threadProjection
+    ? deriveLatestContextWindowSnapshot(
+        threadProjection.visibleTurnItems,
+        latestProviderTurnTokenUsage(
+          threadProjection.providerTurns,
+          threadProjection,
+          activeProviderThread,
+        ),
+        activeProviderThread,
+      )
+    : null;
   const handoffSourceId = selectedStructure?.projection.thread.handoffSourceThreadId;
   const handoffSource = useQuietThreadStructure(
     handoffSourceId === undefined || selectedThreadDetailRef === null
@@ -1034,11 +1059,29 @@ function ThreadRouteContent(
                   title={selectedThread.title}
                   subtitle={threadSyncLabel ?? headerSubtitle}
                   environmentLabel={selectedEnvironmentConnection?.environmentLabel}
+                  contextUsage={
+                    activeContextUsage
+                      ? {
+                          usedTokens: activeContextUsage.usedTokens,
+                          maxTokens: activeContextUsage.maxTokens ?? null,
+                        }
+                      : null
+                  }
+                  contextPercentage={activeContextUsage?.usedPercentage ?? null}
                   gitControls={threadGitControlProps}
                   hasThreadCwd={selectedThreadCwd !== null}
                   inspectorMode={inspectorMode}
                   onOpenFilesInspector={handleOpenFilesInspector}
                   onOpenGitInspector={handleOpenGitInspector}
+                  previousAgentCount={threadAgents?.subagents.length ?? 0}
+                  onOpenLineage={() => {
+                    if (selectedThread) {
+                      navigation.navigate("ThreadAgents", {
+                        environmentId: selectedThread.environmentId,
+                        threadId: selectedThread.id,
+                      });
+                    }
+                  }}
                   onReturnToThread={props.onReturnToThread}
                 />
               )}

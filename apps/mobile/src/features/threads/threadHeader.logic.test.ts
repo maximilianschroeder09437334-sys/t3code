@@ -1,5 +1,10 @@
 import { expect, it } from "vite-plus/test";
-import { mobileThreadSurfaces } from "./threadHeader.logic";
+import { formatContextUsage, mobileThreadSurfaces } from "./threadHeader.logic";
+
+it("formats context usage in compact token units", () => {
+  expect(formatContextUsage(136_000, 1_000_000)).toBe("136k / 1m");
+  expect(formatContextUsage(1_250_000, null)).toBe("1.3m / unknown");
+});
 
 it("keeps the desktop surface order and marks unavailable mobile surfaces", () => {
   const items = mobileThreadSurfaces({

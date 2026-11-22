@@ -8,7 +8,7 @@ import { useState } from "react";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText } from "../../components/ui/AppText";
 import type { ThreadGitControlsProps } from "./ThreadGitControls";
-import { mobileThreadSurfaces } from "./threadHeader.logic";
+import { formatContextUsage, mobileThreadSurfaces } from "./threadHeader.logic";
 
 export function ThreadHeader(props: {
   readonly title: string;
@@ -21,6 +21,10 @@ export function ThreadHeader(props: {
   readonly inspectorMode: ThreadInspectorMode | null;
   readonly onOpenFilesInspector: () => void;
   readonly onOpenGitInspector: () => void;
+  readonly contextUsage?: { readonly usedTokens: number; readonly maxTokens: number | null } | null;
+  readonly contextPercentage?: number | null;
+  readonly previousAgentCount?: number;
+  readonly onOpenLineage?: () => void;
 }) {
   const goBack = useWorkspaceBackNavigation();
   const { startNewTask } = useAdaptiveWorkspaceLayout();
@@ -155,7 +159,12 @@ export function ThreadHeader(props: {
                     script.command,
                   ),
                 )}
-                {surfaceRow("Add project script", "plus", openGit)}
+                {surfaceRow(
+                  "Add project script",
+                  "plus",
+                  undefined,
+                  "Script editing is not available on mobile yet",
+                )}
                 {surfaceRow(
                   `Branch · ${props.gitControls.gitStatus?.refName ?? props.gitControls.currentBranch ?? "Detached HEAD"}`,
                   "arrow.triangle.branch",
@@ -175,13 +184,40 @@ export function ThreadHeader(props: {
                   "arrow.left.arrow.right",
                   openGit,
                 )}
-                {surfaceRow("Previous agents", "person.2", openGit, "Lineage")}
                 {surfaceRow(
-                  "Context",
-                  "chart.bar",
-                  undefined,
-                  "Usage details are unavailable on this mobile view",
+                  `Previous agents · ${props.previousAgentCount ?? 0}`,
+                  "person.2",
+                  props.onOpenLineage,
+                  "Lineage",
                 )}
+                <View className="flex-row items-center gap-3 rounded-xl px-4 py-3">
+                  <SymbolView
+                    name="chart.bar.xaxis"
+                    size={19}
+                    tintColorClassName="accent-icon-muted"
+                  />
+                  <View className="flex-1 gap-2">
+                    <View className="flex-row justify-between">
+                      <AppText className="text-sm text-foreground">Context</AppText>
+                      <AppText className="text-xs text-foreground-muted">
+                        {props.contextUsage
+                          ? formatContextUsage(
+                              props.contextUsage.usedTokens,
+                              props.contextUsage.maxTokens,
+                            )
+                          : "No context usage reported"}
+                      </AppText>
+                    </View>
+                    <View className="h-1.5 overflow-hidden rounded-full bg-subtle">
+                      <View
+                        className="h-full rounded-full bg-accent"
+                        style={{
+                          width: `${Math.max(0, Math.min(100, props.contextPercentage ?? 0))}%`,
+                        }}
+                      />
+                    </View>
+                  </View>
+                </View>
               </>
             ) : (
               <>

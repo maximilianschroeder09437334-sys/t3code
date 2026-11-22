@@ -1,6 +1,8 @@
 import { Pressable, ScrollView } from "react-native";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { ListFilterMenu } from "../layout/workspace/ListFilterMenu";
+import { ProjectFavicon } from "../../components/ProjectFavicon";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId } from "@t3tools/contracts";
 import type {
   HomeListFilterMenuEnvironment,
@@ -9,7 +11,9 @@ import type {
 
 export function ThreadListFilters(props: {
   readonly environments: ReadonlyArray<HomeListFilterMenuEnvironment>;
-  readonly projects: ReadonlyArray<HomeListFilterMenuProject>;
+  readonly projects: ReadonlyArray<
+    HomeListFilterMenuProject & { readonly project?: EnvironmentProject }
+  >;
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly selectedProjectKey: string | null;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
@@ -63,6 +67,18 @@ export function ThreadListFilters(props: {
         label={selectedProject?.label ?? "All projects"}
         accessibilityLabel="Filter threads by project"
         active={selectedProject !== undefined}
+        leading={
+          selectedProject?.project ? (
+            <ProjectFavicon
+              environmentId={selectedProject.project.environmentId}
+              projectTitle={selectedProject.project.title}
+              workspaceRoot={selectedProject.project.workspaceRoot}
+              faviconPath={selectedProject.project.faviconPath}
+              projectIcon={selectedProject.project.projectIcon}
+              size={16}
+            />
+          ) : undefined
+        }
         actions={[
           {
             id: "all",

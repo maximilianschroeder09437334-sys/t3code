@@ -751,6 +751,7 @@ export function HomeScreen(props: HomeScreenProps) {
           ).map((scope) => ({
             key: scope.key,
             label: scope.title,
+            project: scope.representative,
           }))}
           selectedEnvironmentId={props.selectedEnvironmentId}
           selectedProjectKey={props.selectedProjectKey}
