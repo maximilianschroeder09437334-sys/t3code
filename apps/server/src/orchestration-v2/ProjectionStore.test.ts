@@ -59,7 +59,12 @@ import {
   THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
 } from "./threadHistoryPaging.ts";
 import { buildBoundedThreadStreamSnapshot } from "./ThreadStream.ts";
-import { omitIdleSubagentShells } from "./ShellStream.ts";
+import { loadSubscriberShellSnapshot, omitIdleSubagentShells } from "./ShellStream.ts";
+import { presentThreadShell } from "../../../../packages/client-runtime/src/state/models.ts";
+import {
+  resolveThreadWaits,
+  threadWaitKey,
+} from "../../../../packages/client-runtime/src/state/threadWait.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 
 import { layerReaderDatabase, traceSqlRouting } from "../persistence/testkit/SqliteRouting.ts";
@@ -2158,6 +2163,158 @@ it.effect(
         ),
       );
       assert.isNull(yield* store.getThreadShell(id("b")));
+      yield* assertShellIndexCoversShells();
+
+      // Needs-you children hold their waiting parent: a report whose next step is for Maxi, a
+      // later Maxi step after "nothing needed right now", and a guest message with no report
+      // step. A quiet child is the control the trim drops.
+      const needsReport = (steps: ReadonlyArray<string>) =>
+        ["**What happened**", "- Built it.", "", "**Next steps in order**", ...steps].join("\n");
+      const children = {
+        "needs-report": needsReport(["1. Maxi: approve the result."]),
+        "needs-tail": needsReport([
+          "1. T3: nothing left to run.",
+          "2. Maxi: nothing needed right now, but glance at the diff.",
+        ]),
+        "needs-guest": "Done.",
+        quiet: needsReport(["1. T3: nothing left to run.", "2. Maxi: nothing needed right now."]),
+      } as const;
+      for (const [name, text] of Object.entries(children)) {
+        yield* createThread(name, "a");
+        yield* startRun(name, 1);
+        yield* report(name, 1, text);
+        yield* endRun(name, 1, "completed");
+      }
+      const setGuestMessage = (status: "pending" | "sent") =>
+        sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.guestShare', json(${JSON.stringify({
+          id: "guest-share:wait-state",
+          host: "guest.example.test",
+          createdAt: "2026-11-22T10:00:00.000Z",
+          expiresAt: "2026-11-23T10:00:00.000Z",
+          guestName: "Guest",
+          messages: [
+            {
+              id: "guest-message:wait-state",
+              text: "Can you check this?",
+              status,
+              submittedAt: "2026-11-22T10:00:00.000Z",
+            },
+          ],
+        })}))
+        WHERE thread_id = ${id("needs-guest")}`;
+      yield* setGuestMessage("pending");
+      const needsChildren = ["needs-report", "needs-tail", "needs-guest"] as const;
+      for (const name of needsChildren) {
+        yield* assertWait(name, { waitingOn: [], waitPhase: "needs" });
+        assert.isTrue(yield* mayBeLive(name), name);
+      }
+      yield* assertWait("quiet", { waitingOn: [], waitPhase: "ended" });
+      assert.isFalse(yield* mayBeLive("quiet"));
+      yield* assertShellIndexCoversShells();
+
+      // A awaits all four through its roster.
+      const childNames = [...needsChildren, "quiet"] as const;
+      yield* store.apply({
+        id: nextEvent(),
+        type: "provider-thread.updated",
+        threadId: id("a"),
+        driver,
+        providerInstanceId,
+        occurredAt: at,
+        payload: {
+          ...providerThread,
+          pendingBackgroundTasks: childNames.map((name) => ({
+            taskId: `task-${name}`,
+            kind: "subagent" as const,
+            awaited: true as const,
+            description: `Child ${name}`,
+            childThreadId: id(name),
+          })),
+        },
+      });
+      yield* assertWait("a", {
+        waitingOn: childNames.map((name) => ({
+          source: "awaited_child",
+          environmentId: null,
+          threadId: id(name),
+          title: `Child ${name}`,
+          taskId: `task-${name}`,
+        })),
+        waitPhase: "waiting",
+      });
+
+      // The real subscriber path: the index picks the rows, the idle-subagent trim runs on them.
+      const subscriberSnapshot = loadSubscriberShellSnapshot({
+        sql,
+        listShellIndex: store.listActiveShellIndex(),
+        readThreads: (threadIds) =>
+          store.readShellSnapshot({
+            location: "active",
+            ...(threadIds === undefined ? {} : { threadIds }),
+          }),
+        listProjects: Effect.succeed([]),
+        latestSequence: Effect.succeed(0),
+        options: { omitIdleSubagents: true, omitOlderSettled: false },
+      }).pipe(Effect.map(({ snapshot }) => snapshot));
+      const environmentId = EnvironmentId.make("env-wait-state");
+      const resolveA = (snapshot: Effect.Success<typeof subscriberSnapshot>, ready: boolean) =>
+        resolveThreadWaits({
+          threads: snapshot.threads.map((thread) => presentThreadShell(environmentId, thread)),
+          environmentReady: () => ready,
+        }).get(threadWaitKey(environmentId, id("a")));
+      const targetStates = (wait: ReturnType<typeof resolveA>) =>
+        Object.fromEntries(
+          (wait?.targets ?? []).map((target) => [
+            target.threadId,
+            [target.state, target.suffix ?? null],
+          ]),
+        );
+      const needsYou = Object.fromEntries([
+        ...needsChildren.map((name) => [id(name), ["live", "needs you"]]),
+        [id("quiet"), ["ended", null]],
+      ]);
+      let subscribed = yield* subscriberSnapshot;
+      assert.deepEqual(
+        subscribed.threads
+          .map((thread) => thread.id)
+          .filter((threadId) => childNames.some((name) => id(name) === threadId))
+          .toSorted(),
+        needsChildren.map((name) => id(name)).toSorted(),
+      );
+      assert.isTrue(resolveA(subscribed, true)?.waiting);
+      assert.deepEqual(targetStates(resolveA(subscribed, true)), needsYou);
+      // Reconnecting: before the fresh snapshot is live every target is unknown, still waiting;
+      // the fresh snapshot gives the same answer as before.
+      assert.isTrue(resolveA(subscribed, false)?.waiting);
+      assert.isTrue(
+        resolveA(subscribed, false)?.targets.every(
+          (target) => target.state === "unknown" && target.suffix === "not connected",
+        ),
+      );
+      subscribed = yield* subscriberSnapshot;
+      assert.isTrue(resolveA(subscribed, true)?.waiting);
+      assert.deepEqual(targetStates(resolveA(subscribed, true)), needsYou);
+
+      // Once nobody needs the user any more the children drop out and A clears.
+      for (const name of ["needs-report", "needs-tail"] as const) {
+        yield* startRun(name, 2);
+        yield* report(name, 2, children.quiet);
+        yield* endRun(name, 2, "completed");
+      }
+      yield* setGuestMessage("sent");
+      for (const name of childNames) {
+        yield* assertWait(name, { waitingOn: [], waitPhase: "ended" });
+        assert.isFalse(yield* mayBeLive(name), name);
+      }
+      subscribed = yield* subscriberSnapshot;
+      assert.isFalse(
+        subscribed.threads.some((thread) => childNames.some((name) => id(name) === thread.id)),
+      );
+      assert.isFalse(resolveA(subscribed, true)?.waiting);
+      assert.isTrue(
+        resolveA(subscribed, true)?.targets.every((target) => target.state === "ended"),
+      );
       yield* assertShellIndexCoversShells();
 
       // The wait reads are batched (one statement per shell read) and index-backed.

@@ -39,6 +39,8 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
   OrchestrationV2ProviderCapabilities,
 );
 
+const decodeThreadShellJson = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson);
+
 describe("orchestration V2 contracts", () => {
   it("preserves restricted tool intent through its wire codec", () => {
     const input = {
@@ -633,14 +635,17 @@ describe("thread wait fields across versions", () => {
   };
 
   it("a shell from an older server decodes without wait fields", () => {
-    const decoded = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson)(shell);
+    const decoded = decodeThreadShellJson(shell);
     expect(decoded.waitPhase).toBeUndefined();
     expect(decoded.waitingOn).toBeUndefined();
   });
 
   it("the prior decoder reads a newer shell and drops the wait fields", () => {
-    const { waitingOn: _waitingOn, waitPhase: _waitPhase, ...priorFields } =
-      OrchestrationV2ThreadShell.fields;
+    const {
+      waitingOn: _waitingOn,
+      waitPhase: _waitPhase,
+      ...priorFields
+    } = OrchestrationV2ThreadShell.fields;
     const priorDecode = Schema.decodeUnknownSync(Schema.toCodecJson(Schema.Struct(priorFields)));
     const decoded = priorDecode({ ...shell, ...waitFields });
     expect(decoded.title).toBe("Thread");
@@ -649,7 +654,7 @@ describe("thread wait fields across versions", () => {
   });
 
   it("this decoder keeps the wait fields", () => {
-    const decoded = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson)({
+    const decoded = decodeThreadShellJson({
       ...shell,
       ...waitFields,
     });
@@ -657,7 +662,7 @@ describe("thread wait fields across versions", () => {
     expect(decoded.waitingOn?.[0]?.threadId).toBeNull();
   });
 
-  it("a waiting subagent child stays live for shell trimming", () => {
+  it("a waiting or needs-you subagent child stays live for shell trimming", () => {
     const idle = {
       activityRunStatus: null,
       status: "completed" as const,
@@ -667,6 +672,9 @@ describe("thread wait fields across versions", () => {
     expect(isLiveSubagentShell(idle)).toBe(false);
     expect(isLiveSubagentShell({ ...idle, waitPhase: "ended" })).toBe(false);
     expect(isLiveSubagentShell({ ...idle, waitPhase: "waiting" })).toBe(true);
+    // A completed child whose report asks Maxi, or with only a guest message, needs the user.
+    expect(isLiveSubagentShell({ ...idle, waitPhase: "needs" })).toBe(true);
+    expect(isLiveSubagentShell({ ...idle, waitPhase: "working" })).toBe(false);
   });
 });
 

@@ -44,13 +44,16 @@ export interface ResolvedThreadWait {
   readonly targets: ReadonlyArray<ResolvedWaitTarget>;
 }
 
-/** Chains deeper than this are not followed; the unexplored rest counts as still live. */
+/**
+ * A waiting chain taller than this many threads is not followed to its end: the waiter next to
+ * the unexplored rest keeps counting it as live, so a long chain never clears early.
+ */
 export const THREAD_WAIT_DEPTH_LIMIT = 16;
 
 export const threadWaitKey = (environmentId: string, threadId: string) =>
   `${environmentId}\u0000${threadId}`;
 
-/** Optional counters for tests; the resolver adds one per visited thread and per target. */
+/** Optional counters for tests: one per visited thread, target, propagation and SCC step. */
 export interface ThreadWaitResolveStats {
   ops: number;
 }
@@ -73,10 +76,31 @@ function fallbackTitle(target: OrchestrationV2WaitTarget): string {
   return "a thread";
 }
 
+type TargetBase = Omit<ResolvedWaitTarget, "state" | "suffix">;
+
+/** A target whose state is known by itself, or one that depends on another waiting thread. */
+type ClassifiedTarget =
+  | {
+      readonly kind: "final";
+      readonly base: TargetBase;
+      readonly state: ResolvedWaitTargetState;
+      readonly suffix?: ResolvedWaitTarget["suffix"];
+    }
+  | { readonly kind: "waiting"; readonly base: TargetBase; readonly key: string };
+
+interface TarjanFrame {
+  readonly key: string;
+  readonly next: ReadonlyArray<string>;
+  at: number;
+}
+
+const edgeKey = (waiter: string, target: string) => `${waiter}\u0001${target}`;
+
 /**
- * Joins each waiting thread's targets with the targets' own phases across every environment.
- * One memo serves the whole call, so a recompute visits each thread and each edge at most once.
- * Only threads whose shell has `waitPhase` (new servers) get an entry.
+ * Joins each waiting thread's targets with the targets' own phases across every environment,
+ * independent of shell order: waiting holds while a path through waiting threads reaches a live
+ * target. Linear in shells plus edges, without recursion. Only threads whose shell has
+ * `waitPhase` (new servers) get an entry.
  */
 export function resolveThreadWaits(input: {
   readonly threads: Iterable<ThreadWaitShell>;
@@ -84,12 +108,13 @@ export function resolveThreadWaits(input: {
   readonly environmentReady: (environmentId: EnvironmentId) => boolean;
   readonly stats?: ThreadWaitResolveStats;
 }): ReadonlyMap<string, ResolvedThreadWait> {
+  const stats = input.stats;
+  const count = () => {
+    if (stats) stats.ops++;
+  };
   const shells = new Map<string, ThreadWaitShell>();
   for (const shell of input.threads)
     shells.set(threadWaitKey(shell.environmentId, shell.id), shell);
-  const memo = new Map<string, ResolvedThreadWait>();
-  const onStack = new Set<string>();
-  const stats = input.stats;
   const readiness = new Map<EnvironmentId, boolean>();
   const ready = (environmentId: EnvironmentId) => {
     let value = readiness.get(environmentId);
@@ -100,31 +125,13 @@ export function resolveThreadWaits(input: {
     return value;
   };
 
-  const resolve = (key: string, shell: ThreadWaitShell, depth: number): ResolvedThreadWait => {
-    const known = memo.get(key);
-    if (known !== undefined) return known;
-    if (stats) stats.ops++;
-    onStack.add(key);
-    const targets = (shell.waitingOn ?? []).map((target) => resolveTarget(shell, target, depth));
-    onStack.delete(key);
-    const resolved: ResolvedThreadWait = {
-      waiting:
-        shell.waitPhase === "waiting" &&
-        targets.some((target) => target.state === "live" || target.state === "unknown"),
-      targets,
-    };
-    memo.set(key, resolved);
-    return resolved;
-  };
-
-  const resolveTarget = (
+  const classify = (
     waiter: ThreadWaitShell,
     target: OrchestrationV2WaitTarget,
-    depth: number,
-  ): ResolvedWaitTarget => {
-    if (stats) stats.ops++;
+  ): ClassifiedTarget => {
+    count();
     const environmentId = target.environmentId ?? waiter.environmentId;
-    const base = {
+    const ids = {
       environmentId,
       threadId: target.threadId,
       waiterThreadId: waiter.id,
@@ -135,46 +142,179 @@ export function resolveThreadWaits(input: {
     // The waiter's own projection emits these only while they run; they clear at the source.
     if (target.threadId === null) {
       return {
-        ...base,
-        title: target.title ?? fallbackTitle(target),
+        kind: "final",
+        base: { ...ids, title: target.title ?? fallbackTitle(target) },
         state: "live",
         ...(target.source === "delegate_wait" ? { suffix: "starting" as const } : {}),
       };
     }
     const key = threadWaitKey(environmentId, target.threadId);
     const shell = shells.get(key);
-    const title = target.title ?? shell?.title ?? fallbackTitle(target);
+    const base = { ...ids, title: target.title ?? shell?.title ?? fallbackTitle(target) };
     if (!ready(environmentId)) {
-      return { ...base, title, state: "unknown", suffix: "not connected" };
+      return { kind: "final", base, state: "unknown", suffix: "not connected" };
     }
     // Ready snapshots keep every waiting, working or needs-you thread, so absent means gone.
-    if (shell === undefined) return { ...base, title, state: "ended" };
+    if (shell === undefined) return { kind: "final", base, state: "ended" };
     switch (shell.waitPhase) {
       case undefined:
-        return { ...base, title, state: legacyTargetState(shell) };
+        return { kind: "final", base, state: legacyTargetState(shell) };
       case "working":
-        return { ...base, title, state: "live" };
+        return { kind: "final", base, state: "live" };
       case "needs":
-        return { ...base, title, state: "live", suffix: "needs you" };
+        return { kind: "final", base, state: "live", suffix: "needs you" };
       case "ended":
-        return { ...base, title, state: "ended" };
-      case "waiting": {
-        // A cycle back into the current chain cannot keep anything waiting.
-        if (onStack.has(key)) return { ...base, title, state: "ended" };
-        // Conservative: an unexplored deeper chain may still be live.
-        if (depth + 1 >= THREAD_WAIT_DEPTH_LIMIT && !memo.has(key)) {
-          return { ...base, title, state: "live" };
-        }
-        const nested = resolve(key, shell, depth + 1);
-        return { ...base, title, state: nested.waiting ? "live" : "ended" };
-      }
+        return { kind: "final", base, state: "ended" };
+      case "waiting":
+        return { kind: "waiting", base, key };
     }
   };
 
-  const result = new Map<string, ResolvedThreadWait>();
+  // Pass 1: classify every target once; waiting threads with a final live target are live.
+  const classified = new Map<string, ReadonlyArray<ClassifiedTarget>>();
+  /** Waiting thread -> the waiting threads it waits on. */
+  const edges = new Map<string, Array<string>>();
+  /** Waiting thread -> the waiting threads that wait on it. */
+  const waitersOf = new Map<string, Array<string>>();
+  const live = new Set<string>();
+  const queue: Array<string> = [];
   for (const [key, shell] of shells) {
     if (shell.waitPhase === undefined) continue;
-    result.set(key, resolve(key, shell, 0));
+    count();
+    const targets = (shell.waitingOn ?? []).map((target) => classify(shell, target));
+    classified.set(key, targets);
+    if (shell.waitPhase !== "waiting") continue;
+    const next: Array<string> = [];
+    let hasLiveExit = false;
+    for (const target of targets) {
+      if (target.kind === "waiting") {
+        next.push(target.key);
+        const waiters = waitersOf.get(target.key);
+        if (waiters === undefined) waitersOf.set(target.key, [key]);
+        else waiters.push(key);
+      } else if (target.state === "live" || target.state === "unknown") {
+        hasLiveExit = true;
+      }
+    }
+    edges.set(key, next);
+    if (hasLiveExit) {
+      live.add(key);
+      queue.push(key);
+    }
+  }
+
+  // Pass 2: every waiting thread that reaches a live exit through waiting threads is live.
+  const spread = () => {
+    while (queue.length > 0) {
+      const key = queue.pop()!;
+      for (const waiter of waitersOf.get(key) ?? []) {
+        count();
+        if (live.has(waiter)) continue;
+        live.add(waiter);
+        queue.push(waiter);
+      }
+    }
+  };
+  spread();
+
+  // Pass 3, the depth limit: over the waiting threads still without a live exit, an iterative
+  // Tarjan gives each one its chain height (threads on the longest path down the condensed graph,
+  // a cycle counting once). A target that tall counts as live for its waiter, which then spreads
+  // like pass 2. Its waiters are then exactly the ones the limit cuts.
+  const cutEdges = new Set<string>();
+  const unresolved = [...edges.keys()].filter((key) => !live.has(key));
+  if (unresolved.length > 0) {
+    const height = new Map<string, number>();
+    const order = new Map<string, number>();
+    const low = new Map<string, number>();
+    const component = new Map<string, number>();
+    const sccStack: Array<string> = [];
+    const onSccStack = new Set<string>();
+    let nextOrder = 0;
+    let nextComponent = 0;
+    // Live threads never reach an unresolved one, so they stay out of this graph.
+    const successors = (key: string) => (edges.get(key) ?? []).filter((next) => !live.has(next));
+    const enter = (key: string, frames: Array<TarjanFrame>) => {
+      count();
+      order.set(key, nextOrder);
+      low.set(key, nextOrder);
+      nextOrder++;
+      sccStack.push(key);
+      onSccStack.add(key);
+      frames.push({ key, next: successors(key), at: 0 });
+    };
+    for (const root of unresolved) {
+      if (order.has(root)) continue;
+      const frames: Array<TarjanFrame> = [];
+      enter(root, frames);
+      while (frames.length > 0) {
+        const frame = frames[frames.length - 1]!;
+        if (frame.at < frame.next.length) {
+          const next = frame.next[frame.at++]!;
+          count();
+          if (!order.has(next)) enter(next, frames);
+          else if (onSccStack.has(next)) {
+            low.set(frame.key, Math.min(low.get(frame.key)!, order.get(next)!));
+          }
+          continue;
+        }
+        frames.pop();
+        const parent = frames[frames.length - 1];
+        if (parent !== undefined) {
+          low.set(parent.key, Math.min(low.get(parent.key)!, low.get(frame.key)!));
+        }
+        if (low.get(frame.key) !== order.get(frame.key)) continue;
+        // frame.key roots a component; every component below it already has its height.
+        const members: Array<string> = [];
+        const id = nextComponent++;
+        let member: string;
+        do {
+          member = sccStack.pop()!;
+          onSccStack.delete(member);
+          component.set(member, id);
+          members.push(member);
+        } while (member !== frame.key);
+        let below = 0;
+        for (const key of members) {
+          for (const next of successors(key)) {
+            count();
+            if (component.get(next) !== id) below = Math.max(below, height.get(next)!);
+          }
+        }
+        for (const key of members) height.set(key, below + 1);
+      }
+    }
+    for (const key of unresolved) {
+      for (const next of successors(key)) {
+        count();
+        if (height.get(next)! < THREAD_WAIT_DEPTH_LIMIT) continue;
+        cutEdges.add(edgeKey(key, next));
+        if (!live.has(key)) {
+          live.add(key);
+          queue.push(key);
+        }
+      }
+    }
+    spread();
+  }
+
+  const result = new Map<string, ResolvedThreadWait>();
+  for (const [key, targets] of classified) {
+    const shell = shells.get(key)!;
+    result.set(key, {
+      waiting: shell.waitPhase === "waiting" && live.has(key),
+      targets: targets.map((target): ResolvedWaitTarget => {
+        if (target.kind === "final") {
+          return {
+            ...target.base,
+            state: target.state,
+            ...(target.suffix === undefined ? {} : { suffix: target.suffix }),
+          };
+        }
+        const isLive = live.has(target.key) || cutEdges.has(edgeKey(key, target.key));
+        return { ...target.base, state: isLive ? "live" : "ended" };
+      }),
+    });
   }
   return result;
 }

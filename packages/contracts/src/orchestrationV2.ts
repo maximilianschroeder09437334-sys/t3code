@@ -2426,8 +2426,10 @@ export function isLiveSubagentShell(
 ): boolean {
   return (
     (thread.activityRunStatus ?? null) !== null ||
-    // A child that waits on other work still holds its parent, so its Waiting can be resolved.
+    // A child that waits on other work, or needs the user (a Maxi step in its current report, a
+    // guest message), still holds its parent, so the parent's Waiting can be resolved.
     thread.waitPhase === "waiting" ||
+    thread.waitPhase === "needs" ||
     LIVE_SHELL_STATUSES.has(thread.status) ||
     thread.pendingRuntimeRequest !== null ||
     (thread.pendingBackgroundTasks?.length ?? 0) > 0

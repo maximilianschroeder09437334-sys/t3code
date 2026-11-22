@@ -2302,6 +2302,19 @@ function visibleItemCountForShell(input: {
   );
 }
 
+/**
+ * How a "Maxi: nothing needed right now" line ends inside a JSON payload, lowercased: before an
+ * escaped line break (backslash + n or r, as stored) or the string's closing quote.
+ */
+const NOTHING_NEEDED_LINE_ENDINGS = [
+  String.raw`.\n`,
+  String.raw`\n`,
+  String.raw`.\r`,
+  String.raw`\r`,
+  `."`,
+  `"`,
+].map((ending) => `maxi: nothing needed right now${ending}`);
+
 type ShellWaitSessionRow = {
   readonly thread_id: string;
   readonly provider_instance_id: string;
@@ -8142,7 +8155,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
       )`;
     };
+    /**
+     * A report payload, lowercased, without its "Maxi: nothing needed right now" lines. Only an
+     * occurrence that ends its line or the text is removed, so a longer Maxi step, which the
+     * parser counts as actionable, keeps its "maxi:".
+     */
+    const actionableMaxiPayload = (column: string) => {
+      let expression = `lower(${column})`;
+      for (const ending of NOTHING_NEEDED_LINE_ENDINGS) {
+        expression = `replace(${expression}, '${ending}', '')`;
+      }
+      return sql.literal(expression);
+    };
     // Mirrors isSilentRunForShell.
+
     const isSilentShellRun = (alias: string) => {
       const run = sql.literal(alias);
       return sql`(
@@ -9542,8 +9568,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT 1 FROM json_each(t.payload_json, '$.pullRequests') link
               WHERE json_type(link.value, '$.watch') IS NOT NULL
             )
-            -- waitPhase "waiting" from the shell's own report: its latest run completed with a
-            -- WAIT line. LIKE is case-insensitive like the parser; the payload holds the text.
+            -- waitPhase "waiting" or "needs" from the shell's own report: its latest run
+            -- completed with a WAIT line, or (unsettled) with a Maxi step other than "nothing
+            -- needed right now". LIKE is case-insensitive like the parsers; the payload holds
+            -- the text.
             OR EXISTS (
               SELECT 1 FROM orchestration_v2_projection_turn_items report
               WHERE report.run_id = (
@@ -9554,7 +9582,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   LIMIT 1
                 )
                 AND report.type = 'assistant_message'
-                AND report.payload_json LIKE '%WAIT on%'
+                AND (
+                  report.payload_json LIKE '%WAIT on%'
+                  OR (
+                    json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
+                    AND ${actionableMaxiPayload("report.payload_json")} LIKE '%maxi:%'
+                  )
+                )
                 AND EXISTS (
                   SELECT 1 FROM orchestration_v2_projection_runs completed
                   WHERE completed.run_id = report.run_id AND completed.status = 'completed'
@@ -9562,6 +9596,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             )
             -- waitPhase "waiting" from a handoff successor.
             OR json_extract(t.payload_json, '$.handoffTransfer.state') IN ('released', 'started')
+            -- waitPhase "needs" from a pending guest message on an unsettled thread.
+            OR (
+              json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
+              AND EXISTS (
+                SELECT 1 FROM json_each(t.payload_json, '$.guestShare.messages') guest_message
+                WHERE json_extract(guest_message.value, '$.status') = 'pending'
+              )
+            )
           ) AS may_be_live,
           -- One list for the whole read, found through the child_thread_id index. A lookup per
           -- thread would parse the payload of every subagent row.

@@ -203,6 +203,35 @@ describe("resolveThreadWaits", () => {
     expect(waitOf(run("working"), "a")?.waiting).toBe(true);
   });
 
+  it("keeps a waiter waiting on a trimmed-in needs-you subagent, across reconnects", () => {
+    const subagentOf = (parent: string) => ({
+      rootThreadId: ThreadId.make(parent),
+      parentThreadId: ThreadId.make(parent),
+      relationshipToParent: "subagent" as const,
+    });
+    const a = waiting("a", [on("b", { source: "awaited_child" })]);
+    // B finished; its report asks Maxi (or a guest wrote): no run, request or task holds it.
+    const b = { ...phase("b", "needs"), status: "completed" as const, lineage: subagentOf("a") };
+    const trim = (threads: ReadonlyArray<OrchestrationV2ThreadShell>) =>
+      threads.filter(
+        (thread) =>
+          thread.lineage.relationshipToParent !== "subagent" || isLiveSubagentShell(thread),
+      );
+    const kept = trim([a, b]);
+    expect(kept.map((thread) => thread.id)).toEqual([a.id, b.id]);
+    const ready = resolve([[env1, kept]]);
+    expect(waitOf(ready, "a")?.waiting).toBe(true);
+    expect(waitOf(ready, "a")?.targets[0]).toMatchObject({ state: "live", suffix: "needs you" });
+    const reconnecting = resolve([[env1, kept]], { notReady: [env1] });
+    expect(waitOf(reconnecting, "a")?.waiting).toBe(true);
+    expect(waitOf(reconnecting, "a")?.targets[0]).toMatchObject({ suffix: "not connected" });
+    expect(waitOf(resolve([[env1, kept]]), "a")?.targets[0]?.suffix).toBe("needs you");
+    // Once B ends the trim drops it and A clears.
+    const after = trim([a, { ...b, waitPhase: "ended" }]);
+    expect(after.map((thread) => thread.id)).toEqual([a.id]);
+    expect(waitOf(resolve([[env1, after]]), "a")?.waiting).toBe(false);
+  });
+
   it("marks a target in a linked environment that is not ready as not connected", () => {
     const a = waiting("a", [on("remote", { environmentId: env2, title: "Remote task" })]);
     const wait = waitOf(resolve([[env1, [a]]], { notReady: [env2] }), "a");
@@ -282,6 +311,78 @@ describe("resolveThreadWaits", () => {
     expect(waitOf(withExit, "b")?.waiting).toBe(true);
   });
 
+  it("gives the same answer for a cycle with a live exit in every shell order", () => {
+    // A waits on B and C, B waits back on A, C works; D waits on B from outside the cycle.
+    const permutations = <T>(items: ReadonlyArray<T>): Array<Array<T>> =>
+      items.length <= 1
+        ? [[...items]]
+        : items.flatMap((item, index) =>
+            permutations([...items.slice(0, index), ...items.slice(index + 1)]).map((rest) => [
+              item,
+              ...rest,
+            ]),
+          );
+    const shellsFor = (cPhase: "working" | "ended") => [
+      waiting("a", [on("b"), on("c")]),
+      waiting("b", [on("a")]),
+      phase("c", cPhase),
+      waiting("d", [on("b")]),
+    ];
+    /** Every target that is itself a waiting thread reads exactly that thread's final result. */
+    const assertTargetsAgree = (
+      result: ReturnType<typeof resolveThreadWaits>,
+      threads: ReadonlyArray<OrchestrationV2ThreadShell>,
+      label: string,
+    ) => {
+      const waitingIds = new Set(
+        threads.filter((thread) => thread.waitPhase === "waiting").map((thread) => thread.id),
+      );
+      for (const [key, wait] of result) {
+        for (const target of wait.targets) {
+          if (target.threadId === null || !waitingIds.has(target.threadId)) continue;
+          const own = waitOf(result, target.threadId)?.waiting;
+          expect(target.state, `${label} ${key} -> ${target.threadId}`).toBe(
+            own ? "live" : "ended",
+          );
+        }
+      }
+    };
+    const orders = permutations(shellsFor("working").map((_, index) => index));
+    expect(orders).toHaveLength(24);
+    for (const cPhase of ["working", "ended"] as const) {
+      const threads = shellsFor(cPhase);
+      for (const order of orders) {
+        const ordered = order.map((index) => threads[index]!);
+        const label = `${cPhase} ${ordered.map((thread) => thread.id).join(",")}`;
+        const result = resolve([[env1, ordered]]);
+        const expected = cPhase === "working";
+        for (const id of ["a", "b", "d"]) {
+          expect(waitOf(result, id)?.waiting, `${label} ${id}`).toBe(expected);
+        }
+        assertTargetsAgree(result, ordered, label);
+      }
+    }
+  });
+
+  it("follows long chains and cycles without recursion", () => {
+    // A ring of 5000 waiting threads with one live exit at the far end, in both directions.
+    const size = 5000;
+    const ring = Array.from({ length: size }, (_, index) =>
+      waiting(`r${index}`, [
+        on(`r${(index + 1) % size}`),
+        ...(index === size - 1 ? [on("busy")] : []),
+      ]),
+    );
+    for (const threads of [ring, [...ring].reverse()]) {
+      const result = resolve([[env1, [...threads, phase("busy", "working")]]]);
+      expect(waitOf(result, "r0")?.waiting).toBe(true);
+      expect(waitOf(result, `r${size - 1}`)?.waiting).toBe(true);
+      const ended = resolve([[env1, [...threads, phase("busy", "ended")]]]);
+      expect(waitOf(ended, "r0")?.waiting).toBe(false);
+      expect(waitOf(ended, `r${size - 1}`)?.waiting).toBe(false);
+    }
+  });
+
   it("counts a chain deeper than the limit as still live", () => {
     const chain = (length: number) => [
       ...Array.from({ length }, (_, index) => waiting(`t${index}`, [on(`t${index + 1}`)])),
@@ -292,31 +393,54 @@ describe("resolveThreadWaits", () => {
     expect(waitOf(short, "t0")?.waiting).toBe(false);
     // Beyond it the unexplored rest counts as live; the thread next to the end is still exact.
     const long = THREAD_WAIT_DEPTH_LIMIT * 3;
-    const deep = resolve([[env1, chain(long)]]);
-    expect(waitOf(deep, "t0")?.waiting).toBe(true);
-    expect(waitOf(deep, `t${long - 1}`)?.waiting).toBe(false);
+    const deep = chain(long);
+    // The cut sits at the same thread whatever the shell order.
+    for (const threads of [deep, [...deep].reverse()]) {
+      const result = resolve([[env1, threads]]);
+      expect(waitOf(result, "t0")?.waiting).toBe(true);
+      expect(waitOf(result, `t${long - 1}`)?.waiting).toBe(false);
+      const lastCut = long - THREAD_WAIT_DEPTH_LIMIT - 1;
+      expect(waitOf(result, `t${lastCut}`)?.waiting).toBe(true);
+      expect(waitOf(result, `t${lastCut + 1}`)?.waiting).toBe(false);
+      // Only the cut target reads live while its own result is not waiting.
+      expect(waitOf(result, `t${lastCut}`)?.targets[0]?.state).toBe("live");
+    }
+    // Exactly at the limit the answer is still exact; one more thread is cut.
+    expect(waitOf(resolve([[env1, chain(THREAD_WAIT_DEPTH_LIMIT)]]), "t0")?.waiting).toBe(false);
+    expect(waitOf(resolve([[env1, chain(THREAD_WAIT_DEPTH_LIMIT + 1)]]), "t0")?.waiting).toBe(true);
   });
 
-  it("visits each thread and edge once on a wide converging graph", () => {
+  it("visits each thread and edge a bounded number of times on a wide converging graph", () => {
     const layers = 12;
     const width = 24;
-    const threads: Array<OrchestrationV2ThreadShell> = [];
-    let edges = 0;
-    for (let layer = 0; layer < layers; layer++) {
-      for (let index = 0; index < width; index++) {
-        if (layer === layers - 1) {
-          threads.push(phase(`l${layer}-${index}`, "working"));
-          continue;
+    const graph = (lastPhase: "working" | "ended") => {
+      const threads: Array<OrchestrationV2ThreadShell> = [];
+      let edges = 0;
+      for (let layer = 0; layer < layers; layer++) {
+        for (let index = 0; index < width; index++) {
+          if (layer === layers - 1) {
+            threads.push(phase(`l${layer}-${index}`, lastPhase));
+            continue;
+          }
+          const targets = Array.from({ length: width }, (_, next) => on(`l${layer + 1}-${next}`));
+          edges += targets.length;
+          threads.push(waiting(`l${layer}-${index}`, targets));
         }
-        const targets = Array.from({ length: width }, (_, next) => on(`l${layer + 1}-${next}`));
-        edges += targets.length;
-        threads.push(waiting(`l${layer}-${index}`, targets));
       }
-    }
+      return { threads, edges };
+    };
+    // A live bottom layer: classify plus one backward spread.
+    const liveGraph = graph("working");
     const stats: ThreadWaitResolveStats = { ops: 0 };
-    const result = resolve([[env1, threads]], { stats });
+    const result = resolve([[env1, liveGraph.threads]], { stats });
     expect(waitOf(result, "l0-0")?.waiting).toBe(true);
-    // Without one shared memo this graph takes width^layers steps.
-    expect(stats.ops).toBeLessThanOrEqual(2 * (threads.length + edges));
+    // A walk per path would take width^layers steps.
+    expect(stats.ops).toBeLessThanOrEqual(2 * (liveGraph.threads.length + liveGraph.edges));
+    // An ended bottom layer also runs the SCC height pass, still linear.
+    const endedGraph = graph("ended");
+    const endedStats: ThreadWaitResolveStats = { ops: 0 };
+    const ended = resolve([[env1, endedGraph.threads]], { stats: endedStats });
+    expect(waitOf(ended, "l0-0")?.waiting).toBe(false);
+    expect(endedStats.ops).toBeLessThanOrEqual(4 * (endedGraph.threads.length + endedGraph.edges));
   });
 });
