@@ -11,7 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { threadContextsOutsideEnvironment } from "@t3tools/shared/composerContextReferences";
 import { AsyncResult } from "effect/reactivity";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dimensions, Platform, Pressable, View, type ViewInstance } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSharedValue } from "react-native-reanimated";
@@ -75,6 +75,15 @@ export function HomeComposer(props: {
   const editorRef = useRef<ComposerEditorHandle>(null);
   const popoverHeight = useSharedValue(0);
   const rootRef = useRef<ViewInstance>(null);
+  // A send that finishes after the user left Home still clears its draft, but opens nothing.
+  const mountedRef = useRef(true);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks whether the composer is still mounted for the async send's navigation
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // Distance from Home's bottom edge to the screen's: the tab bar sits between Home and the keyboard.
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const environmentRuntime = useRemoteEnvironmentRuntime(environmentId);
@@ -210,7 +219,9 @@ export function HomeComposer(props: {
     // The next message on Home starts a fresh draft and thread.
     updateNewTaskFlowState(HOME_COMPOSER_FLOW_KEY, { draftKey: null });
     setCreationMetadata(makeTurnCommandMetadata());
-    props.onThreadStarted({ environmentId: message.environmentId, threadId: message.threadId });
+    if (mountedRef.current) {
+      props.onThreadStarted({ environmentId: message.environmentId, threadId: message.threadId });
+    }
     return message.messageId;
   }
 

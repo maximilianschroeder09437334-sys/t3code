@@ -8,6 +8,7 @@ import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
   composerDraftContentChanged,
+  homeComposerSendOpenTarget,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -164,5 +165,34 @@ describe("approvalRedirectNotice", () => {
   it("stays quiet when the decline failed or the user left the thread", () => {
     expect(approvalRedirectNotice({ ...settled, declined: false })).toBeNull();
     expect(approvalRedirectNotice(settled)).toBeNull();
+  });
+});
+
+describe("homeComposerSendOpenTarget", () => {
+  const created = scopeThreadRef(local, ThreadId.make("from-home"));
+  const accepted = {
+    homeComposerOnly: true,
+    turnStartSucceeded: true,
+    submissionIntent: "foreground",
+    stillShowingSentDraft: true,
+    createdThreadRef: created,
+  } as const;
+
+  it("opens the thread a Home send created once the server accepted it", () => {
+    // Enter and the send button both submit through the same send, foreground or alternate.
+    expect(homeComposerSendOpenTarget(accepted)).toBe(created);
+    expect(homeComposerSendOpenTarget({ ...accepted, submissionIntent: "alternate" })).toBe(
+      created,
+    );
+  });
+
+  it.each([
+    ["a rejected or offline send", { turnStartSucceeded: false }],
+    ["a background send", { submissionIntent: "background" }],
+    ["a user who left the sent draft", { stillShowingSentDraft: false }],
+    ["a composer outside Home", { homeComposerOnly: false }],
+    ["a send that created no thread", { createdThreadRef: null }],
+  ] as const)("stays put for %s", (_case, change) => {
+    expect(homeComposerSendOpenTarget({ ...accepted, ...change })).toBeNull();
   });
 });

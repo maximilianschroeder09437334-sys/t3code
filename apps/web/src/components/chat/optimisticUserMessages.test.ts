@@ -8,8 +8,12 @@ import {
   createOptimisticBlobPreviews,
   dropOptimisticHandoff,
   emptyOptimisticUserMessages,
+  handOffOptimisticMessagesToRoute,
   loadedHandoffMessageIdsAtom,
+  optimisticUserMessagesFromRouteHandoff,
+  peekOptimisticRouteHandoff,
   reconcileOptimisticUserMessages,
+  releaseOptimisticRouteHandoff,
 } from "./optimisticUserMessages";
 
 const threadA = ThreadId.make("thread-a");
@@ -123,6 +127,52 @@ describe("optimistic user messages", () => {
 
     previews.release(threadA, sent);
     expect(revoke.mock.calls.map(([url]) => url)).toEqual(["blob:m1"]);
+  });
+
+  it("a message handed to another view keeps its previews when the sending view goes away", () => {
+    using revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const previews = createOptimisticBlobPreviews();
+    const sent = message("m1", "blob:m1");
+    previews.track(threadA, sent);
+    previews.track(threadA, message("m2", "blob:m2"));
+
+    previews.forget(threadA, sent);
+    previews.revokeThread(threadA);
+    expect(revoke.mock.calls.map(([url]) => url)).toEqual(["blob:m2"]);
+  });
+});
+
+describe("route handoff", () => {
+  it("starts the receiving view with the sent message until its view commits", () => {
+    const sent = message("home-1");
+    const handoff = { threadKey: "env:thread-a", threadId: threadA, messages: [sent] };
+    handOffOptimisticMessagesToRoute(handoff);
+
+    // Render and a StrictMode replay read the same handoff.
+    expect(peekOptimisticRouteHandoff("env:thread-a")).toBe(handoff);
+    expect(peekOptimisticRouteHandoff("env:thread-a")).toBe(handoff);
+    expect(peekOptimisticRouteHandoff("env:thread-b")).toBeNull();
+    let state = optimisticUserMessagesFromRouteHandoff(handoff, threadA);
+    expect(state.messages).toEqual([sent]);
+    expect(optimisticUserMessagesFromRouteHandoff(handoff, threadB).messages).toEqual([]);
+
+    releaseOptimisticRouteHandoff(handoff);
+    expect(peekOptimisticRouteHandoff("env:thread-a")).toBeNull();
+
+    // The server's copy replaces it the usual way.
+    state = reconcileOptimisticUserMessages(state, threadA, ids("home-1"));
+    expect(state.messages).toEqual([]);
+  });
+
+  it("releasing an older handoff keeps a newer one for the same thread", () => {
+    const older = { threadKey: "env:thread-a", threadId: threadA, messages: [message("m1")] };
+    const newer = { threadKey: "env:thread-a", threadId: threadA, messages: [message("m2")] };
+    handOffOptimisticMessagesToRoute(older);
+    handOffOptimisticMessagesToRoute(newer);
+
+    releaseOptimisticRouteHandoff(older);
+    expect(peekOptimisticRouteHandoff("env:thread-a")).toBe(newer);
+    releaseOptimisticRouteHandoff(newer);
   });
 });
 

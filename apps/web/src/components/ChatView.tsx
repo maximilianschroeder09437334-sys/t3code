@@ -26,8 +26,10 @@ import { useAttachmentPreviewHandoff } from "./chat/useAttachmentPreviewHandoff"
 import {
   applyOptimisticUserMessagesAction,
   createOptimisticBlobPreviews,
-  emptyOptimisticUserMessages,
+  optimisticUserMessagesFromRouteHandoff,
+  peekOptimisticRouteHandoff,
   reconcileOptimisticUserMessages,
+  releaseOptimisticRouteHandoff,
 } from "./chat/optimisticUserMessages";
 import { useTimelineRewind } from "./chat/useTimelineRewind";
 import { useThreadLifecycle } from "./chat/useThreadLifecycle";
@@ -684,9 +686,15 @@ export default function ChatView(props: ChatViewProps) {
   });
   const [isWorkspaceFileDragActive, setIsWorkspaceFileDragActive] = useState(false);
   const [optimisticBlobPreviews] = useState(createOptimisticBlobPreviews);
+  // A Home composer send that opened this thread hands over its message (see useComposerSend).
+  const [routeHandoff] = useState(() => peekOptimisticRouteHandoff(routeThreadKey));
   const [heldOptimisticUserMessages, setHeldOptimisticUserMessages] = useState(() =>
-    emptyOptimisticUserMessages(threadId),
+    optimisticUserMessagesFromRouteHandoff(routeHandoff, threadId),
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the module-level route handoff once this view has taken it into its state
+  useLayoutEffect(() => {
+    if (routeHandoff) releaseOptimisticRouteHandoff(routeHandoff);
+  }, [routeHandoff]);
   // Acknowledged messages leave the timeline in the same render the server's copy enters it.
   const optimisticState = reconcileOptimisticUserMessages(
     heldOptimisticUserMessages,
@@ -2942,6 +2950,7 @@ export default function ChatView(props: ChatViewProps) {
     currentRouteThreadKeyRef,
     draftId,
     draftThread,
+    homeComposerOnly,
     activeThread,
     activeThreadKey,
     activeThreadBranch,
@@ -3001,6 +3010,7 @@ export default function ChatView(props: ChatViewProps) {
     optimisticBlobPreviews: {
       track: (message) => optimisticBlobPreviews.track(threadId, message),
       release: (message) => optimisticBlobPreviews.release(threadId, message),
+      forget: (message) => optimisticBlobPreviews.forget(threadId, message),
     },
     setFeedbackSubmissionsByThreadKey,
     setThreadError,

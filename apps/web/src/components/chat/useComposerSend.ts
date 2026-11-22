@@ -100,11 +100,13 @@ import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
   composerDraftContentChanged,
+  homeComposerSendOpenTarget,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
 } from "./composerSend.logic";
 import { useMultipleModelSend } from "./useMultipleModelSend";
+import { handOffOptimisticMessagesToRoute } from "./optimisticUserMessages";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import {
   getUploadedAttachments,
@@ -172,6 +174,8 @@ interface ComposerSendInput {
   readonly currentRouteThreadKeyRef: { readonly current: string | null };
   readonly draftId: DraftId | null;
   readonly draftThread: DraftSessionState | null;
+  /** Home's embedded composer: a successful send opens the thread it created. */
+  readonly homeComposerOnly: boolean;
   readonly activeThread: EnvironmentThreadShell | undefined;
   readonly activeThreadKey: string | null;
   readonly activeThreadBranch: string | null;
@@ -236,6 +240,7 @@ interface ComposerSendInput {
   readonly optimisticBlobPreviews: {
     readonly track: (message: ChatMessage) => void;
     readonly release: (message: ChatMessage) => void;
+    readonly forget: (message: ChatMessage) => void;
   };
   readonly setFeedbackSubmissionsByThreadKey: Dispatch<
     SetStateAction<Record<string, ReadonlyArray<CodexFeedbackSubmission>>>
@@ -273,6 +278,7 @@ export function useComposerSend(input: ComposerSendInput) {
     currentRouteThreadKeyRef,
     draftId,
     draftThread,
+    homeComposerOnly,
     activeThread,
     activeThreadKey,
     activeThreadBranch,
@@ -1544,6 +1550,27 @@ export function useComposerSend(input: ComposerSendInput) {
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
       if (!sendQueuesBehindSetup) resetLocalDispatch();
+    }
+    // Home's composer opens the thread as soon as the server accepted it. The route mounts its
+    // own ChatView, so it receives the sent message to show until the server's copy arrives.
+    const homeOpenTarget = homeComposerSendOpenTarget({
+      homeComposerOnly,
+      turnStartSucceeded,
+      submissionIntent,
+      stillShowingSentDraft: currentRouteThreadKeyRef.current === routeThreadKey,
+      createdThreadRef: sentDraftThreadRef,
+    });
+    if (homeOpenTarget) {
+      optimisticBlobPreviews.forget(optimisticMessage);
+      handOffOptimisticMessagesToRoute({
+        threadKey: scopedThreadKey(homeOpenTarget),
+        threadId: homeOpenTarget.threadId,
+        messages: [optimisticMessage],
+      });
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(homeOpenTarget),
+      });
     }
   };
 

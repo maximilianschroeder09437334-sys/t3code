@@ -1,4 +1,5 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadContextRecord } from "@t3tools/contracts";
+import type { ComposerSubmissionIntent } from "../../composer-logic";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
 
@@ -101,4 +102,23 @@ export function approvalRedirectNotice(input: {
     return "Another approval arrived, so your message wasn't sent.";
   }
   return null;
+}
+
+/**
+ * The thread a Home composer send opens once the server accepted it: the thread this send
+ * created, unless it was a background send or Home no longer shows the sent draft.
+ */
+export function homeComposerSendOpenTarget(input: {
+  readonly homeComposerOnly: boolean;
+  readonly turnStartSucceeded: boolean;
+  readonly submissionIntent: ComposerSubmissionIntent;
+  readonly stillShowingSentDraft: boolean;
+  readonly createdThreadRef: ScopedThreadRef | null;
+}): ScopedThreadRef | null {
+  return input.homeComposerOnly &&
+    input.turnStartSucceeded &&
+    input.submissionIntent !== "background" &&
+    input.stillShowingSentDraft
+    ? input.createdThreadRef
+    : null;
 }

@@ -60,6 +60,43 @@ export function applyOptimisticUserMessagesAction(
   return unchanged ? state : { ...state, messages: next };
 }
 
+/**
+ * Messages a Home composer send passes to the thread route it opens. Home renders its own
+ * ChatView outside the `_chat` route slot, so the route mounts a fresh view whose optimistic
+ * state would otherwise start empty until the server's copy loads.
+ */
+interface OptimisticRouteHandoff {
+  readonly threadKey: string;
+  readonly threadId: ThreadId;
+  readonly messages: ReadonlyArray<ChatMessage>;
+}
+
+const routeHandoffs = new Map<string, OptimisticRouteHandoff>();
+
+export function handOffOptimisticMessagesToRoute(handoff: OptimisticRouteHandoff): void {
+  routeHandoffs.set(handoff.threadKey, handoff);
+}
+
+/** Read-only, so render and StrictMode replays see the same handoff until it is released. */
+export function peekOptimisticRouteHandoff(threadKey: string): OptimisticRouteHandoff | null {
+  return routeHandoffs.get(threadKey) ?? null;
+}
+
+/** The receiving view's starting state; acknowledged messages still leave through reconcile. */
+export function optimisticUserMessagesFromRouteHandoff(
+  handoff: OptimisticRouteHandoff | null,
+  threadId: ThreadId,
+): OptimisticUserMessages {
+  return handoff !== null && handoff.threadId === threadId
+    ? { threadId, messages: [...handoff.messages], handoff: {} }
+    : emptyOptimisticUserMessages(threadId);
+}
+
+/** Called once the receiving view commits; a newer handoff for the thread is kept. */
+export function releaseOptimisticRouteHandoff(handoff: OptimisticRouteHandoff): void {
+  if (routeHandoffs.get(handoff.threadKey) === handoff) routeHandoffs.delete(handoff.threadKey);
+}
+
 export function dropOptimisticHandoff(
   state: OptimisticUserMessages,
   threadId: ThreadId,
@@ -80,6 +117,11 @@ export interface OptimisticBlobPreviews {
   readonly handOff: (state: OptimisticUserMessages) => void;
   readonly revoke: (threadId: ThreadId, previewUrls: ReadonlyArray<string>) => void;
   readonly release: (threadId: ThreadId, message: ChatMessage) => void;
+  /**
+   * Stops owning a message's previews without revoking them, for a message handed to another
+   * view. That view's acknowledgement handoff revokes them once the server's copies load.
+   */
+  readonly forget: (threadId: ThreadId, message: ChatMessage) => void;
   readonly revokeThread: (threadId: ThreadId) => void;
 }
 
@@ -113,6 +155,13 @@ export function createOptimisticBlobPreviews(): OptimisticBlobPreviews {
         threadId,
         collectUserMessageBlobPreviewUrls(message).filter((url) => !handedOff.has(url)),
       ),
+    forget: (threadId, message) => {
+      const owned = ownedByThread.get(threadId);
+      for (const previewUrl of collectUserMessageBlobPreviewUrls(message)) {
+        owned?.delete(previewUrl);
+        handedOff.delete(previewUrl);
+      }
+    },
     revokeThread: (threadId) => {
       revoke(threadId, [...(ownedByThread.get(threadId) ?? [])]);
       ownedByThread.delete(threadId);
