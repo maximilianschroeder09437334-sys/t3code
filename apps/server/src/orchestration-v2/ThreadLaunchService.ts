@@ -12,6 +12,7 @@ import {
   type OrchestrationV2DelegatedFrom,
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
+  type OrchestrationV2ThreadLaunchedBy,
   type OrchestrationV2ThreadProjection,
   type ProviderDriverKind,
   type ProviderInteractionMode,
@@ -109,6 +110,8 @@ export interface ThreadLaunchInput {
   readonly linkOrigin?: OrchestrationV2LinkOrigin;
   /** The parent there, when that environment's agent delegated this as a task. */
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
+  /** The bound agent thread that launched this one. A reuse launch never changes the thread's value. */
+  readonly launchedBy?: OrchestrationV2ThreadLaunchedBy;
 }
 
 type PreparationInput = Pick<
@@ -1335,6 +1338,7 @@ const make = Effect.gen(function* () {
                 ...(input.delegatedFrom === undefined
                   ? {}
                   : { delegatedFrom: input.delegatedFrom }),
+                ...(input.launchedBy === undefined ? {} : { launchedBy: input.launchedBy }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
                 ...(initialMessage === undefined

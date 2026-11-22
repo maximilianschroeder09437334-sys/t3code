@@ -127,6 +127,79 @@ const client = McpSchema.McpServerClient.of({
   getClient: Effect.die("unused"),
 });
 
+it.effect("only a thread its predecessor launched can take that predecessor over", () => {
+  const predecessorId = ThreadId.make("thread:predecessor");
+  const launcher: Record<string, ThreadId> = {
+    [threadId]: predecessorId,
+    "thread:q-launched": ThreadId.make("thread:q"),
+  };
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (
+      args: Record<string, unknown>,
+      invocation: McpInvocationContext.McpInvocationScope,
+    ) =>
+      server
+        .callTool({ name: "t3_thread_takeover", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const fromClient = yield* call(
+      { predecessorThreadId: predecessorId },
+      clientScope("full-access"),
+    );
+    expect(declaredFailure(fromClient)).toMatchObject({ code: "thread_credential_required" });
+
+    const admitted = yield* call({ predecessorThreadId: predecessorId }, scope);
+    expect(declaredFailure(admitted)?.code).not.toMatch(/^takeover_|thread_not_found/);
+
+    const unproven = yield* call(
+      { predecessorThreadId: predecessorId },
+      { ...scope, thread: { ...scope.thread!, threadId: ThreadId.make("thread:q-launched") } },
+    );
+    expect(declaredFailure(unproven)).toMatchObject({ code: "takeover_unproven" });
+
+    const missing = yield* call({ predecessorThreadId: "thread:missing" }, scope);
+    expect(declaredFailure(missing)).toMatchObject({ code: "thread_not_found" });
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) =>
+              Effect.succeed(
+                id === "thread:missing" ? null : McpToolAccessTestkit.liveThreadShell(id),
+              ),
+            getThreadRecords: (id) => {
+              const { thread } = McpToolAccessTestkit.idleThreadProjection(
+                McpToolAccessTestkit.liveThreadShell(id),
+              );
+              const launchedBy = launcher[id];
+              return Effect.succeed({
+                thread: {
+                  ...thread,
+                  ...(launchedBy === undefined
+                    ? {}
+                    : {
+                        launchedBy: {
+                          threadId: launchedBy,
+                          commandId: CommandId.make(`launch:${id}`),
+                          at: DateTime.makeUnsafe(0),
+                        },
+                      }),
+                },
+              } as never);
+            },
+          }),
+        ),
+      ),
+    ),
+  );
+});
+
 it.effect("checks capability through the production registration", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;

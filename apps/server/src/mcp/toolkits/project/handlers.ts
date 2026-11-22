@@ -326,6 +326,10 @@ const launchThread = McpToolAccess.startsThreads(
         ...(linkOrigin === undefined ? {} : { linkOrigin }),
         // Kept only alongside linkOrigin: thread.create drops it otherwise.
         ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+        // Proves a later takeover by this caller; only the bound thread context can set it.
+        ...(caller === undefined
+          ? {}
+          : { launchedBy: { threadId: caller.id, commandId, at: yield* DateTime.now } }),
       }).pipe(
         Effect.mapError((error) => {
           if (error._tag === "AttachmentClaimError") {

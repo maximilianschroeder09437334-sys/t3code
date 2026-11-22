@@ -706,10 +706,35 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     incrementalThreadRead: Schema.Boolean,
     scheduledTasks: Schema.Boolean,
     agentModelPolicyVersion: Schema.optional(Schema.Literal(1)),
+    /** `t3_thread_takeover` moves a predecessor's app-owned subagents to its successor. */
+    threadTakeover: Schema.optional(Schema.Literal(1)),
     maxBatchThreads: Schema.Number,
   }),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
+
+export const OrchestratorMcpThreadTakeoverResult = Schema.Struct({
+  transferId: Schema.String,
+  state: Schema.Literals(["effective", "timed_out"]),
+  migrated: Schema.Array(
+    Schema.Struct({ childThreadId: ThreadId, taskId: NodeId, anchorTaskId: NodeId }),
+  ),
+  /** Children whose current result the predecessor already received; the successor records it without a wake. */
+  alreadyDeliveredToPredecessor: Schema.Array(ThreadId),
+  notMigrated: Schema.Array(
+    Schema.Struct({
+      taskId: NodeId,
+      kind: Schema.String,
+      reason: Schema.Literals([
+        "provider_native",
+        "pr_watch",
+        "predecessor_command",
+        "child_unavailable",
+      ]),
+    }),
+  ),
+});
+export type OrchestratorMcpThreadTakeoverResult = typeof OrchestratorMcpThreadTakeoverResult.Type;
 
 export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
@@ -964,6 +989,12 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "orchestration_error",
       "thread_credential_required",
       "target_required",
+      "takeover_unproven",
+      "takeover_invalid",
+      "takeover_conflict",
+      "takeover_in_progress",
+      "takeover_timeout",
+      "takeover_successor_not_running",
     ]),
     message: Schema.String,
   },

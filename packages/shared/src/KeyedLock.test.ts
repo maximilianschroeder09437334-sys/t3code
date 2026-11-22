@@ -131,51 +131,53 @@ describe("KeyedLock", () => {
     }),
   );
 
-  it.effect("tryWithLock holds the key against withLock and releases on failure and interruption", () =>
-    Effect.gen(function* () {
-      const lock = yield* KeyedLock.make<string>();
-      const events = yield* Ref.make<ReadonlyArray<string>>([]);
-      const record = (event: string) => Ref.update(events, (current) => [...current, event]);
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
+  it.effect(
+    "tryWithLock holds the key against withLock and releases on failure and interruption",
+    () =>
+      Effect.gen(function* () {
+        const lock = yield* KeyedLock.make<string>();
+        const events = yield* Ref.make<ReadonlyArray<string>>([]);
+        const record = (event: string) => Ref.update(events, (current) => [...current, event]);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
 
-      const tried = yield* lock
-        .tryWithLock(
-          "key",
-          record("try:start").pipe(
-            Effect.andThen(Deferred.succeed(entered, undefined)),
-            Effect.andThen(Deferred.await(release)),
-            Effect.andThen(record("try:end")),
-          ),
-        )
-        .pipe(Effect.forkChild);
-      yield* Deferred.await(entered);
-      const blocked = yield* lock.withLock("key", record("blocking")).pipe(Effect.forkChild);
-      assert.deepStrictEqual(yield* lock.tryWithLock("key", record("second-try")), Option.none());
-      yield* Effect.yieldNow;
-      assert.deepStrictEqual(yield* Ref.get(events), ["try:start"]);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.joinAll([tried, blocked]);
-      assert.deepStrictEqual(yield* Ref.get(events), ["try:start", "try:end", "blocking"]);
+        const tried = yield* lock
+          .tryWithLock(
+            "key",
+            record("try:start").pipe(
+              Effect.andThen(Deferred.succeed(entered, undefined)),
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(record("try:end")),
+            ),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        const blocked = yield* lock.withLock("key", record("blocking")).pipe(Effect.forkChild);
+        assert.deepStrictEqual(yield* lock.tryWithLock("key", record("second-try")), Option.none());
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(yield* Ref.get(events), ["try:start"]);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.joinAll([tried, blocked]);
+        assert.deepStrictEqual(yield* Ref.get(events), ["try:start", "try:end", "blocking"]);
 
-      assert.strictEqual(
-        yield* lock.tryWithLock("key", Effect.fail("boom")).pipe(Effect.flip),
-        "boom",
-      );
-      assert.deepStrictEqual(yield* lock.activeKeys, []);
+        assert.strictEqual(
+          yield* lock.tryWithLock("key", Effect.fail("boom")).pipe(Effect.flip),
+          "boom",
+        );
+        assert.deepStrictEqual(yield* lock.activeKeys, []);
 
-      const interruptedEntered = yield* Deferred.make<void>();
-      const interrupted = yield* lock
-        .tryWithLock(
-          "key",
-          Deferred.succeed(interruptedEntered, undefined).pipe(Effect.andThen(Effect.never)),
-        )
-        .pipe(Effect.forkChild);
-      yield* Deferred.await(interruptedEntered);
-      yield* Fiber.interrupt(interrupted);
-      assert.deepStrictEqual(yield* lock.activeKeys, []);
-      assert.deepStrictEqual(yield* lock.tryWithLock("key", Effect.succeed(3)), Option.some(3));
-    }),
+        const interruptedEntered = yield* Deferred.make<void>();
+        const interrupted = yield* lock
+          .tryWithLock(
+            "key",
+            Deferred.succeed(interruptedEntered, undefined).pipe(Effect.andThen(Effect.never)),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(interruptedEntered);
+        yield* Fiber.interrupt(interrupted);
+        assert.deepStrictEqual(yield* lock.activeKeys, []);
+        assert.deepStrictEqual(yield* lock.tryWithLock("key", Effect.succeed(3)), Option.some(3));
+      }),
   );
 
   it.effect("runner keeps each key's effects in run order and never holds up another key", () =>

@@ -510,8 +510,52 @@ export const HandoffTransfer = Schema.Struct({
 });
 export type HandoffTransfer = typeof HandoffTransfer.Type;
 
+/** The agent thread whose MCP launch created this thread. Server-written; reuse launches keep the original. */
+export const OrchestrationV2ThreadLaunchedBy = Schema.Struct({
+  threadId: ThreadId,
+  commandId: CommandId,
+  at: Schema.DateTimeUtc,
+});
+export type OrchestrationV2ThreadLaunchedBy = typeof OrchestrationV2ThreadLaunchedBy.Type;
+
+/**
+ * On a predecessor: the successor taking over its app-owned children. The owner of truth for the
+ * transfer; `attempting` past `deadlineAt` reads as `timed_out`.
+ */
+export const OrchestrationV2ThreadContinuedBy = Schema.Struct({
+  threadId: ThreadId,
+  transferId: TrimmedNonEmptyString,
+  attempt: PositiveInt,
+  state: Schema.Literals(["attempting", "effective", "timed_out"]),
+  deadlineAt: Schema.DateTimeUtc,
+  effectiveAt: Schema.optional(Schema.DateTimeUtc),
+  reason: Schema.optional(Schema.String),
+});
+export type OrchestrationV2ThreadContinuedBy = typeof OrchestrationV2ThreadContinuedBy.Type;
+
+/** On a successor: the predecessor it took over. Written only when the takeover is effective. */
+export const OrchestrationV2ThreadContinues = Schema.Struct({
+  threadId: ThreadId,
+  transferId: TrimmedNonEmptyString,
+  at: Schema.DateTimeUtc,
+});
+export type OrchestrationV2ThreadContinues = typeof OrchestrationV2ThreadContinues.Type;
+
+/** On a migrated child: its current owner. `lineage` keeps the thread that created it. */
+export const OrchestrationV2ThreadOwnership = Schema.Struct({
+  ownerThreadId: ThreadId,
+  transferId: TrimmedNonEmptyString,
+  anchorTaskId: NodeId,
+  at: Schema.DateTimeUtc,
+});
+export type OrchestrationV2ThreadOwnership = typeof OrchestrationV2ThreadOwnership.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   handoffStopCommandId: Schema.optional(CommandId),
+  launchedBy: Schema.optional(OrchestrationV2ThreadLaunchedBy),
+  continuedBy: Schema.optional(OrchestrationV2ThreadContinuedBy),
+  continues: Schema.optional(OrchestrationV2ThreadContinues),
+  ownership: Schema.optional(OrchestrationV2ThreadOwnership),
   handoffTransfer: Schema.optional(HandoffTransfer),
   handoffSourceThreadId: Schema.optional(ThreadId),
   ...OrchestrationV2CreationFields,
@@ -996,6 +1040,18 @@ export const OrchestrationV2Subagent = Schema.Struct({
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   // The run whose unfinished task was cancelled, committed with its Stop.
   cancelledRunId: Schema.optional(RunId),
+  /**
+   * Set when a takeover moved this task's child to a successor's anchor task. `forwards` lists the
+   * child runs whose results reached this task afterwards and are owed to the current owner.
+   */
+  transferredTo: Schema.optional(
+    Schema.Struct({
+      threadId: ThreadId,
+      taskId: NodeId,
+      transferId: TrimmedNonEmptyString,
+      forwards: Schema.optional(Schema.Array(RunId)),
+    }),
+  ),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -2313,6 +2369,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   lineage: OrchestrationV2AppThreadLineage,
+  /** The thread that owns this subagent after a takeover, when it differs from the lineage parent. Absent from older servers. */
+  ownerThreadId: Schema.optional(ThreadId),
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
@@ -2596,6 +2654,31 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
     ),
   ),
   deletedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  launchedBy: Schema.optional(
+    OrchestrationV2ThreadLaunchedBy.mapFields((fields) => ({
+      ...fields,
+      at: Schema.DateTimeUtcFromString,
+    })),
+  ),
+  continuedBy: Schema.optional(
+    OrchestrationV2ThreadContinuedBy.mapFields((fields) => ({
+      ...fields,
+      deadlineAt: Schema.DateTimeUtcFromString,
+      effectiveAt: Schema.optional(Schema.DateTimeUtcFromString),
+    })),
+  ),
+  continues: Schema.optional(
+    OrchestrationV2ThreadContinues.mapFields((fields) => ({
+      ...fields,
+      at: Schema.DateTimeUtcFromString,
+    })),
+  ),
+  ownership: Schema.optional(
+    OrchestrationV2ThreadOwnership.mapFields((fields) => ({
+      ...fields,
+      at: Schema.DateTimeUtcFromString,
+    })),
+  ),
 }));
 export type OrchestrationV2AppThreadJson = typeof OrchestrationV2AppThreadJson.Type;
 
@@ -3258,6 +3341,8 @@ export const OrchestrationV2Command = Schema.Union([
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
     /** Only the server sets this, with `linkOrigin`, for a linked environment's delegated task. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+    /** Only the server sets this, from the bound MCP caller that launched the thread. */
+    launchedBy: Schema.optional(OrchestrationV2ThreadLaunchedBy),
     importedNativeThread: Schema.optional(
       Schema.Struct({
         ref: Schema.Struct({

@@ -46,6 +46,7 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -96,6 +97,8 @@ const clientLaunchHarness = (input: {
   readonly hostedAppUrl?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
+  /** An agent thread bound to the MCP session makes the call instead of the client. */
+  readonly callerThreadId?: ThreadId;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = fixtureSelection;
@@ -127,7 +130,14 @@ const clientLaunchHarness = (input: {
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
       requestNamespace: "client:session-1",
-      thread: undefined,
+      thread:
+        input.callerThreadId === undefined
+          ? undefined
+          : {
+              threadId: input.callerThreadId,
+              providerSessionId: "provider-session:caller",
+              providerInstanceId: fixtureSelection.instanceId,
+            },
       client: {
         sessionId: "session-1",
         label: "Claude Code",
@@ -140,6 +150,14 @@ const clientLaunchHarness = (input: {
     Layer.mock(ThreadManagement.ThreadManagementService)({
       // A thread exists once a launch started it.
       getThreadShell: (threadId) => {
+        if (threadId === input.callerThreadId)
+          return Effect.succeed({
+            ...McpToolAccessTestkit.liveThreadShell(threadId, {
+              runtimeMode: input.runtimeModeCeiling,
+            }),
+            projectId,
+            modelSelection,
+          });
         const launch = input.launched.find((candidate) => candidate.threadId === threadId);
         return Effect.succeed(
           launch === undefined
@@ -276,6 +294,8 @@ it.effect(
       });
       expect(belowCeiling.launched[0]?.runtimeMode).toBe("approval-required");
       expect(belowCeiling.launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
+      // A client has no thread to prove a later takeover with.
+      expect(belowCeiling.launched[0]).not.toHaveProperty("launchedBy");
 
       const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", {
         title: "Fix",
@@ -326,6 +346,31 @@ it.effect(
         message: "Example Corp limits threads to Supervised.",
       });
     }),
+);
+
+it.effect("an agent's launch records the bound calling thread as the launcher", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const callerThreadId = ThreadId.make("thread:predecessor");
+    const { projectId, modelSelection, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "full-access",
+      launched,
+      callerThreadId,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    yield* toolkit
+      .handle("t3_thread_launch", { projectId, title: "Successor", modelSelection })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.launchedBy).toMatchObject({
+      threadId: callerThreadId,
+      commandId: launched[0]?.commandId,
+    });
+  }),
 );
 
 it.effect("a launch steps an inherited mode down to the provider's, and refuses one it lacks", () =>

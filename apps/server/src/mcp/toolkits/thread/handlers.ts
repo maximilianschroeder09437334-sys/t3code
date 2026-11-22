@@ -7,6 +7,7 @@ import {
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
@@ -24,6 +25,7 @@ import type * as ThreadManagement from "../../../orchestration-v2/ThreadManageme
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
+import * as ThreadTakeover from "../../../orchestration-v2/ThreadTakeover.ts";
 import { ThreadToolkit } from "./tools.ts";
 
 function queueEntry(
@@ -102,6 +104,48 @@ const required = <A>(value: A | undefined, name: string) =>
         }),
       )
     : Effect.succeed(value);
+const takeoverThread = Effect.fn("mcp.takeoverThread")(function* (
+  threads: ThreadManagement.ThreadManagementService["Service"],
+  threadId: ThreadId,
+) {
+  const shell = yield* threads.getThreadShell(threadId).pipe(Effect.mapError(unavailable));
+  if (shell === null)
+    return yield* new OrchestratorMcpFailure({
+      code: "thread_not_found",
+      message: `Thread ${threadId} was not found.`,
+    });
+  const { thread } = yield* threads
+    .getThreadRecords(threadId, [])
+    .pipe(Effect.mapError(unavailable));
+  return thread;
+});
+
+/** Provenance only: the bound caller is the successor and must have been launched by the predecessor. */
+const admitTakeover = Effect.fn("mcp.admitTakeover")(function* (predecessorThreadId: ThreadId) {
+  const scope = yield* McpInvocationContext.McpInvocationContext;
+  const bound = yield* McpInvocationContext.requireThreadScope(scope, "t3_thread_takeover");
+  const { threads } = yield* readCaller();
+  const successor = yield* takeoverThread(threads, bound.thread.threadId);
+  const predecessor = yield* takeoverThread(threads, predecessorThreadId);
+  const predecessorUpstream: Array<ThreadId> = [];
+  let upstream = predecessor.continues?.threadId;
+  while (upstream !== undefined && predecessorUpstream.length < 32) {
+    predecessorUpstream.push(upstream);
+    upstream = (yield* takeoverThread(threads, upstream).pipe(
+      Effect.catchTags({ OrchestratorMcpFailure: () => Effect.undefined }),
+    ))?.continues?.threadId;
+  }
+  const admission = ThreadTakeover.admitTakeover({
+    predecessor,
+    successor,
+    now: yield* DateTime.now,
+    predecessorUpstream,
+  });
+  if (!admission.ok)
+    return yield* new OrchestratorMcpFailure({ code: admission.code, message: admission.message });
+  return { transferId: admission.transferId, predecessor, successor };
+});
+
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
@@ -358,6 +402,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         }
       }),
     ),
+  ),
+  t3_thread_takeover: McpToolAccess.writesThreads(
+    (input) => [input.predecessorThreadId],
+    (input) =>
+      Effect.gen(function* () {
+        yield* admitTakeover(input.predecessorThreadId);
+        return yield* new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: "Takeover is not available in this build.",
+        });
+      }),
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {

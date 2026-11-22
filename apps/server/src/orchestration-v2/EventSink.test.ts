@@ -124,7 +124,9 @@ const receiptFailsLast = Layer.effect(
       upsert: (receipt) =>
         receipt.commandId === failingReceiptCommandId
           ? Effect.fail(
-              new CommandReceiptStore.CommandReceiptStoreWriteError({ commandId: receipt.commandId }),
+              new CommandReceiptStore.CommandReceiptStoreWriteError({
+                commandId: receipt.commandId,
+              }),
             )
           : store.upsert(receipt),
     } satisfies CommandReceiptStore.CommandReceiptStoreV2Shape;
@@ -221,49 +223,53 @@ const crossThreadFixture = Effect.gen(function* () {
   return { sink, threads, command };
 });
 
-it.effect("commits one command's events on three threads, its outbox row and receipt together", () =>
-  Effect.gen(function* () {
-    const { sink, threads, command } = yield* crossThreadFixture;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const outbox = yield* EffectOutbox.EffectOutboxV2;
-    const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
-    const commandId = CommandId.make("cross-thread-commit");
-    const result = yield* sink.commitCommand(command(commandId));
-    assert.isTrue(result.committed);
-    assert.deepEqual(
-      new Set(result.storedEvents.map((stored) => stored.event.threadId)),
-      new Set(threads.map((thread) => thread.id)),
-    );
-    for (const thread of threads)
-      assert.equal(
-        (yield* projections.getThread(thread.id)).title,
-        `${thread.id} after ${commandId}`,
+it.effect(
+  "commits one command's events on three threads, its outbox row and receipt together",
+  () =>
+    Effect.gen(function* () {
+      const { sink, threads, command } = yield* crossThreadFixture;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const commandId = CommandId.make("cross-thread-commit");
+      const result = yield* sink.commitCommand(command(commandId));
+      assert.isTrue(result.committed);
+      assert.deepEqual(
+        new Set(result.storedEvents.map((stored) => stored.event.threadId)),
+        new Set(threads.map((thread) => thread.id)),
       );
-    assert.isTrue(Option.isSome(yield* outbox.get(`effect:${commandId}`)));
-    assert.equal(Option.getOrThrow(yield* receipts.getByCommandId(commandId)).status, "accepted");
-  }).pipe(Effect.provide(crossThreadLayer)),
+      for (const thread of threads)
+        assert.equal(
+          (yield* projections.getThread(thread.id)).title,
+          `${thread.id} after ${commandId}`,
+        );
+      assert.isTrue(Option.isSome(yield* outbox.get(`effect:${commandId}`)));
+      assert.equal(Option.getOrThrow(yield* receipts.getByCommandId(commandId)).status, "accepted");
+    }).pipe(Effect.provide(crossThreadLayer)),
 );
 
-it.effect("rolls back a failed three-thread command without events, projections, outbox or receipt", () =>
-  Effect.gen(function* () {
-    const { sink, threads, command } = yield* crossThreadFixture;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const events = yield* EventStore.EventStoreV2;
-    const outbox = yield* EffectOutbox.EffectOutboxV2;
-    const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
-    const before = yield* Effect.forEach(threads, (thread) =>
-      events.latestSequence({ threadId: thread.id }),
-    );
-    const failure = yield* sink.commitCommand(command(failingReceiptCommandId)).pipe(Effect.flip);
-    assert.instanceOf(failure, EventSink.EventSinkWriteError);
-    assert.deepEqual(
-      yield* Effect.forEach(threads, (thread) => events.latestSequence({ threadId: thread.id })),
-      before,
-    );
-    for (const thread of threads)
-      assert.equal((yield* projections.getThread(thread.id)).title, thread.id);
-    assert.isTrue(Option.isNone(yield* outbox.get(`effect:${failingReceiptCommandId}`)));
-    assert.deepEqual(yield* outbox.listByCommandId(failingReceiptCommandId), []);
-    assert.isTrue(Option.isNone(yield* receipts.getByCommandId(failingReceiptCommandId)));
-  }).pipe(Effect.provide(crossThreadLayer)),
+it.effect(
+  "rolls back a failed three-thread command without events, projections, outbox or receipt",
+  () =>
+    Effect.gen(function* () {
+      const { sink, threads, command } = yield* crossThreadFixture;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const events = yield* EventStore.EventStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const before = yield* Effect.forEach(threads, (thread) =>
+        events.latestSequence({ threadId: thread.id }),
+      );
+      const failure = yield* sink.commitCommand(command(failingReceiptCommandId)).pipe(Effect.flip);
+      assert.instanceOf(failure, EventSink.EventSinkWriteError);
+      assert.deepEqual(
+        yield* Effect.forEach(threads, (thread) => events.latestSequence({ threadId: thread.id })),
+        before,
+      );
+      for (const thread of threads)
+        assert.equal((yield* projections.getThread(thread.id)).title, thread.id);
+      assert.isTrue(Option.isNone(yield* outbox.get(`effect:${failingReceiptCommandId}`)));
+      assert.deepEqual(yield* outbox.listByCommandId(failingReceiptCommandId), []);
+      assert.isTrue(Option.isNone(yield* receipts.getByCommandId(failingReceiptCommandId)));
+    }).pipe(Effect.provide(crossThreadLayer)),
 );

@@ -68,6 +68,12 @@ it("stamps authoritative provenance on commands that create threads or messages"
       threadId: ThreadId.make("thread:elsewhere"),
       title: "Somewhere else",
     },
+    // Only the server's MCP launch names the thread that launched it, the proof a takeover needs.
+    launchedBy: {
+      threadId: ThreadId.make("thread:forged-predecessor"),
+      commandId: CommandId.make("command:forged-launch"),
+      at: DateTime.makeUnsafe(0),
+    },
     // A client's message goes through intake; only the server folds one into the creation.
     initialMessage: {
       messageId: MessageId.make("message:thread-management:forged"),
@@ -86,6 +92,7 @@ it("stamps authoritative provenance on commands that create threads or messages"
   });
   expect(stamped).not.toHaveProperty("linkOrigin");
   expect(stamped).not.toHaveProperty("delegatedFrom");
+  expect(stamped).not.toHaveProperty("launchedBy");
   expect(stamped).not.toHaveProperty("initialMessage");
 });
 

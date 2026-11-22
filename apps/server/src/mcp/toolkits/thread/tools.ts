@@ -14,6 +14,7 @@ import {
   ProviderUserInputAnswers,
   IsoDateTime,
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadTakeoverResult,
   OrchestrationV2DispatchCommandResult,
   ThreadId,
   RunId,
@@ -193,6 +194,17 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
   ]),
 }).annotate(Tool.Destructive, true);
 
+const ThreadTakeoverTool = Tool.make("t3_thread_takeover", {
+  ...commandTool,
+  description:
+    "Successor only: move the app-owned subagents of the thread that launched this one here, so their results reach this thread. Call before settling it. Native, PR-watch and command work stay there.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    predecessorThreadId: ThreadId,
+  }),
+  success: OrchestratorMcpThreadTakeoverResult,
+}).annotate(Tool.Destructive, true);
+
 const ThreadNotesTool = Tool.make("t3_thread_notes", {
   ...commandTool,
   description:
@@ -282,6 +294,7 @@ export const ThreadToolkit = Toolkit.make(
   ThreadSearchTool,
   ThreadConfigureTool,
   ThreadTransferTool,
+  ThreadTakeoverTool,
   ThreadOrganizeTool,
   PendingRequestTool,
   QueueTool,

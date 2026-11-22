@@ -625,6 +625,43 @@ it.effect("leaves a task delegated from a linked environment out of the top-leve
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect(
+  "records the launching thread on an empty launch and keeps it through a reuse launch",
+  () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launchedBy = {
+        threadId: ThreadId.make("thread:predecessor"),
+        commandId: CommandId.make("command:successor"),
+        at: DateTime.makeUnsafe(0),
+      };
+      const launched = yield* launches.launch({
+        ...launchInput({ command: "command:successor", thread: "thread:successor" }),
+        createdBy: "agent",
+        creationSource: "mcp",
+        launchedBy,
+      });
+      assert.deepEqual(launched.projection.thread.launchedBy, launchedBy);
+      yield* launches.launch({
+        ...launchInput({
+          command: "command:successor-reuse",
+          thread: "thread:successor",
+          message: "Continue",
+        }),
+        reuseExistingThread: true,
+        createdBy: "agent",
+        creationSource: "mcp",
+        launchedBy: { ...launchedBy, threadId: ThreadId.make("thread:other") },
+      });
+      const reused = yield* threads.getThreadProjection(launched.threadId);
+      assert.lengthOf(reused.messages, 1);
+      assert.deepEqual(reused.thread.launchedBy, launchedBy);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 it.effect("runs a thread-bound automation on the provider the thread uses now", () => {
   const harness = makeHarness({ adapters: [adapter, claudeAdapter] });
   const layerScheduledTasks = ScheduledTasks.layer.pipe(
