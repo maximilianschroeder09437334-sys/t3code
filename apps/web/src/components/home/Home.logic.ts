@@ -6,8 +6,9 @@ import {
 } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import { threadWaitKey, type ResolvedThreadWait } from "@t3tools/client-runtime/state/thread-wait";
 import type { ScopedProjectRef } from "@t3tools/contracts";
-import { resolveSidebarThreadStatus } from "../Sidebar.logic";
+import { resolveSidebarThreadStatus, type SidebarThreadWait } from "../Sidebar.logic";
 import {
   countHomeDashboardRows,
   deriveHomeDashboardRows,
@@ -15,7 +16,10 @@ import {
 } from "@t3tools/client-runtime/state/homeDashboard";
 
 export type HomeSection = "needs" | "waiting" | "done" | "running";
-export type HomeRow = HomeDashboardRow;
+export type HomeRow = HomeDashboardRow & {
+  /** The resolved cross-thread wait; absent on servers without wait fields. */
+  readonly wait?: ResolvedThreadWait;
+};
 export interface HomeCounts {
   readonly needs: number;
   readonly waiting: number;
@@ -84,10 +88,28 @@ function isSameLocalDay(a: string, b: number, timeZone?: string): boolean {
   return day(Date.parse(a)) === day(b);
 }
 
-export function homeDurationMinutes(thread: EnvironmentThreadShell, now: string): number {
-  const status = resolveSidebarThreadStatus(thread);
-  if (thread.homeFirstNextStep?.startsWith("T3: WAIT on ")) {
-    const start = Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt);
+/** When a resolved Waiting started: the run's start while it still runs, else when it ended. */
+function homeWaitingSince(thread: EnvironmentThreadShell): string {
+  const runActive = thread.latestRun !== null && thread.latestRun.completedAt === null;
+  return runActive
+    ? (resolveThreadWorkingStartedAt({ latestRun: thread.latestRun, runtime: thread.runtime }) ??
+        thread.latestRun?.startedAt ??
+        thread.updatedAt)
+    : (thread.latestRun?.completedAt ?? thread.updatedAt);
+}
+
+export function homeDurationMinutes(
+  thread: EnvironmentThreadShell,
+  now: string,
+  wait?: SidebarThreadWait,
+): number {
+  const status = resolveSidebarThreadStatus(thread, wait);
+  if (wait?.waiting === true || thread.homeFirstNextStep?.startsWith("T3: WAIT on ")) {
+    const start = Date.parse(
+      wait?.waiting === true
+        ? homeWaitingSince(thread)
+        : (thread.latestRun?.completedAt ?? thread.updatedAt),
+    );
     const end = Date.parse(now);
     return Number.isFinite(start) && Number.isFinite(end)
       ? Math.max(0, Math.floor((end - start) / 60_000))
@@ -134,10 +156,14 @@ export function formatHomeTimeLabel(
   thread: EnvironmentThreadShell,
   now: string,
   timeZone?: string,
+  wait?: SidebarThreadWait,
 ): string {
   const nowMs = Date.parse(now);
-  const status = resolveSidebarThreadStatus(thread);
-  if (thread.homeFirstNextStep?.startsWith("T3: WAIT on ")) {
+  const status = resolveSidebarThreadStatus(thread, wait);
+  if (wait?.waiting === true && status === "waiting") {
+    return `waiting ${elapsedLabel(homeWaitingSince(thread), nowMs) ?? formatHomeDuration(0)}`;
+  }
+  if (wait === undefined && thread.homeFirstNextStep?.startsWith("T3: WAIT on ")) {
     const since = thread.latestRun?.completedAt ?? thread.updatedAt;
     return `waiting ${elapsedLabel(since, nowMs) ?? formatHomeDuration(0)}`;
   }
@@ -193,8 +219,31 @@ export function deriveHomeRows(input: {
   lastVisitedAt: string | null;
   /** Tasks delegated from a listed parent; the sidebar shows those under the parent. */
   delegatedUnderParent?: ReadonlySet<string>;
+  /** Resolved waits by `threadWaitKey`; they decide the waiting section on new servers. */
+  waits?: ReadonlyMap<string, ResolvedThreadWait>;
 }): ReadonlyArray<HomeRow> {
-  return deriveHomeDashboardRows(input);
+  const rows = deriveHomeDashboardRows(input);
+  const waits = input.waits;
+  if (waits === undefined || waits.size === 0) return rows;
+  return rows.map((row) => {
+    const wait = waits.get(threadWaitKey(row.thread.environmentId, row.thread.id));
+    return wait === undefined ? row : { ...row, wait, section: homeWaitSection(row, wait) };
+  });
+}
+
+/** A resolved wait owns the waiting section: in while a target runs, out once all ended. */
+function homeWaitSection(row: HomeDashboardRow, wait: ResolvedThreadWait): HomeSection {
+  if (row.section === "needs") return "needs";
+  if (wait.waiting) return "waiting";
+  if (row.section !== "waiting") return row.section;
+  const runtime = row.thread.runtime?.status;
+  return runtime === "preparing" ||
+    runtime === "queued" ||
+    runtime === "starting" ||
+    runtime === "running" ||
+    runtime === "waiting"
+    ? "running"
+    : "done";
 }
 
 export function countHomeRows(rows: ReadonlyArray<HomeRow>): HomeCounts {

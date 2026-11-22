@@ -928,7 +928,15 @@ type SidebarThreadStatusInput = Pick<
   | "blockedOnThreadWait"
 >;
 
-export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
+/** The cross-thread wait resolved from the server's wait fields; absent on older servers. */
+export type SidebarThreadWait = { readonly waiting: boolean };
+
+const ACTIVE_RUNTIME_STATUSES = ["queued", "starting", "running", "waiting"];
+
+export function resolveSidebarThreadStatus(
+  thread: SidebarThreadStatusInput,
+  wait?: SidebarThreadWait | undefined,
+): SidebarThreadStatus {
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return "approval";
   }
@@ -939,16 +947,25 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   if ((thread.pendingGuestMessageCount ?? 0) > 0) {
     return "request";
   }
+  // With a resolved wait, Waiting means some target still runs; nothing else implies it.
+  if (wait !== undefined) {
+    if (wait.waiting) return "waiting";
+    if (thread.runtime?.status === "preparing") return "preparing";
+    if (thread.runtime !== null && ACTIVE_RUNTIME_STATUSES.includes(thread.runtime.status)) {
+      return "working";
+    }
+    if (thread.runtime?.status === "failed") {
+      return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
+    }
+    return "ready";
+  }
   if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) {
     return "waiting";
   }
   if (thread.runtime?.status === "preparing") {
     return "preparing";
   }
-  if (
-    thread.runtime !== null &&
-    ["queued", "starting", "running", "waiting"].includes(thread.runtime.status)
-  ) {
+  if (thread.runtime !== null && ACTIVE_RUNTIME_STATUSES.includes(thread.runtime.status)) {
     return "working";
   }
   if (thread.runtime?.status === "idle") {
@@ -963,17 +980,21 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
 /** Sidebar row status: a failure the user has already opened settles to ready, like Done. */
 export function resolveSidebarRowStatus(
   thread: ThreadStatusInput & SidebarThreadStatusInput,
+  wait?: SidebarThreadWait | undefined,
 ): SidebarThreadStatus {
-  const status = resolveSidebarThreadStatus(thread);
+  const status = resolveSidebarThreadStatus(thread, wait);
   // A runtime failure without a failed run has nothing to date it, so it stays.
   if (status !== "failed" || thread.latestRun?.status !== "failed") return status;
   return hasUnseenRunFailure(thread) ? status : "ready";
 }
 
 /** What the window title says the open thread is doing, in the words its announcer uses. */
-export function resolveWindowTitleThreadStatus(thread: SidebarThreadStatusInput): string | null {
+export function resolveWindowTitleThreadStatus(
+  thread: SidebarThreadStatusInput,
+  wait?: SidebarThreadWait | undefined,
+): string | null {
   // A guest waiting doesn't hide that the agent is still working.
-  switch (resolveSidebarThreadStatus({ ...thread, pendingGuestMessageCount: 0 })) {
+  switch (resolveSidebarThreadStatus({ ...thread, pendingGuestMessageCount: 0 }, wait)) {
     case "approval":
       return THREAD_STATUS_TEXT.approval;
     case "input":
@@ -996,7 +1017,7 @@ export function resolveWindowTitleThreadStatus(thread: SidebarThreadStatusInput)
 export function resolveSidebarFolderDot(
   threads: ReadonlyArray<ThreadStatusInput & SidebarThreadStatusInput>,
 ): "attention" | "failed" | "unread" | "working" | null {
-  const statuses = new Set(threads.map(resolveSidebarRowStatus));
+  const statuses = new Set(threads.map((thread) => resolveSidebarRowStatus(thread)));
   if (
     statuses.has("input") ||
     statuses.has("approval") ||
@@ -1189,8 +1210,11 @@ export function resolveWorkingStartedAt(
 
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
+  wait?: SidebarThreadWait | undefined;
 }): ThreadStatusPill | null {
-  const { thread } = input;
+  const { thread, wait } = input;
+  // A resolved wait replaces the blocked-wait flag: Waiting only while a target still runs.
+  const blockedOnWait = wait === undefined ? thread.blockedOnThreadWait === true : wait.waiting;
 
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") {
     return {
@@ -1219,8 +1243,17 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
+  if (wait?.waiting === true) {
+    return {
+      label: "Waiting",
+      colorClass: "text-info-foreground",
+      dotClass: "bg-info",
+      pulse: false,
+    };
+  }
+
   if (
-    (thread.runtime?.status === "running" && thread.blockedOnThreadWait !== true) ||
+    (thread.runtime?.status === "running" && !blockedOnWait) ||
     thread.runtime?.status === "waiting"
   ) {
     return {
@@ -1245,8 +1278,13 @@ export function resolveThreadStatusPill(input: {
   }
 
   if (
-    (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) ||
-    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
+    (thread.runtime?.status === "running" && blockedOnWait) ||
+    backgroundWorkHoldsCompletion(
+      // Subagents are wait targets once the wait is resolved; ended ones must not hold Waiting.
+      wait === undefined
+        ? (thread.pendingBackgroundTasks ?? [])
+        : (thread.pendingBackgroundTasks ?? []).filter((task) => task.kind !== "subagent"),
+    )
   ) {
     return {
       label: "Waiting",

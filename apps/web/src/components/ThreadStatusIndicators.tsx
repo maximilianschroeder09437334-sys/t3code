@@ -58,6 +58,7 @@ import {
   type PullRequestGlyphIcon,
 } from "./pullRequest/pullRequestIcons";
 import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
+import { useThreadWait } from "../state/threadWaits";
 
 export interface PrStatusIndicator {
   label: string;
@@ -734,11 +735,13 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
     pr,
     linkedPullRequest?.sourceControlProvider ?? resolveDisplayedThreadPrProvider(displayedPrInput),
   );
+  const wait = useThreadWait(thread.environmentId, thread.id);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
       lastVisitedAt,
     },
+    wait,
   });
 
   const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
