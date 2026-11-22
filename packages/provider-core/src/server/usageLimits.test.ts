@@ -69,8 +69,38 @@ describe("applyUsageLimitsUpdate", () => {
     expect(next).not.toBe(published);
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, weekly],
+      windows: [{ ...session, usedPercent: 55 }, { ...weekly, observedAt: checkedAt }],
     });
+  });
+
+  it("keeps the time an omitted window was read across repeated sparse updates", () => {
+    const first = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt: "2026-09-03T12:10:00.000Z",
+      update: { windows: [{ ...session, usedPercent: 50 }] },
+    });
+    const second = applyUsageLimitsUpdate({
+      previous: first,
+      checkedAt: "2026-09-03T12:20:00.000Z",
+      update: { windows: [{ ...session, usedPercent: 60 }] },
+    });
+    expect(second?.checkedAt).toBe("2026-09-03T12:20:00.000Z");
+    // The weekly percentage is still the 12:00 reading, however often the session moves.
+    expect(second?.windows.find((window) => window.id === weekly.id)).toEqual({
+      ...weekly,
+      observedAt: checkedAt,
+    });
+    expect(second?.windows.find((window) => window.id === session.id)?.observedAt).toBeUndefined();
+    // Resending the weekly window makes it current again.
+    const resent = applyUsageLimitsUpdate({
+      previous: second,
+      checkedAt: "2026-09-03T12:30:00.000Z",
+      update: { windows: [{ ...weekly, usedPercent: 21 }] },
+    });
+    expect(resent?.windows.find((window) => window.id === weekly.id)?.observedAt).toBeUndefined();
+    expect(resent?.windows.find((window) => window.id === session.id)?.observedAt).toBe(
+      "2026-09-03T12:20:00.000Z",
+    );
   });
 
   it("leaves an unsupported account and an empty update alone", () => {
@@ -99,7 +129,7 @@ describe("applyUsageLimitsUpdate", () => {
 
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, weekly],
+      windows: [{ ...session, usedPercent: 55 }, { ...weekly, observedAt: checkedAt }],
       resetCredits,
       zeroSpendCap: true,
     });
