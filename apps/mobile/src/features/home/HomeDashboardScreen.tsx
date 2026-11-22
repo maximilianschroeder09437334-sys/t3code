@@ -48,12 +48,14 @@ import { ProjectFavicon } from "../../components/ProjectFavicon";
 
 const sectionColor: Record<HomeDashboardSection, string> = {
   needs: "text-warning-foreground",
+  waiting: "text-foreground-muted",
   done: "text-adaptive-emerald-600-400",
   running: "text-adaptive-sky-600-400",
 };
 
 const sectionTitle: Record<HomeDashboardSection, string> = {
   needs: "Needs you",
+  waiting: "Waiting",
   done: "Done since you looked",
   running: "Running",
 };
@@ -83,9 +85,11 @@ function ageLabel(thread: EnvironmentThreadShell, section: HomeDashboardSection,
           : `${Math.floor(days / 7)} ${Math.floor(days / 7) === 1 ? "week" : "weeks"}`;
   return section === "needs"
     ? `waiting ${age}`
-    : section === "running"
-      ? `running ${age}`
-      : `done ${age} ago`;
+    : section === "waiting"
+      ? `waiting ${age}`
+      : section === "running"
+        ? `running ${age}`
+        : `done ${age} ago`;
 }
 
 function HomeBackButton(props: { readonly onBack: () => void }) {
@@ -161,7 +165,7 @@ export function HomeDashboardScreen(props: {
 
   const summary = (
     <View className="flex-row flex-wrap gap-x-1">
-      {(["needs", "done", "running"] as const)
+      {(["needs", "waiting", "done", "running"] as const)
         .filter((key) => counts[key] > 0)
         .map((key, index) => (
           <Pressable key={key} onPress={() => setSection(section === key ? "all" : key)}>
@@ -256,7 +260,7 @@ export function HomeDashboardScreen(props: {
             Nothing needs you right now.
           </Text>
         ) : null}
-        {(["needs", "done", "running"] as const).map((group) => {
+        {(["needs", "waiting", "done", "running"] as const).map((group) => {
           const groupRows = visible.filter((row) => row.section === group);
           if (groupRows.length === 0) return null;
           return (
@@ -299,6 +303,14 @@ export function HomeDashboardScreen(props: {
                         key={row.thread.id}
                         thread={row.thread}
                         section={group}
+                        waitingOn={row.waitingOn}
+                        waitingThread={row.waitingThread}
+                        waitingCount={row.waitingCount}
+                        onOpenWaitingThread={
+                          row.waitingThread
+                            ? () => props.onOpenThread(row.waitingThread!)
+                            : undefined
+                        }
                         now={now}
                         snoozePresets={snoozePresetsByEnvironmentId.get(row.thread.environmentId)}
                         onOpen={() => props.onOpenThread(row.thread)}
@@ -325,6 +337,14 @@ export function HomeDashboardScreen(props: {
 function HomeDashboardRow(props: {
   readonly thread: EnvironmentThreadShell;
   readonly section: HomeDashboardSection;
+  readonly waitingOn?: {
+    readonly title: string;
+    readonly environmentId: string;
+    readonly threadId: string;
+  };
+  readonly waitingThread?: EnvironmentThreadShell;
+  readonly waitingCount?: number;
+  readonly onOpenWaitingThread?: () => void;
   readonly now: string;
   readonly snoozePresets: Parameters<typeof resolveThreadListV2SnoozePresets>[0]["presets"];
   readonly onOpen: () => void;
@@ -334,6 +354,11 @@ function HomeDashboardRow(props: {
   const { thread } = props;
   const draft = useComposerDraft(scopedThreadKey(thread.environmentId, thread.id));
   const hasUnsentDraft = composerDraftHasUserContent(draft);
+  const hasSeenDone =
+    props.section === "done" &&
+    thread.lastVisitedAt != null &&
+    Date.parse(thread.lastVisitedAt) >=
+      Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt);
   const [customSnoozeOpen, setCustomSnoozeOpen] = useState(false);
   const { width: windowWidth } = useWindowDimensions();
   const screenColor =
@@ -425,12 +450,50 @@ function HomeDashboardRow(props: {
                 {title}
               </Text>
               {hasUnsentDraft ? <ThreadDraftTag /> : null}
-              <Text className={`${sectionColor[props.section]} text-xs`}>
+              {props.waitingCount ? (
+                <Text className="rounded-full border border-warning/40 px-2 py-0.5 text-2xs text-warning-foreground">
+                  {props.waitingCount}{" "}
+                  {props.waitingCount === 1 ? "thread waiting on this" : "threads waiting on this"}
+                </Text>
+              ) : null}
+              <Text
+                className={`${hasSeenDone ? "text-foreground-muted" : sectionColor[props.section]} text-xs`}
+              >
                 {ageLabel(thread, props.section, props.now)}
               </Text>
             </View>
             {/* Only rows that need you read the thread's requests; that subscribes to the thread. */}
             {props.section === "needs" ? <HomeDashboardRequest thread={thread} /> : null}
+            {props.section === "needs" && thread.homeAskText ? (
+              <Text numberOfLines={2} className="text-sm font-medium text-foreground">
+                {thread.homeAskText}
+              </Text>
+            ) : null}
+            {props.section === "waiting" && props.waitingOn ? (
+              <View className="flex-row items-center gap-1">
+                <Text className="text-xs text-foreground-muted">Waiting on</Text>
+                <Pressable
+                  accessibilityRole="link"
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    if (props.waitingThread && props.onOpenWaitingThread) {
+                      close();
+                      props.onOpenWaitingThread();
+                    }
+                  }}
+                >
+                  <Text className="text-xs text-primary-text underline">
+                    {props.waitingOn.title}
+                  </Text>
+                </Pressable>
+                {props.waitingThread?.homeFirstNextStep?.startsWith("Maxi:") ? (
+                  <Text className="text-xs text-warning-foreground">→ needs you</Text>
+                ) : null}
+                {thread.homeAutoWaitActive ? (
+                  <Text className="text-2xs text-foreground-muted">auto</Text>
+                ) : null}
+              </View>
+            ) : null}
           </Pressable>
         )}
       </ThreadSwipeable>

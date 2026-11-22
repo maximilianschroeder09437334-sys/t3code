@@ -79,6 +79,14 @@
       "types": "./src/agentAwareness.ts",
       "import": "./src/agentAwareness.ts"
     },
+    "./homeNextStep": {
+      "types": "./src/homeNextStep.ts",
+      "import": "./src/homeNextStep.ts"
+    },
+    "./homeNotificationRules": {
+      "types": "./src/homeNotificationRules.ts",
+      "import": "./src/homeNotificationRules.ts"
+    },
     "./git": {
       "types": "./src/git.ts",
       "import": "./src/git.ts"

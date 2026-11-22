@@ -716,23 +716,25 @@ export function HomeScreen(props: HomeScreenProps) {
         />
         <View className="flex-1">
           <Text className="text-sm font-semibold text-foreground">Home</Text>
-          {homeCountItems.length > 0 ? (
+          {homeCountItems.some((item) => item.section !== "waiting") ? (
             <Text className="text-xs">
-              {homeCountItems.map((item, index) => (
-                <Text
-                  key={item.section}
-                  className={
-                    item.section === "needs"
-                      ? "text-warning-foreground"
-                      : item.section === "running"
-                        ? "text-adaptive-sky-600-400"
-                        : "text-adaptive-emerald-600-400"
-                  }
-                >
-                  {index ? " · " : ""}
-                  {item.text}
-                </Text>
-              ))}
+              {homeCountItems
+                .filter((item) => item.section !== "waiting")
+                .map((item, index) => (
+                  <Text
+                    key={item.section}
+                    className={
+                      item.section === "needs"
+                        ? "text-warning-foreground"
+                        : item.section === "running"
+                          ? "text-adaptive-sky-600-400"
+                          : "text-adaptive-emerald-600-400"
+                    }
+                  >
+                    {index ? " · " : ""}
+                    {item.text}
+                  </Text>
+                ))}
             </Text>
           ) : null}
         </View>

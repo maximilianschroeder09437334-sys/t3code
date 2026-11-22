@@ -49,3 +49,19 @@ export const layer = Layer.succeed(WebPushTransport, {
     );
   }),
 });
+
+export function createEncryptedPushRequest(input: {
+  readonly subscription: WebPushSubscription;
+  readonly keys: VapidKeys;
+  readonly payload: string;
+  readonly topic: string;
+}) {
+  return WebPush.generateRequestDetails(input.subscription, input.payload, {
+    vapidDetails: { subject: "https://t3.codes", ...input.keys },
+    contentEncoding: "aes128gcm",
+    TTL: 120,
+    urgency: "normal",
+    topic: input.topic,
+    timeout: 10_000,
+  });
+}

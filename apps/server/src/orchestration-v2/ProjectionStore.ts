@@ -87,6 +87,12 @@ import {
   deriveBlockedOnThreadWait,
   derivePendingBackgroundWork,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  firstHomeNextStepText,
+  isHomeReportCurrent,
+  parseHomeActionableMaxiStep,
+  parseHomeNextStep,
+} from "@t3tools/shared/homeNextStep";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -1749,10 +1755,73 @@ export function threadShellFromProjection(
       projection.turnItems,
       providerSession?.lastError ?? null,
     ) ?? latestUnheldRun(runs);
+  const lastCompletedRun =
+    runs
+      .filter((run) => run.status === "completed")
+      .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null;
   const activeRun =
     runs
       .filter(isInterruptibleRunForShell)
       .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null;
+  const latestUserAuthoredAt = projection.messages
+    .filter((message) => message.role === "user" && message.createdBy === "user")
+    .toSorted(
+      (left, right) =>
+        DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
+    )[0]?.updatedAt;
+  const lastCompletedReport = lastCompletedRun
+    ? projection.turnItems
+        .filter((item) => item.runId === lastCompletedRun.id)
+        .toSorted((left, right) => right.ordinal - left.ordinal)
+        .find(
+          (item) =>
+            item.type === "assistant_message" &&
+            !item.streaming &&
+            (item.phase === undefined || item.phase === "final_answer"),
+        )
+    : undefined;
+  const homeReportIsCurrent =
+    lastCompletedRun !== null &&
+    isHomeReportCurrent({
+      reportRunId: lastCompletedRun.id,
+      latestRunId: latestRun?.id ?? null,
+      reportCompletedAt:
+        lastCompletedRun.completedAt === null
+          ? null
+          : DateTime.toEpochMillis(lastCompletedRun.completedAt),
+      latestUserMessageAt:
+        latestUserAuthoredAt === undefined ? null : DateTime.toEpochMillis(latestUserAuthoredAt),
+    });
+  const parsedHomeNextStep =
+    homeReportIsCurrent && lastCompletedRun
+      ? (projection.turnItems
+          .filter((item) => item.runId === lastCompletedRun.id)
+          .toSorted((left, right) => right.ordinal - left.ordinal)
+          .flatMap((item) =>
+            item.type === "assistant_message" &&
+            !item.streaming &&
+            (item.phase === undefined || item.phase === "final_answer")
+              ? [parseHomeNextStep(item.text)]
+              : [],
+          )
+          .find((step) => step !== null) ?? null)
+      : null;
+  const homeReportAskText =
+    homeReportIsCurrent && lastCompletedReport?.type === "assistant_message"
+      ? parseHomeActionableMaxiStep(lastCompletedReport.text)
+      : null;
+  const homeDoneText =
+    homeReportIsCurrent && lastCompletedReport?.type === "assistant_message"
+      ? (lastCompletedReport.text
+          .split(/\r?\n/u)
+          .map((line) => line.trim())
+          .find(Boolean)
+          ?.slice(0, 280) ?? null)
+      : null;
+  const rawHomeFirstStep =
+    homeReportIsCurrent && lastCompletedReport?.type === "assistant_message"
+      ? firstHomeNextStepText(lastCompletedReport.text)
+      : null;
   const activityRun =
     runs.filter(isActivityRunForShell).toSorted((left, right) => right.ordinal - left.ordinal)[0] ??
     null;
@@ -1796,6 +1865,31 @@ export function threadShellFromProjection(
       pendingRuntimeRequest = waitingCard;
     }
   }
+  const pendingRequestItem = pendingRuntimeRequest
+    ? projection.turnItems
+        .filter((item) => "requestId" in item && item.requestId === pendingRuntimeRequest.id)
+        .toSorted((left, right) => right.ordinal - left.ordinal)[0]
+    : undefined;
+  const pendingRequestAskText =
+    pendingRequestItem?.type === "user_input_request"
+      ? pendingRequestItem.questions[0]?.question
+      : pendingRequestItem?.type === "approval_request"
+        ? (pendingRequestItem.prompt ?? pendingRequestItem.reason)
+        : null;
+  const guestRequestAskText = projection.thread.guestShare?.messages
+    .filter((message) => message.status === "pending")
+    .toSorted((left, right) => right.submittedAt.localeCompare(left.submittedAt))[0]?.text;
+  const homeAskText =
+    homeReportAskText ??
+    pendingRequestAskText?.trim().slice(0, 280) ??
+    guestRequestAskText?.trim().slice(0, 280) ??
+    (pendingRuntimeRequest?.kind === "user_input"
+      ? "Answer a question"
+      : pendingRuntimeRequest !== null && pendingRuntimeRequest.kind !== "auth_refresh"
+        ? "Approval needed"
+        : pendingGuestMessageCount(projection.thread.guestShare) > 0
+          ? "Guest request"
+          : null);
   let notificationRun = latestRun;
   for (
     let depth = 0;
@@ -1815,6 +1909,26 @@ export function threadShellFromProjection(
     runs,
     pullRequests: projection.thread.pullRequests,
   });
+  const homeNeedsYou =
+    homeAskText !== null ||
+    (pendingRuntimeRequest !== null && pendingRuntimeRequest.kind !== "auth_refresh") ||
+    pendingGuestMessageCount(projection.thread.guestShare) > 0;
+  const blockedOnThreadWait = deriveBlockedOnThreadWait({
+    activeRun,
+    turnItems: projection.turnItems,
+  });
+  const homeWaitingOnChild = pendingBackgroundTasks.some(
+    (task) => task.kind === "subagent" && task.awaited === true && task.childThreadId != null,
+  );
+  const homeDashboardSection = homeNeedsYou
+    ? "needs"
+    : (parsedHomeNextStep?.kind === "wait" && activityRun === null) ||
+        blockedOnThreadWait ||
+        homeWaitingOnChild
+      ? "waiting"
+      : activityRun !== null
+        ? "running"
+        : "done";
   return {
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
@@ -1865,8 +1979,39 @@ export function threadShellFromProjection(
       ),
     latestRunBackgroundWake:
       latestRun != null && isBackgroundWakeRunForShell(latestRun, projection),
+    homeFirstNextStep:
+      parsedHomeNextStep?.kind === "needs"
+        ? `Maxi: ${parsedHomeNextStep.text}`
+        : parsedHomeNextStep?.kind === "wait"
+          ? `T3: WAIT on [${parsedHomeNextStep.title}](https://app.t3.codes/threads/${encodeURIComponent(parsedHomeNextStep.environmentId)}/${encodeURIComponent(parsedHomeNextStep.threadId)})`
+          : parsedHomeNextStep?.kind === "none"
+            ? "Maxi: nothing needed right now."
+            : rawHomeFirstStep != null &&
+                /^T3:\s+\[[^\]]+\]\(https:\/\/app\.t3\.codes\/threads\/[^)]+\):/iu.test(
+                  rawHomeFirstStep,
+                )
+              ? rawHomeFirstStep
+              : null,
+    homeNeedsYou,
+    homeAskText,
+    homeDoneText,
+    homeHandedOff:
+      projection.thread.handoffTransfer?.runId === latestRun?.id &&
+      (projection.thread.handoffTransfer?.state === "released" ||
+        projection.thread.handoffTransfer?.state === "started"),
+    homeDashboardSection,
+    homeAutoWaitActive:
+      parsedHomeNextStep?.kind === "wait" && !blockedOnThreadWait && activityRun === null,
+    homeWaitingOn:
+      parsedHomeNextStep?.kind === "wait"
+        ? {
+            title: parsedHomeNextStep.title,
+            environmentId: EnvironmentId.make(parsedHomeNextStep.environmentId),
+            threadId: ThreadId.make(parsedHomeNextStep.threadId),
+          }
+        : null,
     activeRunId: activeRun?.id ?? null,
-    blockedOnThreadWait: deriveBlockedOnThreadWait({ activeRun, turnItems: projection.turnItems }),
+    blockedOnThreadWait,
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt:
       activityRun === null ? null : orchestrationV2RunWorkStartedAt(activityRun),
@@ -8840,6 +8985,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         sequenceRows,
         providerThreadRows,
         pendingTurnItemRows,
+        homeAutoWaitRows,
       ] = yield* Effect.all([
         readForThreadIds(selectShellRunRows, forkSourceIds),
         readForThreadIds(selectShellRunItemCounts, forkSourceIds),
@@ -8861,6 +9007,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             ),
           ),
         ),
+        sql<{
+          readonly waiting_thread_id: string;
+          readonly target_thread_id: string;
+          readonly status: string;
+        }>`SELECT waiting_thread_id, target_thread_id, status FROM home_auto_waits WHERE status IN ('active', 'cycle')`,
       ]);
       return {
         targetThreadIds,
@@ -8871,6 +9022,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         sequenceRows,
         providerThreadRows,
         pendingTurnItemRows,
+        homeAutoWaitRows,
       };
     });
 
@@ -8883,6 +9035,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sequenceRows,
       providerThreadRows,
       pendingTurnItemRows,
+      homeAutoWaitRows,
     }: Effect.Success<ReturnType<typeof readShellSnapshotRows>>) {
       const { runsByThreadId, itemCountsByThreadId } = runMapsByThreadId({
         runRows,
@@ -8914,12 +9067,51 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }),
           }),
         );
+      const waitersByTarget = new Map<string, number>();
+      const autoWaiterIds = new Set<string>();
+      const cyclesByWaiter = new Set<string>();
+      for (const wait of homeAutoWaitRows) {
+        if (wait.status === "active") {
+          autoWaiterIds.add(wait.waiting_thread_id);
+          waitersByTarget.set(
+            wait.target_thread_id,
+            (waitersByTarget.get(wait.target_thread_id) ?? 0) + 1,
+          );
+        } else if (wait.status === "cycle") cyclesByWaiter.add(wait.waiting_thread_id);
+      }
+      for (const thread of shells) {
+        if (
+          thread.homeDashboardSection !== "waiting" ||
+          thread.homeWaitingOn == null ||
+          autoWaiterIds.has(thread.id) ||
+          cyclesByWaiter.has(thread.id)
+        )
+          continue;
+        waitersByTarget.set(
+          thread.homeWaitingOn.threadId,
+          (waitersByTarget.get(thread.homeWaitingOn.threadId) ?? 0) + 1,
+        );
+      }
+      const enrichedShells = shells.map((thread) => {
+        const isCycle = cyclesByWaiter.has(thread.id);
+        return {
+          ...thread,
+          homeNeedsYou: thread.homeNeedsYou === true || isCycle,
+          homeAskText: isCycle
+            ? "A wait cycle was detected. Please resolve it."
+            : thread.homeAskText,
+          homeDashboardSection: isCycle ? ("needs" as const) : thread.homeDashboardSection,
+          homeAutoWaitActive: autoWaiterIds.has(thread.id),
+          homeAutoWaitCycle: isCycle,
+          homeWaitingCount: waitersByTarget.get(thread.id) ?? 0,
+        };
+      });
 
       return {
         schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
         snapshotSequence: sequenceRows[0]?.snapshot_sequence ?? 0,
-        threads: shells.filter((thread) => thread.archivedAt === null),
-        archivedThreads: shells.filter((thread) => thread.archivedAt !== null),
+        threads: enrichedShells.filter((thread) => thread.archivedAt === null),
+        archivedThreads: enrichedShells.filter((thread) => thread.archivedAt !== null),
       };
     }, Effect.mapError(shellSnapshotReadError));
 
@@ -9389,10 +9581,35 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             if (state === undefined) {
               return null;
             }
-            return shellFromState({
+            const shell = shellFromState({
               state,
               visibleItemCount: visibleItemCountForShell({ threadId, statesByThreadId }),
             });
+            const autoWaitRows = yield* sql<{
+              readonly waiting_thread_id: string;
+              readonly target_thread_id: string;
+              readonly status: string;
+            }>`SELECT waiting_thread_id, target_thread_id, status FROM home_auto_waits WHERE status IN ('active', 'cycle') AND (waiting_thread_id = ${threadId} OR target_thread_id = ${threadId})`;
+            const waitingCount = autoWaitRows.filter(
+              (row) => row.status === "active" && row.target_thread_id === threadId,
+            ).length;
+            const isCycle = autoWaitRows.some(
+              (row) => row.status === "cycle" && row.waiting_thread_id === threadId,
+            );
+            const autoWaitActive = autoWaitRows.some(
+              (row) => row.status === "active" && row.waiting_thread_id === threadId,
+            );
+            return {
+              ...shell,
+              homeNeedsYou: shell.homeNeedsYou === true || isCycle,
+              homeAskText: isCycle
+                ? "A wait cycle was detected. Please resolve it."
+                : shell.homeAskText,
+              homeDashboardSection: isCycle ? "needs" : shell.homeDashboardSection,
+              homeAutoWaitActive: autoWaitActive,
+              homeAutoWaitCycle: isCycle,
+              homeWaitingCount: waitingCount,
+            };
           }),
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));

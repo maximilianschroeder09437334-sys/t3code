@@ -46,14 +46,14 @@ function harness() {
 }
 
 describe("createThreadNotificationGate", () => {
-  it("skips a completion seen while snoozed, but still notifies attention", () => {
+  it("skips both completion and attention seen while snoozed", () => {
     const { notify, observe } = harness();
     observe(working);
     observe(completed(1), snoozed);
     observe({ ...completed(1) });
     expect(notify).not.toHaveBeenCalled();
     observe({ ...working, attention: "run-2:approval" }, snoozed);
-    expect(notify.mock.calls).toEqual([["thread", "input"]]);
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it("notifies a completion immediately and only once", () => {

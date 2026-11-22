@@ -14,10 +14,11 @@ import {
   type HomeDashboardRow,
 } from "@t3tools/client-runtime/state/homeDashboard";
 
-export type HomeSection = "needs" | "done" | "running";
+export type HomeSection = "needs" | "waiting" | "done" | "running";
 export type HomeRow = HomeDashboardRow;
 export interface HomeCounts {
   readonly needs: number;
+  readonly waiting: number;
   readonly done: number;
   readonly running: number;
 }
@@ -37,6 +38,9 @@ export function homeCountSegments(
 ): ReadonlyArray<{ readonly section: HomeSection; readonly text: string }> {
   return [
     ...(counts.needs > 0 ? [{ section: "needs" as const, text: `${counts.needs} need you` }] : []),
+    ...(counts.waiting > 0
+      ? [{ section: "waiting" as const, text: `${counts.waiting} waiting` }]
+      : []),
     ...(counts.done > 0
       ? [{ section: "done" as const, text: `${counts.done} ${labels.done ?? "done"}` }]
       : []),
@@ -82,6 +86,13 @@ function isSameLocalDay(a: string, b: number, timeZone?: string): boolean {
 
 export function homeDurationMinutes(thread: EnvironmentThreadShell, now: string): number {
   const status = resolveSidebarThreadStatus(thread);
+  if (thread.homeFirstNextStep?.startsWith("T3: WAIT on ")) {
+    const start = Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt);
+    const end = Date.parse(now);
+    return Number.isFinite(start) && Number.isFinite(end)
+      ? Math.max(0, Math.floor((end - start) / 60_000))
+      : 0;
+  }
   const timestamp =
     status === "approval" || status === "input" || status === "request"
       ? (thread.pendingUserInputAt ?? thread.latestRun?.completedAt ?? thread.updatedAt)
@@ -126,6 +137,10 @@ export function formatHomeTimeLabel(
 ): string {
   const nowMs = Date.parse(now);
   const status = resolveSidebarThreadStatus(thread);
+  if (thread.homeFirstNextStep?.startsWith("T3: WAIT on ")) {
+    const since = thread.latestRun?.completedAt ?? thread.updatedAt;
+    return `waiting ${elapsedLabel(since, nowMs) ?? formatHomeDuration(0)}`;
+  }
   if (status === "approval" || status === "input" || status === "request") {
     const since = thread.pendingUserInputAt ?? thread.latestRun?.completedAt ?? thread.updatedAt;
     const age = elapsedLabel(since, nowMs) ?? formatHomeDuration(0);
