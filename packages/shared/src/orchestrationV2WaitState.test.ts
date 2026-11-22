@@ -449,8 +449,7 @@ describe("deriveThreadWaitState roster classes (WP A1)", () => {
     );
     // An open activity run keeps a failed latest run from ending the wait.
     expect(
-      derive({ pendingBackgroundTasks, latestRunStatus: "failed", hasActivityRun: true })
-        .waitPhase,
+      derive({ pendingBackgroundTasks, latestRunStatus: "failed", hasActivityRun: true }).waitPhase,
     ).toBe("waiting");
   });
 });

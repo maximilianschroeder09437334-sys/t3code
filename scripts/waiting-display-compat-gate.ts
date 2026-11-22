@@ -1,22 +1,14 @@
-// Waiting display slice A (plan r2, WP A4): old client / new server and new client / old server.
-//
-//   node scripts/waiting-display-compat-gate.ts [baselineRef]
-//
-// 1. The new side writes its shells (apps/server/src/orchestration-v2/waitDisplayCompat.test.ts).
-// 2. A detached worktree of the baseline (default 188a8db5) in the OS temp dir installs offline
-//    from the pnpm store and runs scripts/waiting-display-compat/baseline.compat.test.ts.txt
-//    there: the baseline contracts decode the new fixtures and its resolver reads them, then it
-//    writes the baseline server's shells.
-// 3. The new side decodes and resolves those.
-// The worktree and fixtures are removed afterwards, pass or fail. Every child process is hidden.
-import { spawnSync } from "node:child_process";
-import * as NodeFs from "node:fs";
-import * as NodeOs from "node:os";
+// Waiting display compat gate: `node scripts/waiting-display-compat-gate.ts [baselineRef]`. Runs the
+// new/old client and server fixture checks against a temporary detached baseline worktree in the
+// OS temp dir; the worktree and fixtures are removed afterwards. Every child process is hidden.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 const BASELINE = process.argv[2] ?? "188a8db5ab473983e7ff9015050b02d13c798d4f";
 const repo = NodePath.resolve(import.meta.dirname, "..");
-const scratch = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-wait-compat-"));
+const scratch = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-wait-compat-"));
 const newFixtures = NodePath.join(scratch, "new");
 const baseFixtures = NodePath.join(scratch, "base");
 const baseline = NodePath.join(scratch, "baseline");
@@ -30,12 +22,13 @@ function run(
   env: Record<string, string> = {},
 ): void {
   console.log(`$ (${NodePath.relative(scratch, cwd) || cwd}) ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, {
+  const result = NodeChildProcess.spawnSync(command, args, {
     cwd,
     env: { ...process.env, ...env },
     stdio: "inherit",
     windowsHide: true,
-    // vp and pnpm are .cmd shims on Windows.
+    // The vp shim is a .cmd file on Windows.
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone Node tooling has no Effect runtime.
     shell: process.platform === "win32",
   });
   if (result.status !== 0) {
@@ -43,23 +36,28 @@ function run(
   }
 }
 
+// vp (and the pnpm it manages) need not be on PATH: use each checkout's own shim.
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone Node tooling has no Effect runtime.
+const vpShim = process.platform === "win32" ? "vp.cmd" : "vp";
+const vp = (root: string) => JSON.stringify(NodePath.join(root, "node_modules", ".bin", vpShim));
+
 let worktreeAdded = false;
 try {
-  run("vp", ["test", "run", testFile], NodePath.join(repo, "apps/server"), {
+  run(vp(repo), ["test", "run", testFile], NodePath.join(repo, "apps/server"), {
     T3_WAIT_COMPAT_WRITE: newFixtures,
   });
   run("git", ["worktree", "add", "--detach", baseline, BASELINE], repo);
   worktreeAdded = true;
-  run("pnpm", ["install", "--frozen-lockfile", "--offline", "--ignore-scripts"], baseline);
-  NodeFs.copyFileSync(
+  run(vp(repo), ["install", "--frozen-lockfile", "--offline", "--ignore-scripts"], baseline);
+  NodeFS.copyFileSync(
     NodePath.join(repo, "scripts/waiting-display-compat/baseline.compat.test.ts.txt"),
     NodePath.join(baseline, "apps/server", baselineTestFile),
   );
-  run("vp", ["test", "run", baselineTestFile], NodePath.join(baseline, "apps/server"), {
+  run(vp(baseline), ["test", "run", baselineTestFile], NodePath.join(baseline, "apps/server"), {
     T3_WAIT_COMPAT_READ: newFixtures,
     T3_WAIT_COMPAT_WRITE: baseFixtures,
   });
-  run("vp", ["test", "run", testFile], NodePath.join(repo, "apps/server"), {
+  run(vp(repo), ["test", "run", testFile], NodePath.join(repo, "apps/server"), {
     T3_WAIT_COMPAT_READ: baseFixtures,
   });
   console.log("waiting display compatibility gate: PASS");
@@ -76,5 +74,5 @@ try {
       process.exitCode = 1;
     }
   }
-  NodeFs.rmSync(scratch, { recursive: true, force: true });
+  NodeFS.rmSync(scratch, { recursive: true, force: true });
 }

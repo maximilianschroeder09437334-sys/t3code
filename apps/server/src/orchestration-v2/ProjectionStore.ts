@@ -1910,8 +1910,7 @@ export function threadShellFromProjection(
   // The sender walk also follows usage-limit resumes: their message has no sender of its own.
   let senderRun = latestRun;
   for (let depth = 0; depth < 8; depth++) {
-    const parentId =
-      senderRun?.hookContinuationOfRunId ?? senderRun?.usageLimitContinuationOfRunId;
+    const parentId = senderRun?.hookContinuationOfRunId ?? senderRun?.usageLimitContinuationOfRunId;
     if (parentId === undefined) break;
     const parent = runs.find((run) => run.id === parentId);
     if (parent === undefined || parent.id === senderRun?.id) break;

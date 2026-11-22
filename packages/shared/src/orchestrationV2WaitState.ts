@@ -316,8 +316,7 @@ export function deriveThreadWaitState(input: ThreadWaitStateInput): ThreadWaitSt
       source: "awaited_child",
       environmentId: null,
       threadId: null,
-      title:
-        shortTitle(task.description) ?? shortTitle(task.command) ?? rosterKindLabel(task.kind),
+      title: shortTitle(task.description) ?? shortTitle(task.command) ?? rosterKindLabel(task.kind),
       taskId: task.taskId,
       ...(itemId === undefined ? {} : { itemId }),
     });

@@ -41,11 +41,11 @@ describe("baseline client and server against the waiting display (WP A4)", () =>
     assert.isDefined(readDir, "T3_WAIT_COMPAT_READ names the new server's fixtures");
     const read = (name: string) =>
       JSON.parse(NodeFs.readFileSync(NodePath.join(readDir!, name), "utf8")) as unknown;
-    const snapshot = Schema.decodeUnknownSync(OrchestrationV2ShellSnapshot)(
+    const snapshot = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellSnapshot))(
       read("new-snapshot.json"),
     );
     const deltas = (read("new-deltas.json") as ReadonlyArray<unknown>).map((item) =>
-      Schema.decodeUnknownSync(OrchestrationV2ShellStreamItem)(item),
+      Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellStreamItem))(item),
     );
     assert.equal(deltas.length, snapshot.threads.length);
     const waits = resolveAll(snapshot.threads);
@@ -105,14 +105,14 @@ describe("baseline client and server against the waiting display (WP A4)", () =>
     NodeFs.writeFileSync(
       NodePath.join(writeDir!, "base-snapshot.json"),
       JSON.stringify(
-        Schema.encodeUnknownSync(OrchestrationV2ShellSnapshot)({ ...v2ShellSnapshot, threads }),
+        Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellSnapshot))({ ...v2ShellSnapshot, threads }),
       ),
     );
     NodeFs.writeFileSync(
       NodePath.join(writeDir!, "base-deltas.json"),
       JSON.stringify(
         threads.map((thread, index) =>
-          Schema.encodeUnknownSync(OrchestrationV2ShellStreamItem)({
+          Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellStreamItem))({
             kind: "thread.updated",
             sequence: index + 1,
             location: "active",

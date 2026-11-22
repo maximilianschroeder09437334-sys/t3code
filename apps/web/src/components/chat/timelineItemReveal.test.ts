@@ -82,6 +82,7 @@ describe("resolveTimelineItemReveal", () => {
         waiterThreadId: waiterId,
         itemId: TurnItemId.make("item-live"),
         source: "subagent",
+        kind: "subagent",
         state: "live",
       },
     );
@@ -89,7 +90,9 @@ describe("resolveTimelineItemReveal", () => {
     const validateSearch = ThreadRoute.options.validateSearch as (raw: Record<string, unknown>) => {
       item?: string;
     };
-    const search = validateSearch({ item: route?.item });
+    const search = validateSearch({
+      item: route !== null && "item" in route ? route.item : undefined,
+    });
     expect(search).toEqual({ item: "item-live" });
     expect(validateSearch({ item: 7 })).toEqual({});
     expect(

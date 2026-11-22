@@ -257,9 +257,8 @@ const makeHarness = Effect.fnUntraced(function* (prefix: string) {
     const single = yield* store.getThreadShell(id(name));
     const snapshot = yield* store.getShellSnapshot();
     const listed =
-      [...snapshot.threads, ...snapshot.archivedThreads].find(
-        (thread) => thread.id === id(name),
-      ) ?? null;
+      [...snapshot.threads, ...snapshot.archivedThreads].find((thread) => thread.id === id(name)) ??
+      null;
     return { memory, single, listed };
   });
   /** Asserts every builder gives `pick(shell)` equal to `expected`. */
@@ -414,7 +413,10 @@ it.effect("both shell builders wait on pending PR checks whatever the session do
     yield* h.startRun("owner", 1);
     yield* h.message("owner", 1);
     yield* h.endRun("owner", 1, "completed");
-    const link = (watch: Record<string, unknown> | undefined, state: "open" | "merged" = "open") => ({
+    const link = (
+      watch: Record<string, unknown> | undefined,
+      state: "open" | "merged" = "open",
+    ) => ({
       host: "github.com",
       repository: "owner/repository",
       number: 42,
@@ -455,7 +457,7 @@ it.effect("both shell builders wait on pending PR checks whatever the session do
         SET payload_json = json_set(payload_json, '$.pullRequests', json(${JSON.stringify(links)}))
         WHERE thread_id = ${h.id("owner")}`;
     const prTarget = {
-      source: "awaited_child",
+      source: "awaited_child" as const,
       environmentId: null,
       threadId: null,
       title: "PR #42 checks",

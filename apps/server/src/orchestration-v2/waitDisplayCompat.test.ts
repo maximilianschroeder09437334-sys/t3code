@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Reads and writes the compatibility gate's fixtures.
-import * as NodeFs from "node:fs";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { assert, describe, it } from "vite-plus/test";
@@ -22,11 +22,8 @@ import {
   threadWaitKey,
 } from "../../../../packages/client-runtime/src/state/threadWait.ts";
 
-// Waiting display slice A (plan r2, WP A4), new side. scripts/waiting-display-compat-gate.ts runs
-// this file twice around a temporary 188a8db5 worktree: once with T3_WAIT_COMPAT_WRITE to hand
-// the new server's shells to the baseline client (scripts/waiting-display-compat/
-// baseline.compat.test.ts), once with T3_WAIT_COMPAT_READ to read what the baseline wrote.
-// Without either variable only the self-contained round trip runs.
+// New side of scripts/waiting-display-compat-gate.ts: T3_WAIT_COMPAT_WRITE writes fixtures for the
+// baseline client, T3_WAIT_COMPAT_READ reads the baseline's. Without either, only the round trip runs.
 
 const environmentId = EnvironmentId.make("env-compat");
 const shell = (id: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
@@ -100,10 +97,10 @@ const newServerShells: ReadonlyArray<OrchestrationV2ThreadShell> = [
   }),
 ];
 
-const encodeSnapshot = Schema.encodeUnknownSync(OrchestrationV2ShellSnapshot);
-const decodeSnapshot = Schema.decodeUnknownSync(OrchestrationV2ShellSnapshot);
-const encodeItem = Schema.encodeUnknownSync(OrchestrationV2ShellStreamItem);
-const decodeItem = Schema.decodeUnknownSync(OrchestrationV2ShellStreamItem);
+const encodeSnapshot = Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellSnapshot));
+const decodeSnapshot = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellSnapshot));
+const encodeItem = Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellStreamItem));
+const decodeItem = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellStreamItem));
 
 const resolveAll = (threads: ReadonlyArray<OrchestrationV2ThreadShell>) =>
   resolveThreadWaits({
@@ -131,12 +128,12 @@ describe("waiting display wire compatibility (WP A4)", () => {
 
   const writeDir = process.env.T3_WAIT_COMPAT_WRITE;
   it.runIf(writeDir !== undefined)("writes the new server's snapshot and delta fixtures", () => {
-    NodeFs.mkdirSync(writeDir!, { recursive: true });
-    NodeFs.writeFileSync(
+    NodeFS.mkdirSync(writeDir!, { recursive: true });
+    NodeFS.writeFileSync(
       NodePath.join(writeDir!, "new-snapshot.json"),
       JSON.stringify(encodeSnapshot({ ...v2ShellSnapshot, threads: newServerShells })),
     );
-    NodeFs.writeFileSync(
+    NodeFS.writeFileSync(
       NodePath.join(writeDir!, "new-deltas.json"),
       JSON.stringify(
         newServerShells.map((thread, index) =>
@@ -151,7 +148,7 @@ describe("waiting display wire compatibility (WP A4)", () => {
     "decodes and resolves the baseline server's fixtures under the new client",
     () => {
       const read = (name: string) =>
-        JSON.parse(NodeFs.readFileSync(NodePath.join(readDir!, name), "utf8")) as unknown;
+        JSON.parse(NodeFS.readFileSync(NodePath.join(readDir!, name), "utf8")) as unknown;
       const snapshot = decodeSnapshot(read("base-snapshot.json"));
       const deltas = (read("base-deltas.json") as ReadonlyArray<unknown>).map((item) =>
         decodeItem(item),
