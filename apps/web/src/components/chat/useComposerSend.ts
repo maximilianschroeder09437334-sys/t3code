@@ -100,6 +100,7 @@ import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
   composerDraftContentChanged,
+  homeComposerSendOpenTarget,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -172,6 +173,8 @@ interface ComposerSendInput {
   readonly currentRouteThreadKeyRef: { readonly current: string | null };
   readonly draftId: DraftId | null;
   readonly draftThread: DraftSessionState | null;
+  /** Home's composer, which opens the thread a send starts. */
+  readonly homeComposerOnly: boolean;
   readonly activeThread: EnvironmentThreadShell | undefined;
   readonly activeThreadKey: string | null;
   readonly activeThreadBranch: string | null;
@@ -273,6 +276,7 @@ export function useComposerSend(input: ComposerSendInput) {
     currentRouteThreadKeyRef,
     draftId,
     draftThread,
+    homeComposerOnly,
     activeThread,
     activeThreadKey,
     activeThreadBranch,
@@ -1544,6 +1548,20 @@ export function useComposerSend(input: ComposerSendInput) {
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
       if (!sendQueuesBehindSetup) resetLocalDispatch();
+    }
+    const homeOpenTarget = homeComposerSendOpenTarget({
+      homeComposerOnly,
+      submissionIntent,
+      turnStartSucceeded,
+      sentDraftThreadRef,
+      stillOnScreen: currentRouteThreadKeyRef.current === routeThreadKey,
+    });
+    if (homeOpenTarget) {
+      // The thread route shows the sent draft until its shell arrives, as from the sidebar.
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(homeOpenTarget),
+      });
     }
   };
 

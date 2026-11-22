@@ -1,6 +1,7 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadContextRecord } from "@t3tools/contracts";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
+import type { ComposerSubmissionIntent } from "../../composer-logic";
 
 /** Compare immutable user content without copying image bytes or upload metadata. */
 export function composerDraftContentChanged(
@@ -101,4 +102,19 @@ export function approvalRedirectNotice(input: {
     return "Another approval arrived, so your message wasn't sent.";
   }
   return null;
+}
+
+/**
+ * The thread Home's composer opens once its send started one, since Home has no thread view of
+ * its own. A failed or background send, or one the user left Home during, stays where it is.
+ */
+export function homeComposerSendOpenTarget(input: {
+  readonly homeComposerOnly: boolean;
+  readonly submissionIntent: ComposerSubmissionIntent;
+  readonly turnStartSucceeded: boolean;
+  readonly sentDraftThreadRef: ScopedThreadRef | null;
+  readonly stillOnScreen: boolean;
+}): ScopedThreadRef | null {
+  if (!input.homeComposerOnly || !input.turnStartSucceeded || !input.stillOnScreen) return null;
+  return input.submissionIntent === "background" ? null : input.sentDraftThreadRef;
 }

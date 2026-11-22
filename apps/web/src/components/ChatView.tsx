@@ -2942,6 +2942,7 @@ export default function ChatView(props: ChatViewProps) {
     currentRouteThreadKeyRef,
     draftId,
     draftThread,
+    homeComposerOnly,
     activeThread,
     activeThreadKey,
     activeThreadBranch,

@@ -8,6 +8,7 @@ import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
   composerDraftContentChanged,
+  homeComposerSendOpenTarget,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -164,5 +165,37 @@ describe("approvalRedirectNotice", () => {
   it("stays quiet when the decline failed or the user left the thread", () => {
     expect(approvalRedirectNotice({ ...settled, declined: false })).toBeNull();
     expect(approvalRedirectNotice(settled)).toBeNull();
+  });
+});
+
+describe("homeComposerSendOpenTarget", () => {
+  const sent = scopeThreadRef(local, ThreadId.make("home-thread"));
+  const homeSend = {
+    homeComposerOnly: true,
+    submissionIntent: "foreground",
+    turnStartSucceeded: true,
+    sentDraftThreadRef: sent,
+    stillOnScreen: true,
+  } as const;
+
+  it("opens the thread a successful Home send started", () => {
+    expect(homeComposerSendOpenTarget(homeSend)).toEqual(sent);
+  });
+
+  it("stays on Home when the send failed, so the restored draft stays there", () => {
+    expect(homeComposerSendOpenTarget({ ...homeSend, turnStartSucceeded: false })).toBeNull();
+  });
+
+  it("stays put for a background send", () => {
+    expect(homeComposerSendOpenTarget({ ...homeSend, submissionIntent: "background" })).toBeNull();
+  });
+
+  it("does not pull the user back after they left Home mid-send", () => {
+    expect(homeComposerSendOpenTarget({ ...homeSend, stillOnScreen: false })).toBeNull();
+  });
+
+  it("leaves ordinary thread and draft composers to their routes", () => {
+    expect(homeComposerSendOpenTarget({ ...homeSend, homeComposerOnly: false })).toBeNull();
+    expect(homeComposerSendOpenTarget({ ...homeSend, sentDraftThreadRef: null })).toBeNull();
   });
 });
