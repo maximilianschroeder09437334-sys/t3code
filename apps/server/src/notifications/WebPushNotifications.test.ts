@@ -755,3 +755,153 @@ it("rejects arbitrary and credential-bearing push endpoints", () => {
   ])
     expect(Notifications.supportedPushEndpoint(endpoint)).toBe(false);
 });
+
+// Waiting display slice A (plan r2 WP A4): pushes and auto-waits read no wait display field.
+const completedShape = {
+  status: "completed",
+  activityRunStatus: null,
+  latestRunCompletedAt: DateTime.makeUnsafe(1_000),
+  homeDashboardSection: "done" as const,
+};
+const waitDisplayShapes: ReadonlyArray<
+  readonly [
+    string,
+    Record<string, unknown>,
+    { readonly waitingOn: ReadonlyArray<unknown>; readonly waitPhase: string },
+  ]
+> = [
+  [
+    "awaited command",
+    {
+      ...completedShape,
+      pendingBackgroundTasks: [
+        { taskId: "bwngue5o4", kind: "command", awaited: true, description: "vp test" },
+      ],
+    },
+    {
+      waitingOn: [
+        {
+          source: "awaited_child",
+          environmentId: null,
+          threadId: null,
+          title: "vp test",
+          taskId: "bwngue5o4",
+        },
+      ],
+      waitPhase: "waiting",
+    },
+  ],
+  [
+    "PR watch",
+    {
+      ...completedShape,
+      pendingBackgroundTasks: [
+        {
+          taskId: "pull-request-watch:github.com/owner/repo#42",
+          kind: "monitor",
+          awaited: true,
+          description: "Watching pull request #42",
+        },
+      ],
+    },
+    {
+      waitingOn: [
+        {
+          source: "awaited_child",
+          environmentId: null,
+          threadId: null,
+          title: "PR #42 checks",
+          taskId: "pull-request-watch:github.com/owner/repo#42",
+        },
+      ],
+      waitPhase: "waiting",
+    },
+  ],
+  // A lineage-only parent and a sender: the server's own phase is ended (clients add the edge).
+  ["lineage-only parent", { ...completedShape, pendingBackgroundTasks: [] }, { waitingOn: [], waitPhase: "ended" }],
+  [
+    "sender",
+    { ...completedShape, pendingBackgroundTasks: [], latestRunSenderThreadId: targetThreadId },
+    { waitingOn: [], waitPhase: "ended" },
+  ],
+];
+
+const strippedWaitDisplay = (shell: Record<string, unknown>) => {
+  const { waitingOn: _on, waitPhase: _phase, latestRunSenderThreadId: _sender, ...rest } = shell;
+  return rest;
+};
+
+for (const [name, shape, wait] of waitDisplayShapes) {
+it.effect(
+  `pushes the same for the ${name} shape with or without the wait display fields`,
+  () =>
+    Effect.gen(function* () {
+      const publish = (shell: Record<string, unknown>) =>
+        Effect.gen(function* () {
+          yield* Migration;
+          yield* HomeAutoWaitsMigration;
+          const test = fixture();
+          Object.assign(test.thread, shell);
+          return yield* Effect.gen(function* () {
+            const service = yield* Notifications.WebPushNotifications;
+            const sql = yield* SqlClient.SqlClient;
+            yield* service.prepare();
+            yield* service.subscribe(sessionId, subscription);
+            yield* service.publishThread(threadId);
+            yield* service.deliverDue();
+            return {
+              sent: [...test.sent],
+              state: yield* sql`SELECT identity, phase FROM web_push_thread_state`,
+              waits: yield* sql`SELECT status FROM home_auto_waits`,
+            };
+          }).pipe(Effect.provide(test.layer));
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
+      const withFields = yield* publish({ ...shape, ...wait });
+      const stripped = yield* publish(strippedWaitDisplay({ ...shape, ...wait }));
+      expect(withFields).toEqual(stripped);
+    }),
+);
+
+it.effect(
+  `fires an auto-wait on the ${name} target the same with or without the wait display fields`,
+  () =>
+    Effect.gen(function* () {
+      const fire = (targetShell: Record<string, unknown>) =>
+        Effect.gen(function* () {
+          yield* Migration;
+          yield* HomeAutoWaitsMigration;
+          const test = fixture();
+          test.thread.status = "completed";
+          test.thread.activityRunStatus = null;
+          test.thread.homeDashboardSection = "waiting";
+          test.thread.homeFirstNextStep =
+            "T3: WAIT on [Build thread](https://app.t3.codes/threads/push-environment/push-target)";
+          const target = {
+            ...test.thread,
+            id: targetThreadId,
+            title: "Build thread",
+            status: "running",
+            latestRunId: RunId.make("target-run"),
+            homeDashboardSection: "running",
+            homeFirstNextStep: null,
+            activityRunStatus: "running",
+          };
+          test.shells.set(targetThreadId, target);
+          return yield* Effect.gen(function* () {
+            const service = yield* Notifications.WebPushNotifications;
+            const sql = yield* SqlClient.SqlClient;
+            yield* service.publishThread(threadId);
+            test.shells.set(targetThreadId, { ...target, ...targetShell });
+            yield* service.publishThread(targetThreadId);
+            return {
+              messages: [...test.autoWaitMessages],
+              waits: yield* sql`SELECT status FROM home_auto_waits`,
+            };
+          }).pipe(Effect.provide(test.layer));
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
+      const withFields = yield* fire({ ...shape, ...wait });
+      const stripped = yield* fire(strippedWaitDisplay({ ...shape, ...wait }));
+      expect(withFields).toEqual(stripped);
+    }),
+);
+}
