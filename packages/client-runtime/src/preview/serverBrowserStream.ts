@@ -11,6 +11,7 @@ export const PREVIEW_STREAM_BASE_PATH = "/api/preview-stream";
 export interface PreviewStreamViewport {
   readonly width: number;
   readonly height: number;
+  readonly isActiveSizer?: boolean;
 }
 
 export type PreviewStreamMouseButton = "none" | "left" | "middle" | "right";
@@ -179,6 +180,12 @@ export interface PreviewStreamTarget {
   /** Viewer backing-store size in device px. The server never sends larger frames. */
   readonly maxWidth: number;
   readonly maxHeight: number;
+  /** Emulates a touch-first phone viewport while this viewer owns the page size. */
+  readonly mobile?: boolean;
+  /** The physical-pixel ratio for this viewer's CSS viewport. */
+  readonly deviceScaleFactor?: number;
+  /** Identifies the desktop app's own browser panel so its native size can be restored on input. */
+  readonly localDesktop?: boolean;
   /** Passive viewers reduce their own access, including automatic control grants. */
   readonly interactive?: boolean;
 }
@@ -217,6 +224,11 @@ export function createPreviewStreamClient(
     maxHeight: String(Math.max(1, Math.round(target.maxHeight))),
   });
   if (target.interactive === false) query.set("interactive", "false");
+  if (target.mobile) query.set("mobile", "true");
+  if (target.localDesktop) query.set("localDesktop", "true");
+  if (target.deviceScaleFactor !== undefined) {
+    query.set("deviceScaleFactor", String(Math.max(1, Math.min(4, target.deviceScaleFactor))));
+  }
   const url = withDeviceHubQuery(`${target.access.wsBase}/ws?${query.toString()}`, target.access);
   let stopped = false;
   let socket: WebSocket | null = null;
@@ -279,6 +291,7 @@ export function createPreviewStreamClient(
         phase,
         sequence,
         tabId,
+        isActiveSizer,
       } = message as Record<string, unknown>;
       if (
         type === "fileChooser" &&
@@ -322,7 +335,7 @@ export function createPreviewStreamClient(
         });
       } else if (type === "viewport" && typeof width === "number" && typeof height === "number") {
         failures = 0;
-        events.onViewport({ width, height });
+        events.onViewport({ width, height, isActiveSizer: isActiveSizer === true });
       } else if (
         type === "probe" &&
         typeof x === "number" &&

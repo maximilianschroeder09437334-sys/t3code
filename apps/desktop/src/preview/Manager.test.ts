@@ -685,6 +685,7 @@ describe("PreviewManager", () => {
                 detach: () => {},
                 setShown: () => {},
                 setCaptureDrawn: () => {},
+                humanInteraction: () => {},
                 loadFailed: () => {},
                 humanStartedDownload: () => true,
                 agentLedPage: () => false,

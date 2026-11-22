@@ -15,6 +15,14 @@ export interface MobileSurfaceItem {
   readonly reason?: string;
 }
 
+export function deferUntilModalDismiss(action: () => void): () => void {
+  return action;
+}
+
+export function runAfterModalDismiss(action: (() => void) | null): void {
+  action?.();
+}
+
 export function formatContextUsage(usedTokens: number, maxTokens: number | null): string {
   const format = (value: number) =>
     value >= 1_000_000
@@ -28,12 +36,18 @@ export function formatContextUsage(usedTokens: number, maxTokens: number | null)
 export function mobileThreadSurfaces(input: {
   readonly canOpenTerminal: boolean;
   readonly canOpenFiles: boolean;
+  readonly canOpenBrowser: boolean;
   readonly isGitRepo: boolean;
   readonly hasPullRequest: boolean;
   readonly hasSideChat: boolean;
 }): ReadonlyArray<MobileSurfaceItem> {
   return [
-    { id: "browser", label: "Browser", available: false, reason: "Not on mobile yet" },
+    {
+      id: "browser",
+      label: "Browser",
+      available: input.canOpenBrowser,
+      reason: "Unavailable for this thread",
+    },
     {
       id: "terminal",
       label: "Terminal",

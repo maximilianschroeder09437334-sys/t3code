@@ -1,8 +1,4 @@
 import { useAtomValue } from "@effect/atom-react";
-import {
-  deriveWorkflowGroups,
-  projectedSubagentsToRuntime,
-} from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ThreadTurnSubagents } from "@t3tools/client-runtime/state/thread-subagents";
 import {
   isOrchestrationV2WorkActive,
@@ -15,8 +11,7 @@ import { StackActions, useNavigation, type StaticScreenProps } from "@react-navi
 import * as DateTime from "effect/DateTime";
 import { Atom } from "effect/reactivity";
 import * as Haptics from "expo-haptics";
-import { useMemo } from "react";
-import { Pressable, ScrollView, View } from "react-native";
+import { Platform, Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SheetHeader } from "../../components/ui/SheetHeader";
@@ -26,7 +21,6 @@ import { useEnvironments } from "../../state/environments";
 import { SubagentRow } from "./SubagentRow";
 import { useVisibleSecondClock } from "./use-visible-second-clock";
 import { SubagentStopButton } from "./SubagentStopButton";
-import { ThreadWorkflowGroup } from "./ThreadWorkflowGroup";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { subagentThreadTarget } from "./threadAgentsPresentation";
 
@@ -54,17 +48,6 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const turn = useThreadTurnSubagents(target);
   const subagents = turn?.subagents ?? [];
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
-  const workflowGroups = useMemo(
-    () =>
-      new Map(
-        deriveWorkflowGroups(projectedSubagentsToRuntime(subagents)).map((group) => [
-          group.workflow.id,
-          group,
-        ]),
-      ),
-    [subagents],
-  );
-
   const openChildThread = (child: { environmentId: EnvironmentId; threadId: ThreadId }) => {
     void Haptics.selectionAsync();
     if (
@@ -90,44 +73,34 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
       className="flex-1"
       // UIKit must inset content beneath the floating translucent iOS header.
       contentInsetAdjustmentBehavior="automatic"
-      contentContainerClassName="px-5 pb-6"
-      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 8 }}
+      contentContainerClassName="gap-2 px-4 pb-6"
+      contentContainerStyle={{
+        paddingTop: Math.max(12, Platform.OS === "android" ? insets.top : 0),
+        paddingBottom: Math.max(insets.bottom, 16) + 8,
+      }}
     >
       {subagents.length === 0 ? (
         <Text className="pt-6 text-center text-sm text-foreground-muted">
           No agents in this turn.
         </Text>
       ) : (
-        subagents.map((subagent) => {
-          const group = workflowGroups.get(subagent.id);
-          return group === undefined ? (
-            <View key={subagent.id} className="border-b border-border">
-              <AgentRow
-                subagent={subagent}
-                environmentId={target.environmentId}
-                tickSeconds={hasLiveAgent}
-                onOpen={openChildThread}
-              />
-            </View>
-          ) : (
-            <ThreadWorkflowGroup
-              key={subagent.id}
-              environmentId={target.environmentId}
+        subagents.map((subagent) => (
+          <View key={subagent.id} className="rounded-2xl border border-border bg-card px-4">
+            <AgentRow
               subagent={subagent}
-              group={group}
-              onOpen={(threadId) =>
-                openChildThread({ environmentId: target.environmentId, threadId })
-              }
+              environmentId={target.environmentId}
+              tickSeconds={hasLiveAgent}
+              onOpen={openChildThread}
             />
-          );
-        })
+          </View>
+        ))
       )}
     </ScrollView>
   );
 
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
-      <SheetHeader title="Agents" onClose={() => navigation.goBack()} />
+      <SheetHeader title="Previous agents" onClose={() => navigation.goBack()} />
       <ScreenContent>{content}</ScreenContent>
     </View>
   );

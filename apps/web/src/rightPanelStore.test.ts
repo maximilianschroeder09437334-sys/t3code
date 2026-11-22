@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { type EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
@@ -112,6 +112,32 @@ describe("rightPanelStore", () => {
     expect(useClosedViewStore.getState().entries).toMatchObject([
       { kind: "panel-tab", surface: { id: "browser:new", resourceId: null } },
     ]);
+  });
+
+  it("persists only the active browser tab and closes it when the server list is empty", async () => {
+    useRightPanelStore.getState().openBrowser(refA, "server-tab");
+    const { storage, name } = useRightPanelStore.persist.getOptions();
+    const saved = await storage!.getItem(name!);
+    expect(saved).not.toBeNull();
+    const byThreadKey = (
+      saved as {
+        state: {
+          byThreadKey: Record<string, { activeSurfaceId: string | null; surfaces: unknown[] }>;
+        };
+      }
+    ).state.byThreadKey;
+    expect(byThreadKey[scopedThreadKey(refA)]).toMatchObject({
+      activeSurfaceId: "browser:server-tab",
+      surfaces: [],
+    });
+
+    useRightPanelStore.setState({ byThreadKey: {} });
+    await storage!.setItem(name!, saved!);
+    await useRightPanelStore.persist.rehydrate();
+    useRightPanelStore.getState().reconcileBrowserSurfaces(refA, []);
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).isOpen,
+    ).toBe(false);
   });
 
   it("keeps a dismissed device hidden after another file opens", () => {

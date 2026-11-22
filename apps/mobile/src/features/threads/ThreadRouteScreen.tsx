@@ -1074,6 +1074,18 @@ function ThreadRouteContent(
                   onOpenFilesInspector={handleOpenFilesInspector}
                   onOpenGitInspector={handleOpenGitInspector}
                   previousAgentCount={threadAgents?.settledCount ?? 0}
+                  canOpenBrowser={serverConfig?.environment.capabilities.serverBrowser === true}
+                  onOpenBrowserPreview={() =>
+                    navigation.navigate("ThreadBrowserPreview", {
+                      environmentId: selectedThread.environmentId,
+                      threadId: selectedThread.id,
+                    })
+                  }
+                  onStartNewSideChat={() =>
+                    void startSideChat(
+                      scopeThreadRef(selectedThread.environmentId, selectedThread.id),
+                    )
+                  }
                   onOpenLineage={() => {
                     if (selectedThread) {
                       navigation.navigate("ThreadAgents", {

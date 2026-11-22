@@ -78,6 +78,54 @@ describe("preview stream control", () => {
     client.stop();
   });
 
+  it("marks phone viewers for mobile viewport emulation", () => {
+    const client = createPreviewStreamClient(
+      { ...target, mobile: true },
+      {
+        onFrame: vi.fn(),
+        onViewport: vi.fn(),
+        onConnectedChange: vi.fn(),
+        onUnauthorized: vi.fn(),
+      },
+    );
+    expect(FakeSocket.current.url).toContain("mobile=true");
+    client.stop();
+  });
+
+  it("marks the desktop panel for native viewport restoration", () => {
+    const client = createPreviewStreamClient(
+      { ...target, localDesktop: true, deviceScaleFactor: 2 },
+      {
+        onFrame: vi.fn(),
+        onViewport: vi.fn(),
+        onConnectedChange: vi.fn(),
+        onUnauthorized: vi.fn(),
+      },
+    );
+    expect(FakeSocket.current.url).toContain("localDesktop=true");
+    expect(FakeSocket.current.url).toContain("deviceScaleFactor=2");
+    client.stop();
+  });
+
+  it("reports whether the viewer owns the current viewport", () => {
+    const onViewport = vi.fn();
+    const client = createPreviewStreamClient(target, {
+      onFrame: vi.fn(),
+      onViewport,
+      onConnectedChange: vi.fn(),
+      onUnauthorized: vi.fn(),
+    });
+    FakeSocket.current.message(
+      JSON.stringify({ type: "viewport", width: 1024, height: 768, isActiveSizer: true }),
+    );
+    expect(onViewport).toHaveBeenCalledExactlyOnceWith({
+      width: 1024,
+      height: 768,
+      isActiveSizer: true,
+    });
+    client.stop();
+  });
+
   it("keeps read-only frames flowing while refusing takeover and every mutation", () => {
     const { client, socket, onFrame } = connect();
     socket.control({ ...agent, canOperate: false });

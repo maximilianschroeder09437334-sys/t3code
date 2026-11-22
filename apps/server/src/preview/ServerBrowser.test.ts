@@ -507,6 +507,17 @@ const dependencies = Layer.mergeAll(
         (onAttach) => Effect.sync(() => desktopDetaches.off("attach", onAttach)),
       ),
     ),
+    interactions: Stream.callback<{ threadId: string; tabId: string }>((queue) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const onInteraction = (key: { threadId: string; tabId: string }) =>
+            Queue.offerUnsafe(queue, key);
+          desktopDetaches.on("interacted", onInteraction);
+          return onInteraction;
+        }),
+        (onInteraction) => Effect.sync(() => desktopDetaches.off("interacted", onInteraction)),
+      ),
+    ),
     isAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
     isShown: (key) => shownDesktopTabs.has(key.tabId),
     loadFailure: (key) => desktopLoadFailures.get(key.tabId),
@@ -560,20 +571,27 @@ const stallViewer = (viewer: ServerBrowser.ServerBrowserViewer) => {
 };
 const viewportSizes = (items: ReadonlyArray<ServerBrowser.ServerBrowserViewerOutput>) =>
   items.flatMap((item) => (item._tag === "viewport" ? [`${item.width}x${item.height}`] : []));
-const openDesktopViewer = Effect.gen(function* () {
-  const browser = yield* ServerBrowser.ServerBrowser;
-  const manager = yield* Manager.PreviewManager;
-  desktopRendersNext = true;
-  const { tabId } = yield* manager.open({ threadId: scope.thread.threadId, runtime: "server" });
-  const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
-  const context = desktopConnections[0]!.context;
-  const cdp = context.sessions[0]!;
-  const resize = (width: number, height: number) => {
-    Object.assign(context.cssViewport, { width, height });
-    return Effect.promise(() => cdp.emitAsync("Page.frameResized"));
-  };
-  return { tabId, viewer, context, cdp, resize };
-});
+const desktopViewer = (mobile = false, localDesktop = false) =>
+  Effect.gen(function* () {
+    const browser = yield* ServerBrowser.ServerBrowser;
+    const manager = yield* Manager.PreviewManager;
+    desktopRendersNext = true;
+    const { tabId } = yield* manager.open({ threadId: scope.thread.threadId, runtime: "server" });
+    const viewer = yield* browser.attachViewer({
+      ...viewerInput(tabId, true),
+      mobile,
+      localDesktop,
+      deviceScaleFactor: 2,
+    });
+    const context = desktopConnections[0]!.context;
+    const cdp = context.sessions[0]!;
+    const resize = (width: number, height: number) => {
+      Object.assign(context.cssViewport, { width, height });
+      return Effect.promise(() => cdp.emitAsync("Page.frameResized"));
+    };
+    return { tabId, viewer, context, cdp, resize };
+  });
+const openDesktopViewer = desktopViewer();
 
 beforeEach(() => {
   contexts.length = 0;
@@ -605,6 +623,104 @@ beforeEach(() => {
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
+
+it.effect(
+  "a phone viewport emulates touch on a desktop tab and restores it when the viewer disconnects",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let desktopSession: ReturnType<typeof makeSession> | undefined;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { viewer, context } = yield* desktopViewer(true);
+            desktopSession = context.sessions[0]!;
+            const viewerSession = context.sessions.at(-1)!;
+
+            yield* viewer.input({ type: "resize", width: 390, height: 844 });
+
+            expect(viewerSession.send).toHaveBeenCalledWith(
+              "Emulation.setDeviceMetricsOverride",
+              expect.objectContaining({
+                width: 390,
+                height: 844,
+                mobile: true,
+                deviceScaleFactor: 2,
+              }),
+            );
+            expect(viewerSession.send).toHaveBeenCalledWith("Emulation.setTouchEmulationEnabled", {
+              enabled: true,
+              maxTouchPoints: 1,
+            });
+            const viewports = (yield* Queue.takeAll(viewer.output)).filter(
+              (item) => item._tag === "viewport",
+            );
+            expect(viewports).toContainEqual(
+              expect.objectContaining({
+                width: 390,
+                height: 844,
+                isActiveSizer: true,
+              }),
+            );
+          }),
+        );
+        expect(desktopSession?.send).toHaveBeenCalledWith("Emulation.clearDeviceMetricsOverride");
+        expect(desktopSession?.send).toHaveBeenCalledWith("Emulation.setTouchEmulationEnabled", {
+          enabled: false,
+        });
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.effect("a local desktop interaction restores the desktop viewport after a remote resize", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { viewer, context, tabId } = yield* openDesktopViewer;
+      const desktopSession = context.sessions[0]!;
+      const restored = Promise.withResolvers<void>();
+      const send = desktopSession.send.getMockImplementation()!;
+      desktopSession.send.mockImplementation((method, input) => {
+        if (method === "Emulation.clearDeviceMetricsOverride") restored.resolve();
+        return send(method, input);
+      });
+
+      yield* viewer.input({ type: "resize", width: 768, height: 1024 });
+      yield* Effect.yieldNow;
+      expect(desktopDetaches.listenerCount("interacted")).toBeGreaterThan(0);
+      desktopDetaches.emit("interacted", { threadId: scope.thread.threadId, tabId });
+      yield* Effect.yieldNow;
+      yield* Effect.promise(() => restored.promise);
+
+      expect(desktopSession.send).toHaveBeenCalledWith("Emulation.clearDeviceMetricsOverride");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.effect("a local desktop panel interaction restores a remote viewport override", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { viewer, context, tabId } = yield* desktopViewer(false, true);
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const desktopSession = context.sessions[0]!;
+      const remote = yield* browser.attachViewer({
+        ...viewerInput(tabId, true),
+        mobile: true,
+        deviceScaleFactor: 2,
+      });
+      const restored = Promise.withResolvers<void>();
+      const send = desktopSession.send.getMockImplementation()!;
+      desktopSession.send.mockImplementation((method, input) => {
+        if (method === "Emulation.clearDeviceMetricsOverride") restored.resolve();
+        return send(method, input);
+      });
+
+      yield* remote.input({ type: "resize", width: 390, height: 844 });
+      yield* viewer.input({ type: "takeControl" });
+      yield* Effect.promise(() => restored.promise);
+
+      expect(desktopSession.send).toHaveBeenCalledWith("Emulation.clearDeviceMetricsOverride");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
 
 it.effect("tells the desktop once per thread when its agent turns start and end", () =>
   Effect.gen(function* () {
@@ -2299,8 +2415,8 @@ it.effect.each([
       const dispatched = session.send.mock.calls.flatMap(([method, input]) =>
         method.startsWith("Input.") ? [input] : [],
       );
-      expect(dispatched).toHaveLength(testCase.expected.length);
       expect(dispatched).toMatchObject(testCase.expected);
+      expect(dispatched).toHaveLength(testCase.expected.length);
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -3124,7 +3240,7 @@ it.effect("a stalled desktop viewer still gets its size, control and reconnect",
         chooser,
         ...notifications,
         expect.objectContaining({ _tag: "control", controller: "you" }),
-        { _tag: "viewport", width: 1000, height: 600 },
+        { _tag: "viewport", width: 1000, height: 600, isActiveSizer: false },
       ]);
       yield* acked;
       // A control change keeps only the newest size.
@@ -3134,7 +3250,7 @@ it.effect("a stalled desktop viewer still gets its size, control and reconnect",
       yield* viewer.input({ type: "releaseControl" });
       expect(yield* Queue.takeAll(viewer.output)).toEqual([
         expect.objectContaining({ _tag: "control", controller: "unclaimed" }),
-        { _tag: "viewport", width: 1200, height: 700 },
+        { _tag: "viewport", width: 1200, height: 700, isActiveSizer: false },
       ]);
       yield* acked;
       // Notifications that no longer fit go oldest first, never the size.
@@ -3143,7 +3259,12 @@ it.effect("a stalled desktop viewer still gets its size, control and reconnect",
       yield* resize(1000, 600);
       const compacted = yield* Queue.takeAll(viewer.output);
       expect(compacted.at(0)).toEqual({ _tag: "clipboard", text: "copy 1" });
-      expect(compacted.at(-1)).toEqual({ _tag: "viewport", width: 1000, height: 600 });
+      expect(compacted.at(-1)).toEqual({
+        _tag: "viewport",
+        width: 1000,
+        height: 600,
+        isActiveSizer: false,
+      });
       // The desktop takes the page back; a resize after it cannot bury the reconnect.
       acked = stallViewer(viewer);
       desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId });

@@ -59,6 +59,31 @@ it.layer(layer)("PreviewManager", (it) => {
     }),
   );
 
+  it.effect("publishes server tab opens and closes to every viewer's authoritative list", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const firstViewer = yield* manager.subscribeEvents;
+      const secondViewer = yield* manager.subscribeEvents;
+
+      const opened = yield* manager.open({ threadId, runtime: "server" });
+      expect((yield* manager.list({ threadId })).sessions.map((session) => session.tabId)).toEqual([
+        opened.tabId,
+      ]);
+      const openEvent = yield* PubSub.take(firstViewer);
+      const otherOpenEvent = yield* PubSub.take(secondViewer);
+      expect(openEvent).toMatchObject({ type: "opened", tabId: opened.tabId });
+      expect(otherOpenEvent).toEqual(openEvent);
+
+      yield* manager.close({ threadId, tabId: opened.tabId });
+      expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      const closedEvent = yield* PubSub.take(firstViewer);
+      const otherClosedEvent = yield* PubSub.take(secondViewer);
+      expect(closedEvent).toMatchObject({ type: "closed", tabId: opened.tabId });
+      expect(otherClosedEvent).toEqual(closedEvent);
+    }),
+  );
+
   it.effect("keeps the tab's profile across status reports", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();

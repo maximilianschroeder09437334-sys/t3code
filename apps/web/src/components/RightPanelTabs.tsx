@@ -1350,6 +1350,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
         )}
         data-right-panel-tabbar
+        data-web-touch-header
       >
         <ScrollArea
           radius="none"
