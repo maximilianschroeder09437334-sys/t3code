@@ -14,10 +14,11 @@ const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 const isMaxiAndroidBuild = repoEnv.T3CODE_MAXI_ANDROID === "1";
 const isMaxiBuild = isIosPersonalTeamBuild || isMaxiAndroidBuild;
-// Maxi marketing version on both platforms; each build must raise its platform build number.
-const MAXI_MARKETING_VERSION = "2.2.7";
+// Keep personal Android and iOS release numbers independent.
+const MAXI_IOS_MARKETING_VERSION = "2.2.7";
+const MAXI_ANDROID_MARKETING_VERSION = "2.2.8";
 const MAXI_IOS_BUILD_NUMBER = "11";
-const MAXI_ANDROID_VERSION_CODE = 15;
+const MAXI_ANDROID_VERSION_CODE = 16;
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
@@ -245,7 +246,7 @@ const config: ExpoConfig = {
   scheme: isMaxiBuild ? ["t3code-maxi", variant.scheme] : variant.scheme,
   // fingerprint.config.js and the production workflow match this exact line; keep the override below it.
   version: repoEnv.T3CODE_MOBILE_VERSION ?? "2.3.0",
-  ...(isMaxiBuild ? { version: MAXI_MARKETING_VERSION } : {}),
+  ...(isMaxiBuild ? { version: isMaxiAndroidBuild ? MAXI_ANDROID_MARKETING_VERSION : MAXI_IOS_MARKETING_VERSION } : {}),
   runtimeVersion: {
     // Skip costly fingerprinting on dev launches; preview and production OTAs require matching native projects.
     policy: runtimeVersionPolicy,

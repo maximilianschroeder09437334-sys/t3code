@@ -126,10 +126,10 @@ it("keeps the Maxi iOS personal-team restrictions", async () => {
 it("pins the Maxi Android build without touching iOS", async () => {
   const config = await loadConfig("production", { T3CODE_MAXI_ANDROID: "1" });
   expect(config.name).toBe("T3 Code Maxi");
-  expect(config.version).toBe("2.2.7");
+  expect(config.version).toBe("2.2.8");
   expect(config.android).toMatchObject({
     package: "com.maximilian.t3code.mobile",
-    versionCode: 15,
+    versionCode: 16,
   });
   expect(config.ios?.bundleIdentifier).toBe("com.t3tools.t3code");
   expect(config.ios?.buildNumber).toBeUndefined();
