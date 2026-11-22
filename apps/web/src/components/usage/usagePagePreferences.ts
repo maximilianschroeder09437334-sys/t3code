@@ -5,9 +5,18 @@ import { getLocalStorageItem, setLocalStorageItem } from "../../hooks/useLocalSt
 
 const STORAGE_KEY = "t3code:usage-page-preferences:v1";
 const UsagePagePreferencesSchema = Schema.Struct({
-  metric: Schema.Literals(["cost", "tokens", "limits"]),
+  metric: Schema.Literals(["cost", "tokens", "share", "limits"]),
   windowDays: Schema.Literals([1, 7, 30, 90]),
   hiddenProviders: Schema.optional(Schema.Array(UsageProviderKind)),
+  /** Which window the Usage view measures against. */
+  limitMeasure: Schema.optional(Schema.Literals(["weekly", "session"])),
+  /** Subscription plan per provider for limit estimates; absent means detect it. */
+  estimatePlans: Schema.optional(
+    Schema.Struct({
+      claude: Schema.optional(Schema.String),
+      codex: Schema.optional(Schema.String),
+    }),
+  ),
 });
 export type UsagePagePreferences = typeof UsagePagePreferencesSchema.Type;
 

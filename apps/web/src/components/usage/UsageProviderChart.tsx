@@ -10,6 +10,7 @@ import {
   formatTokens,
   formatUsd,
 } from "@t3tools/shared/usageFormat";
+import { formatLimitShare } from "@t3tools/shared/usageEstimate";
 import { cn } from "~/lib/utils";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION } from "./usageProviders";
 import { observeResize } from "~/lib/observeResize";
@@ -20,7 +21,11 @@ const TICK_COUNT = 4;
 const PLOT_TOP = 8;
 const NONE_LOADING: ReadonlySet<UsageProviderKind> = new Set();
 
-export type UsageChartMetric = "tokens" | "cost";
+/** `share` plots API cost divided by each provider's dollars per 100% of a limit window. */
+export type UsageChartMetric = "tokens" | "cost" | "share";
+/** API-priced USD per 100% of the measured window, per provider. */
+export type ShareRates = ReadonlyMap<UsageProviderKind, number>;
+const NO_RATES: ShareRates = new Map();
 
 interface UsageProviderChartProps {
   readonly providers: readonly UsageProviderKind[];
@@ -30,6 +35,9 @@ interface UsageProviderChartProps {
   readonly hours: readonly string[];
   readonly hourly: readonly HourlyTotals[];
   readonly metric: UsageChartMetric;
+  readonly shareRates?: ShareRates | undefined;
+  /** Names the window the share is of, such as "weekly limit". */
+  readonly shareLabel?: string | undefined;
   readonly referenceTime: string | undefined;
   readonly resolution: "day" | "hour";
   readonly timeZone: string;
@@ -53,9 +61,14 @@ function valueFor(
   totals: DailyTotals | HourlyTotals | undefined,
   provider: UsageProviderKind,
   metric: UsageChartMetric,
+  shareRates: ShareRates,
 ): number {
   const entry = totals?.byProvider.get(provider);
   if (entry === undefined) return 0;
+  if (metric === "share") {
+    const rate = shareRates.get(provider);
+    return rate === undefined || rate <= 0 ? 0 : entry.costUsd / rate;
+  }
   return metric === "tokens" ? entry.totalTokens : entry.costUsd;
 }
 
@@ -63,12 +76,13 @@ export function buildPeriodColumns(
   periods: readonly string[],
   byPeriod: ReadonlyMap<string, DailyTotals | HourlyTotals>,
   metric: UsageChartMetric,
+  shareRates: ShareRates = NO_RATES,
 ): readonly DayColumn[] {
   return periods.map((period) => {
     const entry = byPeriod.get(period);
     const bands = PROVIDER_ORDER.map((provider) => ({
       provider,
-      value: valueFor(entry, provider, metric),
+      value: valueFor(entry, provider, metric, shareRates),
     }));
     return { bands, total: bands.reduce((sum, band) => sum + band.value, 0) };
   });
@@ -195,8 +209,9 @@ function buildChart(
   metric: UsageChartMetric,
   providers: readonly UsageProviderKind[],
   loadingProviders: ReadonlySet<UsageProviderKind>,
+  shareRates: ShareRates,
 ) {
-  const columns = buildPeriodColumns(periods, byPeriod, metric);
+  const columns = buildPeriodColumns(periods, byPeriod, metric, shareRates);
   const scale = chartScale(columns, loadingProviders);
   const stepX = periods.length < 2 ? 0 : VIEW_WIDTH / (periods.length - 1);
   const paths = providers.map((provider) => {
@@ -410,6 +425,8 @@ export function UsageProviderChart({
   hours,
   hourly,
   metric,
+  shareRates = NO_RATES,
+  shareLabel = "limit",
   referenceTime,
   resolution,
   timeZone,
@@ -426,12 +443,14 @@ export function UsageProviderChart({
     metric,
     providers,
     loadingProviders,
+    shareRates,
   );
 
   const toY = (value: number) => valueToY(value, scale.max);
   const seriesClassName = (loading: boolean) =>
     cn("transition-opacity", loading && "opacity-40 delay-150");
-  const format = metric === "tokens" ? formatTokens : formatUsd;
+  const format =
+    metric === "tokens" ? formatTokens : metric === "share" ? formatLimitShare : formatUsd;
   const formatPeriod = (period: string) =>
     resolution === "hour" ? formatHourShort(period, timeZone, hour12) : formatDayShort(period);
   const formatTooltipPeriod = (period: string) =>
@@ -525,7 +544,7 @@ export function UsageProviderChart({
       {/* The plot and its axes are hover-only; this carries the same figures for screen readers. */}
       <table className="sr-only">
         <caption>
-          {`${resolution === "hour" ? "Hourly" : "Daily"} ${metric === "tokens" ? "processed tokens" : "cost"} by provider`}
+          {`${resolution === "hour" ? "Hourly" : "Daily"} ${metric === "tokens" ? "processed tokens" : metric === "share" ? `estimated share of ${shareLabel}` : "cost"} by provider`}
         </caption>
         <thead>
           <tr>

@@ -66,6 +66,25 @@ export function tokenTypeSegments(
   ];
 }
 
+/**
+ * Converts per-provider cost segments into shares of each provider's limit
+ * window and adds them up, so mixed providers stay comparable.
+ */
+export function limitShareSegments(
+  parts: readonly { readonly segments: readonly ShareSegment[]; readonly usdPerWindow: number }[],
+): readonly ShareSegment[] {
+  const first = parts[0];
+  if (first === undefined) return [];
+  return first.segments.map((segment, index) => ({
+    ...segment,
+    value: parts.reduce(
+      (sum, part) =>
+        part.usdPerWindow > 0 ? sum + (part.segments[index]?.value ?? 0) / part.usdPerWindow : sum,
+      0,
+    ),
+  }));
+}
+
 export function speedCostSegments(cost: SpeedCost): readonly ShareSegment[] {
   return [
     { label: "Standard", value: cost.standard, color: ink(34) },

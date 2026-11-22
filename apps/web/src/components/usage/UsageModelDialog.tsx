@@ -1,4 +1,5 @@
 import { formatPercent, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
+import { LIMIT_MEASURE_LABEL, formatLimitShare } from "@t3tools/shared/usageEstimate";
 import { isModelCostUnknown, type ModelTotals } from "@t3tools/shared/usageMerge";
 
 import { mergeAnsweredUsage, type EnvironmentUsageStatus } from "../../state/usage";
@@ -19,9 +20,11 @@ import {
   cacheHitRate,
   costPerMillionTokens,
   costTypeSegments,
+  limitShareSegments,
   speedCostSegments,
   tokenTypeSegments,
 } from "./usageBreakdown";
+import { shareOf, useLimitEstimates } from "./usageLimitEstimates";
 import { PROVIDER_PRESENTATION } from "./usageProviders";
 
 export interface UsageChartWindow {
@@ -57,12 +60,29 @@ export function UsageModelDialog({
   const costUnknown = isModelCostUnknown(model);
   const hitRate = cacheHitRate(model);
   const perMillion = costPerMillionTokens(model);
-  const stats = [
-    { label: "Cost", value: costUnknown ? "Unpriced" : formatUsd(model.costUsd) },
-    { label: "Tokens", value: formatTokens(model.totalTokens) },
-    perMillion === null ? null : { label: "Per 1M tokens", value: formatUsd(perMillion) },
-    hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
-  ].filter((stat) => stat !== null);
+  // Present only in the Usage view.
+  const estimates = useLimitEstimates();
+  const share = (measure: "weekly" | "session") =>
+    estimates === null || costUnknown
+      ? null
+      : shareOf(estimates, model.provider, model.costUsd, measure);
+  const usdPerWindow = estimates?.rates.get(model.provider);
+  const stats = (
+    estimates === null
+      ? [
+          { label: "Cost", value: costUnknown ? "Unpriced" : formatUsd(model.costUsd) },
+          { label: "Tokens", value: formatTokens(model.totalTokens) },
+          perMillion === null ? null : { label: "Per 1M tokens", value: formatUsd(perMillion) },
+          hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
+        ]
+      : [
+          { label: "Weekly", value: costUnknown ? "Unpriced" : formatLimitShare(share("weekly")) },
+          { label: "5-hour", value: costUnknown ? "Unpriced" : formatLimitShare(share("session")) },
+          { label: "Tokens", value: formatTokens(model.totalTokens) },
+          hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
+        ]
+  ).filter((stat) => stat !== null);
+  const measureShare = estimates === null ? null : share(estimates.measure);
 
   return (
     <Dialog
@@ -83,7 +103,13 @@ export function UsageModelDialog({
           </div>
           <DialogDescription>
             {presentation.label}
-            {costUnknown ? "" : ` · ${formatPercent(model.costShare)} of cost`}
+            {estimates !== null
+              ? measureShare === null
+                ? ""
+                : ` · ${formatLimitShare(measureShare)} of the ${LIMIT_MEASURE_LABEL[estimates.measure]} limit · estimate`
+              : costUnknown
+                ? ""
+                : ` · ${formatPercent(model.costShare)} of cost`}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -104,7 +130,15 @@ export function UsageModelDialog({
               daily={usage.daily}
               hours={chartWindow.hours}
               hourly={usage.hourly}
-              metric={costUnknown ? "tokens" : metric}
+              metric={
+                costUnknown || (metric === "share" && usdPerWindow === undefined)
+                  ? "tokens"
+                  : metric
+              }
+              shareRates={estimates?.rates}
+              shareLabel={
+                estimates === null ? undefined : `${LIMIT_MEASURE_LABEL[estimates.measure]} limit`
+              }
               referenceTime={chartWindow.referenceTime}
               resolution={chartWindow.resolution}
               timeZone={chartWindow.timeZone}
@@ -112,7 +146,17 @@ export function UsageModelDialog({
             />
 
             <div className="grid gap-x-10 gap-y-8 sm:grid-cols-2">
-              {costUnknown ? null : (
+              {costUnknown ? null : estimates !== null ? (
+                usdPerWindow === undefined ? null : (
+                  <UsageShareBar
+                    label="Usage by type"
+                    segments={limitShareSegments([
+                      { segments: costTypeSegments(usage.categoryCost), usdPerWindow },
+                    ])}
+                    format={formatLimitShare}
+                  />
+                )
+              ) : (
                 <UsageShareBar
                   label="Cost by type"
                   segments={costTypeSegments(usage.categoryCost)}
@@ -125,12 +169,24 @@ export function UsageModelDialog({
                 format={formatTokens}
               />
               {usage.speedCost.fast + usage.speedCost.ultrafast > 0 ? (
-                <UsageShareBar
-                  label="Cost by speed"
-                  segments={speedCostSegments(usage.speedCost)}
-                  format={formatUsd}
-                  aside={<SpeedPremium premiumUsd={usage.speedCost.premium} />}
-                />
+                estimates !== null ? (
+                  usdPerWindow === undefined ? null : (
+                    <UsageShareBar
+                      label="Usage by speed"
+                      segments={limitShareSegments([
+                        { segments: speedCostSegments(usage.speedCost), usdPerWindow },
+                      ])}
+                      format={formatLimitShare}
+                    />
+                  )
+                ) : (
+                  <UsageShareBar
+                    label="Cost by speed"
+                    segments={speedCostSegments(usage.speedCost)}
+                    format={formatUsd}
+                    aside={<SpeedPremium premiumUsd={usage.speedCost.premium} />}
+                  />
+                )
               ) : null}
             </div>
           </div>

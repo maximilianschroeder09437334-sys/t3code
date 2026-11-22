@@ -75,7 +75,7 @@ export function rankProvidersByMetric(
   }[],
   metric: UsageMetric,
 ): readonly UsageProviderKind[] {
-  const field = metric === "cost" ? "costUsd" : "totalTokens";
+  const field = metric === "tokens" ? "totalTokens" : "costUsd";
   const value = (provider: UsageProviderKind) =>
     totals.find((entry) => entry.provider === provider)?.[field] ?? 0;
   return providers.toSorted((left, right) => value(right) - value(left));

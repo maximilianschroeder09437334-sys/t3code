@@ -1,7 +1,12 @@
 import type { ModelTotals } from "@t3tools/shared/usageMerge";
 import { describe, expect, it } from "vite-plus/test";
 
-import { cacheHitRate, costPerMillionTokens } from "./usageBreakdown";
+import {
+  cacheHitRate,
+  costPerMillionTokens,
+  costTypeSegments,
+  limitShareSegments,
+} from "./usageBreakdown";
 
 const model = (
   name: string,
@@ -46,5 +51,32 @@ describe("model rates", () => {
     expect(cacheHitRate(mixed)).toBe(0.25);
     expect(costPerMillionTokens(mixed)).toBe(2);
     expect(costPerMillionTokens({ ...mixed, unpricedRecords: 4 })).toBeNull();
+  });
+});
+
+describe("limitShareSegments", () => {
+  it("adds each provider's cost as a share of that provider's own window", () => {
+    const claude = costTypeSegments({
+      input: 100,
+      cacheRead: 50,
+      cacheWrite: 0,
+      output: 250,
+      unsplit: 0,
+    });
+    const codex = costTypeSegments({
+      input: 10,
+      cacheRead: 5,
+      cacheWrite: 0,
+      output: 20,
+      unsplit: 0,
+    });
+    const segments = limitShareSegments([
+      { segments: claude, usdPerWindow: 1000 },
+      { segments: codex, usdPerWindow: 100 },
+    ]);
+    const byLabel = new Map(segments.map((segment) => [segment.label, segment.value]));
+    expect(byLabel.get("Input")).toBeCloseTo(0.1 + 0.1);
+    expect(byLabel.get("Output")).toBeCloseTo(0.25 + 0.2);
+    expect(limitShareSegments([])).toEqual([]);
   });
 });

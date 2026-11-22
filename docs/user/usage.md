@@ -108,6 +108,32 @@ show every model again.
 If the setting is invalid, Usage ignores it and shows every model, and the next save of any other
 setting removes it from `settings.json`.
 
+## Estimate share of subscription limits
+
+**Usage → Usage** shows Claude Code and Codex history as an estimated share of each provider's
+weekly and 5-hour limits instead of dollars or tokens, with the same periods, model breakdown and
+totals. Switch between **Weekly** and **5-hour** above the chart; each provider row and model shows
+the other window too. Press `u` on the Usage page to open it. Other providers have no estimate and
+do not appear in this view.
+
+Providers publish limits only as percentages, so each share is API-priced cost divided by the cost
+that fills a whole window. That figure comes from the first of these that is available:
+
+1. **Calibrated:** this account's open window, comparing its live used percentage with the cost
+   Usage sees since the window opened. It needs at least 5% of a weekly or 10% of a 5-hour window.
+2. **Earlier window:** the last calibration from the past 21 days, kept in this browser.
+3. **Public estimate:** third-party measurements for the plan, from November 2026. Claude Pro
+   about $165 a week and $13 per 5 hours, Max about $1,250 and $125, Ultra (Max 20x) about $1,600
+   and $280. ChatGPT Plus about $55 and $7.50, Pro 100 about $350, Pro 200 about $700 and Pro 500
+   about $1,650 a week. Pro 5-hour figures are derived from the weekly figure.
+
+Select the info icon under the headline to see which source each window uses and to set your plan.
+The plan is detected from the account's sign-in when possible, otherwise Claude defaults to Max and
+Codex to Plus. Models count by their API price, because providers publish no per-model weights for
+the shared limits. Usage that Usage cannot see, such as the Claude or ChatGPT apps or other
+machines, also fills the limits, so calibrated figures read low when you use those. These are
+estimates, not provider figures.
+
 ## Track subscription limits
 
 **Usage → Limits** pools every subscription account it can see per provider, so with several Codex
