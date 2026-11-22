@@ -5,10 +5,63 @@ import type { MobileSurfaceId } from "./threadHeader.logic";
 export type MobileSidePanelTabId =
   | Exclude<MobileSurfaceId, "side-chat">
   | "lineage"
-  | `side-chat:${string}`;
+  | `side-chat:${string}`
+  | `agent:${string}:${string}`;
+
+export type MobileSurfaceTabId = Exclude<
+  MobileSidePanelTabId,
+  `side-chat:${string}` | `agent:${string}:${string}`
+>;
 
 export function isMobileSideChatTab(tab: MobileSidePanelTabId): tab is `side-chat:${string}` {
   return tab.startsWith("side-chat:");
+}
+
+export function mobileAgentTabId(
+  environmentId: string,
+  threadId: string,
+): `agent:${string}:${string}` {
+  return `agent:${environmentId}:${threadId}`;
+}
+
+export function mobileAgentTabTarget(tab: MobileSidePanelTabId) {
+  if (!tab.startsWith("agent:")) return null;
+  const separator = tab.indexOf(":", "agent:".length);
+  if (separator < 0) return null;
+  const environmentId = tab.slice("agent:".length, separator);
+  const threadId = tab.slice(separator + 1);
+  return environmentId && threadId ? { environmentId, threadId } : null;
+}
+
+export function isMobileAgentTab(tab: MobileSidePanelTabId): tab is `agent:${string}:${string}` {
+  return tab.startsWith("agent:") && mobileAgentTabTarget(tab) !== null;
+}
+
+export function isMobileSurfaceTab(tab: MobileSidePanelTabId): tab is MobileSurfaceTabId {
+  return !isMobileSideChatTab(tab) && !isMobileAgentTab(tab);
+}
+
+export function mobileSidePanelThreadTarget(
+  tab: MobileSidePanelTabId,
+  parentEnvironmentId: string,
+) {
+  if (isMobileSideChatTab(tab)) {
+    const threadId = tab.slice("side-chat:".length);
+    return threadId ? { environmentId: parentEnvironmentId, threadId } : null;
+  }
+  return mobileAgentTabTarget(tab);
+}
+
+export function mobileSidePanelThreadLabel(
+  tab: MobileSidePanelTabId,
+  parentEnvironmentId: string,
+): string | null {
+  const target = mobileSidePanelThreadTarget(tab, parentEnvironmentId);
+  if (target === null) return null;
+  const thread = target.threadId.slice(-5);
+  const environment =
+    target.environmentId === parentEnvironmentId ? "local" : target.environmentId.slice(-4);
+  return `Agent ${thread} · ${environment}`;
 }
 
 export interface MobileSidePanelTabs {

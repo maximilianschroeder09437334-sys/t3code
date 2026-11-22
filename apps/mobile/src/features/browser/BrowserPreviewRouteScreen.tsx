@@ -7,7 +7,7 @@ import { normalizePreviewUrl, previewPdfAssetUrl } from "@t3tools/shared/preview
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import * as Option from "effect/Option";
 import { useRef, useState } from "react";
-import { Platform, TextInput, View } from "react-native";
+import { Platform, Pressable, ScrollView, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ControlPill } from "../../components/ui/ControlPill";
@@ -198,6 +198,29 @@ function BrowserPreviewScreen({
           }
         />
       )}
+      {embedded && tabs.length > 1 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          className="max-h-12 border-b border-border"
+          contentContainerClassName="items-center gap-2 px-3 py-2"
+        >
+          {tabs.map((entry) => (
+            <Pressable
+              key={entry.tabId}
+              accessibilityRole="button"
+              accessibilityLabel={`Show ${browserTabTitle(entry)}`}
+              accessibilityState={{ selected: entry.tabId === tabId }}
+              onPress={() => selectTab(entry.tabId)}
+              className={`rounded-full px-3 py-1.5 ${entry.tabId === tabId ? "bg-accent" : "bg-subtle"}`}
+            >
+              <AppText className="max-w-48 text-xs text-foreground">
+                {browserTabTitle(entry)}
+              </AppText>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
       {tab ? (
         <>
           <BrowserAddressBar

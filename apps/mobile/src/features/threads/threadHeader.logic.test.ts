@@ -40,6 +40,23 @@ it("keeps the desktop surface order and marks unavailable mobile surfaces", () =
   expect(items.find((item) => item.id === "browser")).toMatchObject({ available: true });
 });
 
+it("makes native device and linked pull request panes reachable on Android", () => {
+  const items = mobileThreadSurfaces({
+    canOpenTerminal: false,
+    canOpenFiles: false,
+    canOpenBrowser: false,
+    isGitRepo: false,
+    hasPullRequest: false,
+    hasSideChat: false,
+    isAndroid: true,
+  });
+
+  expect(items.find((item) => item.id === "device")).toMatchObject({ available: true });
+  expect(items.find((item) => item.id === "linked-pull-requests")).toMatchObject({
+    available: true,
+  });
+});
+
 it("runs lineage navigation only after the modal dismisses", () => {
   const events: string[] = [];
   const pending = deferUntilModalDismiss(() => events.push("navigate"));

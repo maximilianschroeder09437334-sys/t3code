@@ -40,6 +40,7 @@ export function mobileThreadSurfaces(input: {
   readonly isGitRepo: boolean;
   readonly hasPullRequest: boolean;
   readonly hasSideChat: boolean;
+  readonly isAndroid?: boolean;
 }): ReadonlyArray<MobileSurfaceItem> {
   return [
     {
@@ -75,10 +76,15 @@ export function mobileThreadSurfaces(input: {
     {
       id: "linked-pull-requests",
       label: "Linked pull requests",
-      available: false,
-      reason: "Not on mobile yet",
+      available: input.isAndroid === true,
+      reason: input.isAndroid ? undefined : "Not available in this view",
     },
-    { id: "device", label: "Device", available: false, reason: "Not available for this thread" },
+    {
+      id: "device",
+      label: "Device",
+      available: input.isAndroid === true,
+      reason: input.isAndroid ? undefined : "Not available in this view",
+    },
     {
       id: "side-chat",
       label: "Side chat",

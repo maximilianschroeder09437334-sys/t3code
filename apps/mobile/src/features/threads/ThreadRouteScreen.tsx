@@ -123,9 +123,12 @@ import {
   threadRouteOpensDraft,
 } from "./thread-route-hydration";
 import { ThreadHeader } from "./ThreadHeader";
+import { ThreadPreviewRoute } from "./thread-preview-route";
+import { InlineThreadFilesPane } from "./InlineSidePanelNavigator";
 import { BrowserPreviewInline } from "../browser/BrowserPreviewRouteScreen";
 import {
-  isMobileSideChatTab,
+  mobileAgentTabId,
+  mobileSidePanelThreadTarget,
   mobileSidePanelStore,
   type MobileSidePanelTabId,
 } from "./mobileSidePanelStore";
@@ -1116,8 +1119,30 @@ function ThreadRouteContent(
                         />
                       );
                     }
-                    if (tab === "files") return renderFilesInspector();
-                    if (tab === "diff" || tab === "pull-request") return renderGitInspector();
+                    if (tab === "files") {
+                      return selectedThreadCwd ? (
+                        <InlineThreadFilesPane
+                          cwd={selectedThreadCwd}
+                          environmentId={selectedThread.environmentId}
+                          threadId={String(selectedThread.id)}
+                          projectName={selectedThreadProject?.title ?? "Files"}
+                        />
+                      ) : null;
+                    }
+                    if (tab === "diff") return renderGitInspector();
+                    if (tab === "pull-request" || tab === "linked-pull-requests") {
+                      return (
+                        <ThreadPullRequestsSheet
+                          route={{
+                            params: {
+                              environmentId: String(selectedThread.environmentId),
+                              threadId: String(selectedThread.id),
+                            },
+                          }}
+                          onCloseInline={closeTab}
+                        />
+                      );
+                    }
                     if (tab === "terminal") {
                       return (
                         <ThreadTerminalRouteScreen
@@ -1142,19 +1167,6 @@ function ThreadRouteContent(
                         />
                       );
                     }
-                    if (tab === "linked-pull-requests") {
-                      return (
-                        <ThreadPullRequestsSheet
-                          route={{
-                            params: {
-                              environmentId: String(selectedThread.environmentId),
-                              threadId: String(selectedThread.id),
-                            },
-                          }}
-                          onCloseInline={closeTab}
-                        />
-                      );
-                    }
                     if (tab === "lineage") {
                       return (
                         <ThreadAgentsSheet
@@ -1168,27 +1180,31 @@ function ThreadRouteContent(
                           onOpenChildThread={(child) =>
                             mobileSidePanelStore.open(
                               parentSurfaceKey,
-                              `side-chat:${child.threadId}`,
+                              mobileAgentTabId(String(child.environmentId), String(child.threadId)),
                             )
                           }
                         />
                       );
                     }
-                    if (isMobileSideChatTab(tab)) {
-                      const sideChatId = tab.slice("side-chat:".length);
-                      if (!sideChatId) return null;
+                    const childTarget = mobileSidePanelThreadTarget(
+                      tab,
+                      String(selectedThread.environmentId),
+                    );
+                    if (childTarget) {
                       return (
-                        <ThreadRouteScreen
-                          route={{
-                            params: {
-                              environmentId: String(selectedThread.environmentId),
-                              threadId: sideChatId,
-                            },
-                          }}
-                          inspectorPresentation={{
-                            onClose: closeTab,
-                          }}
-                        />
+                        <ThreadPreviewRoute
+                          key={`${childTarget.environmentId}:${childTarget.threadId}`}
+                          environmentId={childTarget.environmentId}
+                          threadId={childTarget.threadId}
+                        >
+                          {(route) => (
+                            <ThreadRouteScreen
+                              key={`${route.params.environmentId}:${route.params.threadId}`}
+                              route={route}
+                              inspectorPresentation={{ onClose: closeTab }}
+                            />
+                          )}
+                        </ThreadPreviewRoute>
                       );
                     }
                     return null;

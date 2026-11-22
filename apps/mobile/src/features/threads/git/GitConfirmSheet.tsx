@@ -63,7 +63,13 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
 
   const continuePendingAction = async () => {
     if (!canWriteSourceControl || !confirmAction) return;
-    navigation.dispatch(StackActions.replace("Thread", { environmentId, threadId }));
+    const returnRoute = navigation.getState()?.routeNames.includes("Root") ? "Root" : "Thread";
+    navigation.dispatch(
+      StackActions.replace(
+        returnRoute,
+        returnRoute === "Root" ? undefined : { environmentId, threadId },
+      ),
+    );
     await gitActions.onRunSelectedThreadGitAction({
       action: confirmAction,
       ...(params.commitMessage ? { commitMessage: params.commitMessage } : {}),
@@ -73,7 +79,13 @@ export function GitConfirmSheet(props: GitConfirmSheetProps) {
 
   const movePendingActionToFeatureBranch = useCallback(async () => {
     if (!canChangeThreadBranch || !confirmAction) return;
-    navigation.dispatch(StackActions.replace("Thread", { environmentId, threadId }));
+    const returnRoute = navigation.getState()?.routeNames.includes("Root") ? "Root" : "Thread";
+    navigation.dispatch(
+      StackActions.replace(
+        returnRoute,
+        returnRoute === "Root" ? undefined : { environmentId, threadId },
+      ),
+    );
 
     if (includesCommit) {
       await gitActions.onRunSelectedThreadGitAction({
