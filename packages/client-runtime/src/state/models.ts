@@ -160,6 +160,10 @@ export interface EnvironmentThreadShell {
   readonly latestRun: ThreadRunSummary | null;
   readonly runtime: ThreadRuntimeSummary | null;
   readonly blockedOnThreadWait?: boolean;
+  /** What the thread waits on, from its own projection; absent from servers without it. */
+  readonly waitingOn?: OrchestrationV2ThreadShell["waitingOn"];
+  /** The thread's own wait phase; clients join phases along `waitingOn` (see threadWait.ts). */
+  readonly waitPhase?: OrchestrationV2ThreadShell["waitPhase"];
   /** Server-derived first step in the last completed report's Next steps section. */
   readonly homeFirstNextStep?: string | null;
   readonly homeNeedsYou?: boolean;
@@ -325,6 +329,8 @@ export function presentThreadShell(
     latestRun,
     runtime,
     blockedOnThreadWait: thread.blockedOnThreadWait ?? false,
+    ...(thread.waitingOn === undefined ? {} : { waitingOn: thread.waitingOn }),
+    ...(thread.waitPhase === undefined ? {} : { waitPhase: thread.waitPhase }),
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
     ...(thread.latestUserAuthoredMessageAt === undefined
       ? {}
