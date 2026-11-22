@@ -1802,6 +1802,19 @@ body {
   --desktop-window-right-resize-inset: 6px;
 }
 
+/* Safari can soften text in the translucent/composited workspace chrome on iPad. */
+@media (hover: none) and (pointer: coarse) {
+  html:not(.wco) [data-web-touch-header] {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    filter: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    translate: none !important;
+    will-change: auto !important;
+  }
+}
+
 /* App-chrome grain. Baked into each surface's own background (behind
    content) rather than a fixed overlay on top: a full-viewport overlay
    forces the compositor to re-blend every frame any animation produces,

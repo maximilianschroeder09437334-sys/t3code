@@ -22,9 +22,8 @@ import { waitForThreadShell } from "./threadForkNavigation";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
 
 /**
- * Forks `source` at its latest stable point into a side chat, sends `prompt` there, and opens
- * it like any linked thread. Resolves false when the side chat did not start. `settings` are
- * what the parent's composer would send, which its thread gets only on its next send.
+ * Forks `source` at its latest stable point into a side chat and opens it like any linked thread.
+ * A prompt and settings start a turn; omitting them leaves the new side chat ready to use.
  */
 export function useStartSideChat() {
   const forkSideChat = useAtomCommand(threadEnvironment.forkSideChat, { reportFailure: false });
@@ -44,8 +43,8 @@ export function useStartSideChat() {
 
   return async (
     source: ScopedThreadRef,
-    prompt: string,
-    settings: { readonly runtimeMode: RuntimeMode; readonly modelSelection: ModelSelection },
+    prompt?: string,
+    settings?: { readonly runtimeMode: RuntimeMode; readonly modelSelection: ModelSelection },
   ): Promise<boolean> => {
     const targetThreadId = ThreadId.make(uuidv4());
     const fork = await forkSideChat({
@@ -79,6 +78,14 @@ export function useStartSideChat() {
     const sideChat = appAtomRegistry.get(environmentThreadShells.threadShellAtom(targetRef));
     if (sideChat === null) {
       Dialog.alert("Side chat not started", "The side chat is no longer available.");
+      discard();
+      return false;
+    }
+    if (prompt === undefined) {
+      openLinkedThread({ environmentId: source.environmentId, threadId: targetThreadId });
+      return true;
+    }
+    if (settings === undefined) {
       discard();
       return false;
     }

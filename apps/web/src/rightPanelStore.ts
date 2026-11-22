@@ -1059,7 +1059,10 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             // the empty picker, as a user close would. A dropped `browser:new` placeholder does not count.
             const closedLastSessionTab =
               surfaces.length === 0 &&
-              current.surfaces.some((surface) => surface.kind === "preview" && surface.resourceId);
+              (current.surfaces.some(
+                (surface) => surface.kind === "preview" && surface.resourceId,
+              ) ||
+                current.activeSurfaceId?.startsWith("browser:") === true);
             return {
               ...current,
               isOpen: closedLastSessionTab ? false : current.isOpen,
@@ -1198,7 +1201,12 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               : [
                   [
                     threadKey,
-                    { ...threadState, surfaces: threadState.surfaces.map(withoutReveal) },
+                    {
+                      ...threadState,
+                      surfaces: threadState.surfaces
+                        .filter((surface) => surface.kind !== "preview")
+                        .map(withoutReveal),
+                    },
                   ],
                 ],
           ),

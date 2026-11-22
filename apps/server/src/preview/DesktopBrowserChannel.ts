@@ -44,6 +44,7 @@ export class DesktopBrowserChannel extends Context.Service<
     readonly awaitAttached: (key: DesktopTabKey, timeout: Duration.Input) => Effect.Effect<boolean>;
     readonly detached: Stream.Stream<DesktopTabKey>;
     readonly attached: Stream.Stream<DesktopTabKey>;
+    readonly interactions: Stream.Stream<DesktopTabKey>;
     readonly isAttached: (key: DesktopTabKey) => Effect.Effect<boolean>;
     /** Whether a desktop window draws the tab on screen, which no streamed viewer counts. */
     readonly isShown: (key: DesktopTabKey) => boolean;
@@ -64,6 +65,7 @@ const make = Effect.gen(function* () {
   const inputFd = config.desktopBrowserFd;
   const controlFd = config.desktopBrowserControlFd;
   const changes = yield* PubSub.unbounded<{ key: DesktopTabKey; attached: boolean }>();
+  const interactions = yield* PubSub.unbounded<DesktopTabKey>();
   const attachedTabs = new Set<string>();
   // Missing reports protect desktop tabs until the renderer explicitly marks them hidden.
   const shownTabs = new Map<string, boolean>();
@@ -79,6 +81,7 @@ const make = Effect.gen(function* () {
       }),
       detached: Stream.empty,
       attached: Stream.empty,
+      interactions: Stream.empty,
       isAttached: Effect.fn("DesktopBrowserChannel.isAttached")(function () {
         return Effect.succeed(false);
       }),
@@ -150,6 +153,8 @@ const make = Effect.gen(function* () {
         case "shown":
           shownTabs.set(id, event.shown);
           return Effect.void;
+        case "interacted":
+          return PubSub.publish(interactions, key);
       }
     }),
     Effect.catchCause((cause) => Effect.logWarning("desktop browser channel stopped", { cause })),
@@ -249,6 +254,7 @@ const make = Effect.gen(function* () {
       Stream.filter((change) => change.attached),
       Stream.map((change) => change.key),
     ),
+    interactions: Stream.fromPubSub(interactions),
     isAttached: Effect.fn("DesktopBrowserChannel.isAttached")(function (key) {
       return Effect.sync(() => attachedTabs.has(keyOf(key)));
     }),

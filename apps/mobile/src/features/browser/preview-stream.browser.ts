@@ -167,6 +167,8 @@ export function start(configuration: PreviewStreamConfiguration) {
         tabId: configuration.tabId,
         maxWidth: cap.width,
         maxHeight: cap.height,
+        mobile: true,
+        deviceScaleFactor: Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO),
         interactive,
       },
       {
@@ -214,6 +216,7 @@ export function start(configuration: PreviewStreamConfiguration) {
           }
         },
         onConnectedChange: (connected) => {
+          if (connected && interactive && size) next.send({ type: "resize", ...size });
           if (!connected) {
             control = null;
             clearInput();

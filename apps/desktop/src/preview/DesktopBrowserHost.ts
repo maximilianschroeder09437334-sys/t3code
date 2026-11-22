@@ -103,6 +103,7 @@ export class DesktopBrowserHost extends Context.Service<
     readonly detach: (key: DesktopBrowserTabKey) => void;
     readonly loadFailed: (key: DesktopBrowserTabKey, failure: PreviewAutomationLoadError) => void;
     readonly setShown: (key: DesktopBrowserTabKey, shown: boolean | undefined) => void;
+    readonly humanInteraction: (source: Electron.WebContents) => void;
     /** Whether the client draws the guest at full detail while it is captured. */
     readonly setCaptureDrawn: (key: DesktopBrowserTabKey, drawn: boolean | undefined) => void;
     readonly humanStartedDownload: (source: Electron.WebContents) => boolean;
@@ -616,6 +617,11 @@ export const make = Effect.gen(function* () {
     if (tabs.get(id)?.stopWaiting === null) emit({ type: "shown", ...key, shown });
   };
 
+  const humanInteraction = (source: Electron.WebContents) => {
+    const tab = [...tabs.values()].find((candidate) => candidate.debuggee.webContents === source);
+    if (tab?.stopWaiting === null) emit({ type: "interacted", ...tab.key });
+  };
+
   const setCaptureDrawn = (key: DesktopBrowserTabKey, drawn: boolean | undefined) => {
     const id = keyOf(key);
     if (!drawn) {
@@ -703,6 +709,7 @@ export const make = Effect.gen(function* () {
     detach,
     loadFailed,
     setShown,
+    humanInteraction,
     setCaptureDrawn,
     placeDownload,
     humanStartedDownload,

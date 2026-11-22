@@ -81,7 +81,12 @@ it.effect.each([
     const acked = Promise.withResolvers<void>();
     const frame = new Uint8Array([255, 216, 255, 217]);
     const output = yield* Queue.make<ServerBrowser.ServerBrowserViewerOutput>();
-    yield* Queue.offer(output, { _tag: "viewport", width: 1280, height: 800 });
+    yield* Queue.offer(output, {
+      _tag: "viewport",
+      width: 1280,
+      height: 800,
+      isActiveSizer: false,
+    });
     yield* Queue.offer(output, {
       _tag: "frame",
       data: frame,
@@ -112,7 +117,7 @@ it.effect.each([
     );
     const server = Context.get(services, HttpServer.HttpServer);
     const origin = HttpServer.formatAddress(server.address).replace(/^http/, "ws");
-    const resource = `/api/preview-stream/ws?threadId=thread&tabId=tab&wsTicket=one-use-ticket${interactive ? "" : "&interactive=false"}`;
+    const resource = `/api/preview-stream/ws?threadId=thread&tabId=tab&wsTicket=one-use-ticket&mobile=true&localDesktop=true&deviceScaleFactor=2${interactive ? "" : "&interactive=false"}`;
     const received = Promise.withResolvers<void>();
     const socket = yield* Effect.acquireRelease(
       Effect.sync(() => new WebSocket(`${origin}${resource}`)),
@@ -137,7 +142,9 @@ it.effect.each([
     // The socket ack follows every mutation, providing a barrier without sleeps.
     yield* Effect.promise(() => acked.promise);
     expect(frames).toEqual([frame]);
-    expect(viewports).toEqual([{ type: "viewport", width: 1280, height: 800 }]);
+    expect(viewports).toEqual([
+      { type: "viewport", width: 1280, height: 800, isActiveSizer: false },
+    ]);
     expect(inputs).toEqual(canOperate ? [...mutations, null] : []);
     expect(attachments).toEqual([
       {
@@ -147,6 +154,9 @@ it.effect.each([
         maxHeight: 800,
         quality: 70,
         canOperate,
+        mobile: true,
+        localDesktop: true,
+        deviceScaleFactor: 2,
       },
     ]);
     expect(auth.requests).toEqual([resource]);

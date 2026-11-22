@@ -182,6 +182,7 @@ export function ServerBrowserSurface(props: {
   const [promptText, setPromptText] = useState("");
   const [fileChooser, setFileChooser] = useState<PreviewStreamFileChooser | null>(null);
   const [agentCursor, setAgentCursor] = useState<AgentCursorPlacement | null>(null);
+  const [activeSizer, setActiveSizer] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const answerFileChooser = (files: ReadonlyArray<File>) => {
     const chooser = fileChooser;
@@ -275,12 +276,13 @@ export function ServerBrowserSurface(props: {
       return null;
     const rect = canvas.getBoundingClientRect();
     const fit = Math.min(rect.width / canvas.width, rect.height / canvas.height);
-    const width = canvas.width * fit;
-    const height = canvas.height * fit;
+    const width = viewport.isActiveSizer ? rect.width : canvas.width * fit;
+    const height = viewport.isActiveSizer ? rect.height : canvas.height * fit;
     if (!(width > 0 && height > 0)) return null;
+    const left = viewport.isActiveSizer ? 0 : (rect.width - width) / 2;
     const scale = viewport.width / width;
-    const x = (clientX - rect.left - (rect.width - width) / 2) * scale;
-    const y = (clientY - rect.top - (rect.height - height) / 2) * (viewport.height / height);
+    const x = (clientX - rect.left - left) * scale;
+    const y = (clientY - rect.top) * (viewport.height / height);
     const inside = x >= 0 && y >= 0 && x <= viewport.width && y <= viewport.height;
     if (!inside && !clamp) return null;
     return {
@@ -376,7 +378,15 @@ export function ServerBrowserSurface(props: {
       firstFrame();
     });
     const client = createPreviewStreamClient(
-      { access, threadId, tabId, maxWidth: cap.width, maxHeight: cap.height },
+      {
+        access,
+        threadId,
+        tabId,
+        maxWidth: cap.width,
+        maxHeight: cap.height,
+        deviceScaleFactor: window.devicePixelRatio || 1,
+        localDesktop: window.desktopBridge !== undefined,
+      },
       {
         onFrame: (jpeg) => {
           unauthorizedRef.current = 0;
@@ -404,6 +414,7 @@ export function ServerBrowserSurface(props: {
         onFileChooser: setFileChooser,
         onViewport: (viewport) => {
           viewportRef.current = viewport;
+          setActiveSizer(viewport.isActiveSizer === true);
           viewportChanged(viewport);
         },
         onControl: (next) => {
@@ -424,7 +435,11 @@ export function ServerBrowserSurface(props: {
           }
         },
         onConnectedChange: (connected) => {
-          if (connected) return;
+          if (connected) {
+            if (followSize && sizeRef.current)
+              clientRef.current?.send({ type: "resize", ...sizeRef.current });
+            return;
+          }
           setFileChooser(null);
           controlRef.current = null;
           setControl(null);
@@ -781,7 +796,10 @@ export function ServerBrowserSurface(props: {
         ) : null}
         <canvas
           ref={canvasRef}
-          className="block size-full touch-none object-contain"
+          className={cn(
+            "block size-full touch-none",
+            activeSizer ? "object-fill" : "object-contain object-top",
+          )}
           onPointerDown={handlePointer}
           onPointerMove={handlePointer}
           onPointerUp={handlePointer}

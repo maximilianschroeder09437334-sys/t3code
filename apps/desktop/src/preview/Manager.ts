@@ -1521,6 +1521,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     };
     // Chromium navigates the outermost WebContents (the host app) on thumb buttons, even from guest iframes.
     const beforeMouse = (event: Electron.Event, mouse: Electron.MouseInputEvent): void => {
+      if (mouse.type !== "mouseMove") browserHost.humanInteraction(wc);
       // Electron reports thumb buttons as "back" and "forward", which its typings omit.
       const button: string | undefined = mouse.button;
       if (button !== "back" && button !== "forward") return;
@@ -1579,6 +1580,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         ),
       );
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
+      if (input.type === "keyDown") browserHost.humanInteraction(wc);
       syncMenuShortcuts(wc, input);
       const host = wc.hostWebContents;
       const forwarded =

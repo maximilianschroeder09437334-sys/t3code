@@ -209,7 +209,12 @@ export type ServerBrowserViewerOutput =
       readonly data: Uint8Array;
       readonly ack: Effect.Effect<void>;
     }
-  | { readonly _tag: "viewport"; readonly width: number; readonly height: number }
+  | {
+      readonly _tag: "viewport";
+      readonly width: number;
+      readonly height: number;
+      readonly isActiveSizer: boolean;
+    }
   | {
       readonly _tag: "control";
       readonly canOperate: boolean;
@@ -269,6 +274,9 @@ export class ServerBrowser extends Context.Service<
       readonly maxHeight: number;
       readonly quality: number;
       readonly canOperate: boolean;
+      readonly mobile?: boolean;
+      readonly localDesktop?: boolean;
+      readonly deviceScaleFactor?: number;
     }) => Effect.Effect<
       ServerBrowserViewer,
       ServerBrowserTabNotFoundError | ServerBrowserLaunchError,
@@ -300,6 +308,9 @@ export class ServerBrowser extends Context.Service<
 interface ViewerState {
   readonly id: string;
   readonly canOperate: boolean;
+  readonly mobile: boolean;
+  readonly localDesktop: boolean;
+  readonly deviceScaleFactor: number;
   readonly pressedKeys: Map<string, { key: string; code: string }>;
   readonly pressedButtons: Map<"left" | "middle" | "right", { x: number; y: number }>;
   readonly push: (output: ServerBrowserViewerOutput) => void;
@@ -368,6 +379,13 @@ interface ServerTab {
   zoomFactor: number;
   /** Last usable CSS size measured on the desktop. */
   desktopViewport: { readonly width: number; readonly height: number } | null;
+  desktopViewportOverride: {
+    readonly ownerId: string;
+    readonly width: number;
+    readonly height: number;
+    readonly mobile: boolean;
+    readonly deviceScaleFactor: number;
+  } | null;
   desktopViewportRead: Promise<ServerTab["desktopViewport"]>;
   /** A read queued behind `desktopViewportRead`, shared by every caller that waits for it. */
   desktopViewportNext: Promise<ServerTab["desktopViewport"]> | null;
@@ -871,6 +889,12 @@ const make = Effect.gen(function* () {
   const layoutSize = async (tab: ServerTab) => {
     // A dialog blocks page script; its close measures again.
     if (tab.desktop) {
+      if (tab.desktopViewportOverride) {
+        return {
+          width: tab.desktopViewportOverride.width,
+          height: tab.desktopViewportOverride.height,
+        };
+      }
       return tab.dialog
         ? tab.desktopViewport
         : ((await measureDesktopViewport(tab)) ?? tab.desktopViewport);
@@ -912,7 +936,98 @@ const make = Effect.gen(function* () {
   const broadcastViewport = async (tab: ServerTab) => {
     const size = await layoutSize(tab);
     if (!size || tab.closing) return;
-    for (const viewer of tab.viewers) viewer.push({ _tag: "viewport", ...size });
+    const activeViewerId = tab.desktop
+      ? tab.desktopViewportOverride?.ownerId
+      : tab.setting._tag === "fill"
+        ? [...tab.viewers].reduce<ViewerState | null>(
+            (latest, viewer) =>
+              viewer.requestedSize &&
+              (!latest?.requestedSize || viewer.requestedSize.order > latest.requestedSize.order)
+                ? viewer
+                : latest,
+            null,
+          )?.id
+        : undefined;
+    for (const viewer of tab.viewers)
+      viewer.push({
+        _tag: "viewport",
+        ...size,
+        isActiveSizer: viewer.id === activeViewerId,
+      });
+  };
+
+  const restoreDesktopViewport = async (tab: ServerTab, ownerId?: string) => {
+    const override = tab.desktopViewportOverride;
+    if (!override || (ownerId !== undefined && override.ownerId !== ownerId)) return;
+    await tab.cdp.send("Emulation.clearDeviceMetricsOverride");
+    await tab.cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+    tab.desktopViewportOverride = null;
+    tab.desktopViewportStale = true;
+    await broadcastViewport(tab);
+  };
+
+  const setDesktopViewerViewport = async (
+    tab: ServerTab,
+    session: CDPSession,
+    viewer: ViewerState,
+    width: number,
+    height: number,
+  ) => {
+    const current = tab.desktopViewportOverride;
+    if (
+      current?.ownerId === viewer.id &&
+      current.width === width &&
+      current.height === height &&
+      current.mobile === viewer.mobile &&
+      current.deviceScaleFactor === viewer.deviceScaleFactor
+    )
+      return;
+    await session.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: viewer.deviceScaleFactor,
+      mobile: viewer.mobile,
+      screenWidth: width,
+      screenHeight: height,
+    });
+    await session.send("Emulation.setTouchEmulationEnabled", {
+      enabled: viewer.mobile,
+      ...(viewer.mobile ? { maxTouchPoints: 1 } : {}),
+    });
+    tab.desktopViewportOverride = {
+      ownerId: viewer.id,
+      width,
+      height,
+      mobile: viewer.mobile,
+      deviceScaleFactor: viewer.deviceScaleFactor,
+    };
+    for (const attached of tab.viewers)
+      attached.push({
+        _tag: "viewport",
+        width,
+        height,
+        isActiveSizer: attached.id === viewer.id,
+      });
+  };
+
+  const applyViewerViewport = async (tab: ServerTab, session: CDPSession, viewer: ViewerState) => {
+    const requested = viewer.requestedSize;
+    if (!requested) return;
+    viewer.requestedSize = { ...requested, order: ++viewerResizeOrder };
+    if (tab.desktop) {
+      if (viewer.localDesktop) return;
+      await setDesktopViewerViewport(tab, session, viewer, requested.width, requested.height);
+      return;
+    }
+    if (tab.setting._tag !== "fill") return;
+    const current = tab.page.viewportSize();
+    if (current?.width === requested.width && current.height === requested.height) {
+      await broadcastViewport(tab);
+      return;
+    }
+    await tab.page.setViewportSize({ width: requested.width, height: requested.height });
+    await applyZoom(tab);
+    await broadcastViewport(tab);
   };
 
   const applySetting = async (tab: ServerTab, setting: PreviewViewportSetting) => {
@@ -1175,6 +1290,7 @@ const make = Effect.gen(function* () {
       colorScheme: "system",
       zoomFactor: 1,
       desktopViewport: null,
+      desktopViewportOverride: null,
       desktopViewportRead: Promise.resolve(null),
       desktopViewportNext: null,
       desktopViewportStale: true,
@@ -3001,6 +3117,7 @@ const make = Effect.gen(function* () {
     const message = asRecord(raw);
     if (!message) return;
     const modifiers = modifiersOf(message);
+    if (message.type !== "resize") await applyViewerViewport(tab, session, viewer);
     switch (message.type) {
       case "mouse": {
         const action = message.action;
@@ -3087,7 +3204,11 @@ const make = Effect.gen(function* () {
         const height = Math.min(Math.round(num(message.height)), 2160);
         if (width < 100 || height < 100) return;
         viewer.requestedSize = { width, height, order: ++viewerResizeOrder };
-        if (tab.setting._tag !== "fill" || tab.desktop) return;
+        if (tab.desktop) {
+          await setDesktopViewerViewport(tab, session, viewer, width, height);
+          return;
+        }
+        if (tab.setting._tag !== "fill") return;
         const current = tab.page.viewportSize();
         if (current?.width === width && current.height === height) return;
         await tab.page.setViewportSize({ width, height });
@@ -3207,6 +3328,12 @@ const make = Effect.gen(function* () {
     const viewer: ViewerState = {
       id: NodeCrypto.randomUUID(),
       canOperate: input.canOperate,
+      mobile: input.mobile === true,
+      localDesktop: input.localDesktop === true,
+      deviceScaleFactor:
+        typeof input.deviceScaleFactor === "number" && Number.isFinite(input.deviceScaleFactor)
+          ? Math.max(1, Math.min(4, input.deviceScaleFactor))
+          : 1,
       pressedKeys: new Map(),
       pressedButtons: new Map(),
       push: (next) => {
@@ -3252,6 +3379,7 @@ const make = Effect.gen(function* () {
       () =>
         Effect.promise(async () => {
           await tab.control.disconnect(viewer.id, () => releaseViewerInput(viewer, session));
+          if (tab.desktop) await restoreDesktopViewport(tab, viewer.id).catch(constVoid);
           tab.viewers.delete(viewer);
           broadcastControl(tab);
           reportLiveTabs();
@@ -3342,6 +3470,8 @@ const make = Effect.gen(function* () {
           const message = asRecord(raw);
           if (!message) return;
           try {
+            if (tab.desktop && viewer.localDesktop && message.type !== "resize")
+              await tab.control.system(() => restoreDesktopViewport(tab));
             if (message.type === "takeControl") {
               const taking = tab.control.take(viewer.id);
               broadcastControl(tab);
@@ -3364,6 +3494,8 @@ const make = Effect.gen(function* () {
                   ? { promptText: message.promptText }
                   : {}),
               });
+            } else if (message.type === "resize") {
+              await tab.control.system(() => dispatchViewerInput(tab, session, viewer, message));
             } else {
               const dispatch = async (input: Record<string, unknown>) => {
                 await dispatchViewerInput(tab, session, viewer, input);
@@ -3424,6 +3556,16 @@ const make = Effect.gen(function* () {
         if (tab?.desktop) dropTab(tab, false);
       }),
     ),
+    Effect.forkScoped,
+  );
+  yield* desktopChannel.interactions.pipe(
+    Stream.runForEach((key) => {
+      const tab = tabs.get(tabKey(key.threadId, key.tabId));
+      if (!tab?.desktop) return Effect.void;
+      return Effect.promise(() =>
+        tab.control.system(() => restoreDesktopViewport(tab)).catch(constVoid),
+      );
+    }),
     Effect.forkScoped,
   );
   // The desktop keeps the tabs an agent uses focused until its turn ends, not just per command.
