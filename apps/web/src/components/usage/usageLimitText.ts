@@ -49,6 +49,8 @@ const BLOCKED_TEXT: Partial<Record<CalibrationBlock, string>> = {
   incomplete: "Waiting for complete usage data to calibrate.",
   otherAccounts: "Usage from an account T3 can't tell apart blocks calibration.",
   mixedAccounts: "The selected environments use more than one account.",
+  unattributedHistory: "Usage history T3 can't tie to this account blocks calibration.",
+  accountHistory: "Calibrates once this account has been seen here for a whole window.",
 };
 
 export function rateBasisText(

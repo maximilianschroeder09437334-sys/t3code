@@ -57,6 +57,7 @@ function dailyHistory(dataEndMs: number, perDay = 100): CostHistory {
     ),
     coverageStartMs: dayStart,
     dataEndMs,
+    accountSinceMs: 0,
   };
 }
 
@@ -371,6 +372,7 @@ describe("calibrateObservation", () => {
       periods: [],
       coverageStartMs: NOW - 24 * HOUR,
       dataEndMs: NOW,
+      accountSinceMs: 0,
     };
     expect(
       calibrateObservation({ ...common, costs: ["incomplete", dailyHistory(NOW)] }),
@@ -581,6 +583,7 @@ describe("estimateProviderLimits", () => {
     ),
     coverageStartMs: NOW - 24 * HOUR,
     dataEndMs: NOW,
+    accountSinceMs: 0,
   };
   const common = {
     provider: "codex" as const,
@@ -728,5 +731,105 @@ describe("estimateProviderLimits", () => {
       observation: { ...observation([weeklyWindow(80)]), checkedAtMs: NOW + MINUTE },
     });
     expect(rememberCalibrations({}, [estimate], NOW).codex?.weekly?.at).toBe(NOW);
+  });
+});
+
+describe("review round 2 repairs", () => {
+  const reading = (windows: LimitObservation["windows"]): LimitObservation => ({
+    windows,
+    checkedAtMs: NOW,
+    probeFailed: false,
+  });
+  const base = { measure: "weekly" as const, publicUsd: 700, nowMs: NOW };
+
+  it("calibrates a window kept by a sparse update at its own reading time, not the snapshot's", () => {
+    // A session tick at 12:00 restamped the snapshot; the weekly 80% was read at 11:55.
+    const kept = { ...weeklyWindow(80), observedAt: new Date(NOW - 5 * MINUTE).toISOString() };
+    const result = calibrateObservation({
+      ...base,
+      window: kept,
+      observation: reading([kept]),
+      costs: [dailyHistory(NOW)],
+    });
+    expect(result).toMatchObject({ kind: "calibrated", observedAtMs: NOW - 5 * MINUTE });
+    expect(calibratedUsd(result)).toBeCloseTo((500 + (100 * (12 * 60 - 5)) / (12 * 60)) / 0.8);
+    // Kept past the freshness bound, it no longer calibrates however fresh the snapshot is.
+    const old = { ...weeklyWindow(80), observedAt: new Date(NOW - 20 * MINUTE).toISOString() };
+    expect(
+      calibrateObservation({
+        ...base,
+        window: old,
+        observation: reading([old]),
+        costs: [dailyHistory(NOW)],
+      }),
+    ).toBe("stale");
+  });
+
+  it("does not calibrate a window that opened before the account was confirmed on its homes", () => {
+    const window = weeklyWindow(80);
+    // The weekly window opened 2026-11-17T00:00Z; the account was first seen a day later.
+    const unconfirmed = {
+      ...dailyHistory(NOW),
+      accountSinceMs: Date.parse("2026-11-18T00:00:00.000Z"),
+    };
+    expect(
+      calibrateObservation({
+        ...base,
+        window,
+        observation: reading([window]),
+        costs: ["incomplete", unconfirmed],
+      }),
+    ).toBe("accountHistory");
+    expect(
+      calibrateObservation({
+        ...base,
+        window,
+        observation: reading([window]),
+        costs: [{ ...unconfirmed, accountSinceMs: Date.parse("2026-11-17T00:00:00.000Z") }],
+      }),
+    ).toMatchObject({ kind: "calibrated" });
+  });
+
+  it("never reports no limit for a mixed-account aggregate", () => {
+    const proReading = reading([weeklyWindow(40)]);
+    for (const auth of [
+      { label: "ChatGPT Pro 200 Subscription" },
+      { label: "ChatGPT Plus Subscription" },
+    ]) {
+      const estimate = estimateProviderLimits({
+        provider: "codex",
+        planSetting: undefined,
+        auth,
+        observation: proReading,
+        account: null,
+        costs: { blocked: "mixedAccounts" },
+        remembered: {},
+        nowMs: NOW,
+      });
+      expect(estimate.rates.session.basis).not.toBe("noLimit");
+      expect(estimate.rates.session).toMatchObject({ blocked: "mixedAccounts" });
+      expect(estimate.rates.session.windowUnreported).toBeUndefined();
+    }
+  });
+
+  it("replaces a remembered figure when the same reading calibrates again on settled data", () => {
+    const at = NOW - 5 * MINUTE;
+    const estimate = (usdPerWindow: number) => ({
+      provider: "codex" as const,
+      plan: plan("codex-pro-200"),
+      planSource: "detected" as const,
+      detectedPlanId: "codex-pro-200",
+      account: "email:codex:a",
+      rates: {
+        weekly: { basis: "calibrated" as const, usdPerWindow, usedPercent: 40, observedAtMs: at },
+        session: { basis: "public" as const, usdPerWindow: 115 },
+      },
+    });
+    const first = rememberCalibrations({}, [estimate(250)], NOW);
+    expect(rememberCalibrations(first, [estimate(250)], NOW)).toBe(first);
+    expect(rememberCalibrations(first, [estimate(500)], NOW).codex?.weekly).toMatchObject({
+      usdPerWindow: 500,
+      at,
+    });
   });
 });

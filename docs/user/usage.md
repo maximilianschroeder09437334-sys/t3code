@@ -124,6 +124,10 @@ that fills a whole window. That figure comes from the first of these that is ava
    of a 5-hour window, a successful limit check from the last 15 minutes, and complete usage from
    every environment that may use the same account. It is skipped when the selected environments
    use more than one account, or when another environment's usage can't be matched to an account.
+   Transcripts don't record their account, so it is also skipped when a provider's history sits in
+   a home T3 can't tie to the account (a disabled or signed-out instance, or a default home kept
+   after the instance moved), and for a window that opened before this browser first saw the
+   account on that instance, such as right after switching accounts.
 2. **Earlier window:** the last calibration of the same account and plan from the past 21 days,
    kept in this browser.
 3. **Public estimate:** third-party measurements for the plan, from November 2026. Claude Pro
@@ -132,7 +136,8 @@ that fills a whole window. That figure comes from the first of these that is ava
    about $1,650 a week. Pro 5-hour figures are derived from the weekly figure.
 
 A window reads **No limit** only when a current, successful check of a plan known to drop that
-window, such as ChatGPT Pro's 5-hour window, lists no such window. Otherwise a missing window reads
+window, such as ChatGPT Pro's 5-hour window, lists no such window, and never when the selected
+environments use more than one account. Otherwise a missing window reads
 as an estimate or **Unknown**. Each provider's usage by type and speed is a share of that
 provider's own limit, so shares of different providers are never added together.
 

@@ -81,6 +81,8 @@ describe("missing limit states", () => {
     expect(text("incomplete")).toContain("Waiting for complete usage data");
     expect(text("mixedAccounts")).toContain("more than one account");
     expect(text("otherAccounts")).toContain("can't tell apart");
+    expect(text("unattributedHistory")).toContain("can't tie to this account");
+    expect(text("accountHistory")).toContain("seen here for a whole window");
     // Early in a window a thin reading is normal and needs no note.
     expect(text("thin")).toBe("$700.00 API fills it, public estimate for ChatGPT Pro 200.");
   });

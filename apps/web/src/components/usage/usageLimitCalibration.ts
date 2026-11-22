@@ -2,7 +2,9 @@
 /**
  * Decides which live limit reading and which cost history may calibrate a provider's limits.
  * A reading belongs to one account, so cost counts only from environments known to use that
- * account, and only once every such environment has settled on complete data.
+ * account, and only once every such environment has settled on complete data. Transcripts carry
+ * no account, so history counts only from homes that can be tied to the account: no extra or
+ * signed-out homes, and only since this browser has seen the account on each instance.
  */
 import {
   USAGE_CONTRACT_VERSION,
@@ -55,15 +57,49 @@ export function accountIdentity(provider: ServerProvider): string | null {
   return null;
 }
 
+function isSignedIn(entry: ServerProvider): boolean {
+  return entry.enabled && entry.auth.status !== "unauthenticated";
+}
+
 function instancesOf(
   providers: readonly ServerProvider[],
   provider: EstimateProvider,
 ): readonly ServerProvider[] {
   const driver = PROVIDER_PRESENTATION[provider].driverKind;
   // A signed-out instance has no account to compare.
-  return providers.filter(
-    (entry) => entry.driver === driver && entry.enabled && entry.auth.status !== "unauthenticated",
-  );
+  return providers.filter((entry) => entry.driver === driver && isSignedIn(entry));
+}
+
+type LedgerEntry = { readonly account: string; readonly sinceMs: number };
+
+/** Since when this browser has seen each instance signed in to its current account. */
+export type AccountLedger = { readonly [instance: string]: LedgerEntry | undefined };
+
+const ledgerKey = (environmentId: EnvironmentId, instanceId: string) =>
+  `${environmentId}/${instanceId}`;
+
+/**
+ * Records each signed-in instance's account. A new or changed account starts now: its home may
+ * hold an earlier account's transcripts, so only windows opening after this can calibrate.
+ */
+export function updateAccountLedger(
+  previous: AccountLedger,
+  environments: readonly EnvironmentProviders[],
+  nowMs: number,
+): AccountLedger {
+  let next: Record<string, LedgerEntry | undefined> | null = null;
+  for (const { environmentId, providers } of environments) {
+    for (const server of providers ?? []) {
+      if (!isSignedIn(server)) continue;
+      const account = accountIdentity(server);
+      if (account === null) continue;
+      const key = ledgerKey(environmentId, server.instanceId);
+      if (previous[key]?.account === account) continue;
+      next ??= { ...previous };
+      next[key] = { account, sinceMs: nowMs };
+    }
+  }
+  return next ?? previous;
 }
 
 function observationOf(server: ServerProvider): LimitObservation | undefined {
@@ -155,6 +191,35 @@ function relationTo(
   return "unknown";
 }
 
+/**
+ * Whether every transcript home of the provider in an environment can be tied to the observed
+ * account: no disabled or signed-out instance may own one, and there may be no more homes than
+ * signed-in instances, such as a default home kept after the instance moved elsewhere.
+ */
+function homesAttributed(
+  environment: EnvironmentProviders,
+  summary: UsageSummary,
+  provider: EstimateProvider,
+  signedIn: number,
+): boolean {
+  const driver = PROVIDER_PRESENTATION[provider].driverKind;
+  const extraInstance = (environment.providers ?? []).some(
+    (entry) => entry.driver === driver && !isSignedIn(entry),
+  );
+  if (extraInstance) return false;
+  const homes = summary.sources.filter(
+    (source) =>
+      source.fingerprint.provider === provider &&
+      (source.status !== "missing" ||
+        summary.buckets.some(
+          (bucket) =>
+            bucket.provider === provider &&
+            bucket.sourcePath === source.fingerprint.resolvedHomePath,
+        )),
+  );
+  return homes.length <= signedIn;
+}
+
 function providerCost(status: EnvironmentUsageStatus, provider: EstimateProvider): number {
   return (
     status.summary?.buckets.reduce(
@@ -176,6 +241,7 @@ function accountCostHistory(input: {
   readonly window: UsageSummaryInput;
   readonly statuses: readonly EnvironmentUsageStatus[];
   readonly environments: readonly EnvironmentProviders[];
+  readonly accounts: AccountLedger;
 }): CostHistory | CalibrationBlock {
   const { provider, picked, window } = input;
   if (picked.mixedAccounts) return "mixedAccounts";
@@ -185,9 +251,11 @@ function accountCostHistory(input: {
   const included: { readonly status: EnvironmentUsageStatus; readonly summary: UsageSummary }[] =
     [];
   let observedIncluded = false;
+  let accountSinceMs = Number.NEGATIVE_INFINITY;
   for (const status of input.statuses) {
     if (!status.canReadDiagnostics) continue;
-    const relation = relationTo(byId.get(status.environmentId), provider, observed, picked.account);
+    const environment = byId.get(status.environmentId);
+    const relation = relationTo(environment, provider, observed, picked.account);
     if (relation === "other") continue;
     const isObserved = status.environmentId === observed.environmentId;
     const { summary } = status;
@@ -196,15 +264,15 @@ function accountCostHistory(input: {
       if (isObserved || relation !== "none") return "incomplete";
       continue;
     }
-    if (!isObserved && providerCost(status, provider) === 0) {
-      // A refresh may still add cost; a settled zero adds nothing.
-      if (status.isPending && relation !== "none") return "incomplete";
-      continue;
-    }
-    if (relation !== "same") return "otherAccounts";
+    const cost = providerCost(status, provider);
+    // Zero is a settled zero only once the answer is final, readable and complete: a cached
+    // answer while a scan refreshes may still gain cost.
     if (status.isPending) return "incomplete";
     if (!isCompatibleUsageContractVersion(summary.contractVersion, USAGE_CONTRACT_VERSION)) {
-      return "incomplete";
+      const holdsProvider =
+        cost > 0 || summary.sources.some((source) => source.fingerprint.provider === provider);
+      if (isObserved || relation !== "none" || holdsProvider) return "incomplete";
+      continue;
     }
     const unsettled = summary.sources.some(
       (source) =>
@@ -212,6 +280,21 @@ function accountCostHistory(input: {
         (source.refreshing === true || source.status === "partial" || source.status === "failed"),
     );
     if (unsettled) return "incomplete";
+    if (!isObserved && cost === 0) continue;
+    if (relation !== "same" || environment === undefined) return "otherAccounts";
+    const signedIn = instancesOf(environment.providers ?? [], provider);
+    if (!homesAttributed(environment, summary, provider, signedIn.length)) {
+      return "unattributedHistory";
+    }
+    for (const server of signedIn) {
+      const seen = input.accounts[ledgerKey(status.environmentId, server.instanceId)];
+      // Without a confirmed account, any of this home's history may be another account's.
+      const sinceMs =
+        seen !== undefined && picked.account !== null && seen.account === picked.account
+          ? seen.sinceMs
+          : Number.POSITIVE_INFINITY;
+      accountSinceMs = Math.max(accountSinceMs, sinceMs);
+    }
     included.push({ status, summary });
     if (isObserved) observedIncluded = true;
   }
@@ -237,12 +320,14 @@ function accountCostHistory(input: {
       periods: hourlyCostPeriods(merged.hourly, provider),
       coverageStartMs: Date.parse(window.sinceTime),
       dataEndMs,
+      accountSinceMs,
     };
   }
   return {
     periods: dailyCostPeriods(merged.daily, provider, window.timeZone),
     coverageStartMs: zonedDayStartMs(window.sinceDay, window.timeZone),
     dataEndMs,
+    accountSinceMs,
   };
 }
 
@@ -261,6 +346,8 @@ export function estimateLimits(input: {
   readonly hourly: CalibrationQuery;
   readonly planSettings: { readonly [P in EstimateProvider]?: string | undefined };
   readonly remembered: RememberedCalibrations;
+  /** Already updated with the current environments. */
+  readonly accounts: AccountLedger;
   readonly nowMs: number;
 }): readonly ProviderLimitEstimate[] {
   const { environments, selectedEnvironmentIds } = input;
@@ -277,6 +364,7 @@ export function estimateLimits(input: {
         window: query.window,
         statuses: query.statuses,
         environments,
+        accounts: input.accounts,
       });
     return estimateProviderLimits({
       provider,
@@ -291,6 +379,42 @@ export function estimateLimits(input: {
       nowMs: input.nowMs,
     });
   });
+}
+
+export const ACCOUNT_LEDGER_KEY = "t3code:usage-limit-accounts:v1";
+
+export function readAccountLedger(storage: Pick<Storage, "getItem"> | undefined): AccountLedger {
+  try {
+    const raw: unknown = JSON.parse(storage?.getItem(ACCOUNT_LEDGER_KEY) ?? "{}");
+    if (typeof raw !== "object" || raw === null) return {};
+    const ledger: Record<string, LedgerEntry> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      const entry = value as { readonly account?: unknown; readonly sinceMs?: unknown } | null;
+      if (
+        typeof entry?.account === "string" &&
+        entry.account.length > 0 &&
+        typeof entry.sinceMs === "number" &&
+        Number.isFinite(entry.sinceMs) &&
+        entry.sinceMs >= 0
+      ) {
+        ledger[key] = { account: entry.account, sinceMs: entry.sinceMs };
+      }
+    }
+    return ledger;
+  } catch {
+    return {};
+  }
+}
+
+export function writeAccountLedger(
+  storage: Pick<Storage, "setItem"> | undefined,
+  ledger: AccountLedger,
+): void {
+  try {
+    storage?.setItem(ACCOUNT_LEDGER_KEY, JSON.stringify(ledger));
+  } catch {
+    // A blocked store only means accounts count as newly seen on the next visit.
+  }
 }
 
 /** v2 scopes each entry to an account; unscoped v1 entries are never read. */

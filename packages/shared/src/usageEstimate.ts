@@ -283,7 +283,7 @@ const STRUCTURE_MAX_AGE_MS = 24 * 3_600_000;
 /** One live limits reading of one account. */
 export interface LimitObservation {
   readonly windows: readonly ServerProviderUsageWindow[];
-  /** When the windows were read. */
+  /** When the snapshot was last updated; a window's own `observedAt` may be older. */
   readonly checkedAtMs: number;
   /** The last probe failed, so the windows are an older retained reading. */
   readonly probeFailed: boolean;
@@ -295,6 +295,11 @@ export interface CostHistory {
   readonly coverageStartMs: number;
   /** The data runs through this instant. */
   readonly dataEndMs: number;
+  /**
+   * Since when the transcript homes behind this history are known to have used the observed
+   * account. A window that opened earlier may hold another account's usage.
+   */
+  readonly accountSinceMs: number;
 }
 
 /** Why a live reading did not calibrate. */
@@ -306,6 +311,8 @@ export type CalibrationBlock =
   | "incomplete"
   | "otherAccounts"
   | "mixedAccounts"
+  | "unattributedHistory"
+  | "accountHistory"
   | "thin";
 
 export type Calibration =
@@ -340,8 +347,21 @@ export function calibrateWindow(input: {
 }
 
 /**
+ * When one window was read. A sparse update keeps an omitted window's older time, so the
+ * snapshot time alone would pair an old percentage with newer cost.
+ */
+export function windowObservedAtMs(
+  window: ServerProviderUsageWindow,
+  observation: LimitObservation,
+): number {
+  if (window.observedAt === undefined) return observation.checkedAtMs;
+  const ms = Date.parse(window.observedAt);
+  return Number.isFinite(ms) ? Math.min(ms, observation.checkedAtMs) : Number.NaN;
+}
+
+/**
  * Calibrates one window when the reading is current and successful and a cost history covers
- * the window up to the reading. Cost counts only through the reading's own time.
+ * the window up to the reading. Cost counts only through the window's own reading time.
  */
 export function calibrateObservation(input: {
   readonly measure: LimitMeasure;
@@ -354,7 +374,7 @@ export function calibrateObservation(input: {
 }): Calibration | CalibrationBlock {
   const { measure, observation, window, nowMs } = input;
   if (observation.probeFailed) return "probeFailed";
-  const observedAtMs = observation.checkedAtMs;
+  const observedAtMs = windowObservedAtMs(window, observation);
   if (
     !Number.isFinite(observedAtMs) ||
     observedAtMs > nowMs + CLOCK_TOLERANCE_MS ||
@@ -380,6 +400,11 @@ export function calibrateObservation(input: {
       reason ??= "incomplete";
       continue;
     }
+    // Usage from before the account was confirmed on these homes may be another account's.
+    if (!(history.accountSinceMs <= startMs)) {
+      if (reason === null || reason === "incomplete") reason = "accountHistory";
+      continue;
+    }
     return calibrateWindow({
       measure,
       usedPercent: window.usedPercent,
@@ -402,12 +427,11 @@ export function sessionLimitAbsenceVerified(
 ): boolean {
   if (observation === undefined || observation.probeFailed) return false;
   if (detectedPlanId === null || !WEEKLY_ONLY_PLANS.has(detectedPlanId)) return false;
-  const age = nowMs - observation.checkedAtMs;
+  const weekly = mainLimitWindow(observation.windows, "weekly");
+  if (weekly === undefined) return false;
+  const age = nowMs - windowObservedAtMs(weekly, observation);
   if (!(age >= -CLOCK_TOLERANCE_MS && age <= STRUCTURE_MAX_AGE_MS)) return false;
-  return (
-    mainLimitWindow(observation.windows, "weekly") !== undefined &&
-    !observation.windows.some((window) => window.kind === "session")
-  );
+  return !observation.windows.some((window) => window.kind === "session");
 }
 
 export interface RememberedCalibration {
@@ -615,12 +639,19 @@ export function estimateProviderLimits(input: {
   const { provider, observation, costs, nowMs } = input;
   const detectedPlanId = detectPlan(provider, input.auth);
   const { plan, source } = resolvePlan(provider, input.planSetting, detectedPlanId);
+  // One account's reading says nothing about the windows of the others in a mixed selection.
+  const mixedAccounts = "blocked" in costs && costs.blocked === "mixedAccounts";
   const readingSucceeded =
-    observation !== undefined && !observation.probeFailed && observation.windows.length > 0;
+    !mixedAccounts &&
+    observation !== undefined &&
+    !observation.probeFailed &&
+    observation.windows.length > 0;
 
   const rateFor = (measure: LimitMeasure): LimitRate => {
     const verifiedNoLimit =
-      measure === "session" && sessionLimitAbsenceVerified(detectedPlanId, observation, nowMs);
+      !mixedAccounts &&
+      measure === "session" &&
+      sessionLimitAbsenceVerified(detectedPlanId, observation, nowMs);
     const window =
       observation === undefined ? undefined : mainLimitWindow(observation.windows, measure);
     const publicUsd = measure === "weekly" ? plan.weeklyUsd : plan.sessionUsd;
@@ -686,11 +717,13 @@ export function rememberCalibrations(
       // Never stamp a reading later than now, so its age stays nonnegative.
       const at = Math.min(rate.observedAtMs, nowMs);
       const current = previous[estimate.provider]?.[measure];
+      // The same reading may calibrate again once more cost history has settled; the later
+      // figure then replaces the earlier one.
       if (
         current !== undefined &&
         current.account === estimate.account &&
         current.planId === estimate.plan.id &&
-        current.at >= at
+        (current.at > at || (current.at === at && current.usdPerWindow === rate.usdPerWindow))
       ) {
         continue;
       }

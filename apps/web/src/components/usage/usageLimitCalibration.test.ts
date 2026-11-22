@@ -15,14 +15,21 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EnvironmentUsageStatus } from "../../state/usage";
+import type { LimitEstimates } from "./usageLimitEstimates";
 import {
+  ACCOUNT_LEDGER_KEY,
   CALIBRATION_KEY,
   accountIdentity,
   estimateLimits,
+  readAccountLedger,
   readRemembered,
+  updateAccountLedger,
+  writeAccountLedger,
   writeRemembered,
+  type AccountLedger,
   type EnvironmentProviders,
 } from "./usageLimitCalibration";
+import { missingShareLabel, rateBasisText } from "./usageLimitText";
 
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
@@ -170,6 +177,8 @@ function run(input: {
   readonly hourly?: readonly EnvironmentUsageStatus[];
   readonly selected?: ReadonlySet<EnvironmentId> | null;
   readonly remembered?: RememberedCalibrations;
+  /** Defaults to every signed-in account seen long before any window opened. */
+  readonly accounts?: AccountLedger;
   readonly nowMs?: number;
 }): ProviderLimitEstimate {
   const [estimate] = estimateLimits({
@@ -181,6 +190,7 @@ function run(input: {
     hourly: { window: HOURLY, statuses: input.hourly ?? [] },
     planSettings: {},
     remembered: input.remembered ?? {},
+    accounts: input.accounts ?? updateAccountLedger({}, input.environments, 0),
     nowMs: input.nowMs ?? NOW,
   });
   return estimate!;
@@ -278,7 +288,7 @@ describe("account scoping", () => {
     expect(estimate.rates.weekly).toMatchObject({ basis: "public", blocked: "otherAccounts" });
   });
 
-  it("ignores a signed-out instance when telling accounts apart", () => {
+  it("keeps a signed-out instance out of the account but blocks the history it may own", () => {
     const signedOut = {
       ...codex({ email: null, instanceId: "codex-2" }),
       auth: { status: "unauthenticated" },
@@ -287,8 +297,12 @@ describe("account scoping", () => {
       environments: [{ environmentId: ENV_A, providers: [codex({}), signedOut] }],
       daily: settledA(),
     });
-    expect(estimate.account).not.toBeNull();
-    expect(estimate.rates.weekly.basis).toBe("calibrated");
+    expect(estimate.account).toBe(accountIdentity(codex({})));
+    expect(estimate.rates.weekly).toMatchObject({
+      basis: "public",
+      blocked: "unattributedHistory",
+    });
+    expect(rememberCalibrations({}, [estimate], NOW)).toEqual({});
   });
 
   it("adds the same account's cost from every environment", () => {
@@ -466,5 +480,212 @@ describe("remembered storage", () => {
     expect(readRemembered(blocked)).toEqual({});
     expect(() => writeRemembered(blocked, { codex: { weekly: entry } })).not.toThrow();
     expect(readRemembered(undefined)).toEqual({});
+  });
+});
+
+/** Adds a second transcript home of the same provider to one environment's answer. */
+function withHome(
+  answer: UsageSummary,
+  home: string,
+  perDay: readonly number[],
+  sourceStatus: "ok" | "missing" = "ok",
+): UsageSummary {
+  const template = answer.sources[0]!;
+  return {
+    ...answer,
+    buckets: [
+      ...answer.buckets,
+      ...perDay.map((costUsd, index) => ({
+        ...answer.buckets[0]!,
+        day: `2026-11-${17 + index}` as UsageSummary["sinceDay"],
+        sourcePath: home,
+        costUsd,
+      })),
+    ],
+    sources: [
+      ...answer.sources,
+      {
+        ...template,
+        fingerprint: { ...template.fingerprint, resolvedHomePath: home },
+        status: sourceStatus,
+      },
+    ],
+  };
+}
+
+describe("transcript ownership", () => {
+  const disabledB = {
+    ...codex({ email: "b@example.com", instanceId: "codex-b" }),
+    enabled: false,
+  } as ServerProvider;
+
+  it("never counts a disabled account's separate home toward the signed-in account", () => {
+    // A reads 55% with $550 of its own; B's home holds $600 more this week, or nothing yet.
+    for (const bWeek of [[100, 100, 100, 100, 100, 100], []]) {
+      const estimate = run({
+        environments: [{ environmentId: ENV_A, providers: [codex({}), disabledB] }],
+        daily: [status(ENV_A, withHome(summary(ENV_A, WEEK), "/home/b/.codex", bWeek))],
+      });
+      expect(estimate.rates.weekly).toMatchObject({
+        basis: "public",
+        blocked: "unattributedHistory",
+      });
+      expect(rememberCalibrations({}, [estimate], NOW)).toEqual({});
+    }
+  });
+
+  it("blocks a default home kept after the instance moved, but not an absent one", () => {
+    const kept = run({
+      environments: one(),
+      daily: [status(ENV_A, withHome(summary(ENV_A, WEEK), "/home/env-a/.codex-default", [40]))],
+    });
+    expect(kept.rates.weekly).toMatchObject({ basis: "public", blocked: "unattributedHistory" });
+    const absent = run({
+      environments: one(),
+      daily: [
+        status(ENV_A, withHome(summary(ENV_A, WEEK), "/home/env-a/.codex-default", [], "missing")),
+      ],
+    });
+    expect(absent.rates.weekly.usdPerWindow).toBeCloseTo(550 / 0.55);
+  });
+
+  it("does not calibrate a window that opened before an account switch in the same home", () => {
+    const earlier = Date.parse("2026-11-10T00:00:00.000Z");
+    const seenAsB = updateAccountLedger({}, one(codex({ email: "b@example.com" })), earlier);
+    // The home now signs in as A; its history this week may still be B's.
+    const switched = updateAccountLedger(seenAsB, one(), NOW - HOUR);
+    expect(switched).not.toBe(seenAsB);
+    const estimate = run({ environments: one(), daily: settledA(), accounts: switched });
+    expect(estimate.rates.weekly).toMatchObject({ basis: "public", blocked: "accountHistory" });
+    expect(rememberCalibrations({}, [estimate], NOW)).toEqual({});
+    // First sight is no proof either, and an unrecorded instance never calibrates.
+    const unconfirmed: AccountLedger[] = [updateAccountLedger({}, one(), NOW - HOUR), {}];
+    for (const accounts of unconfirmed) {
+      expect(run({ environments: one(), daily: settledA(), accounts }).rates.weekly).toMatchObject(
+        { blocked: "accountHistory" },
+      );
+    }
+    // Seen as A since before the window opened on 2026-11-17, it calibrates and keeps its stamp.
+    const steady = updateAccountLedger({}, one(), earlier);
+    expect(updateAccountLedger(steady, one(), NOW)).toBe(steady);
+    expect(run({ environments: one(), daily: settledA(), accounts: steady }).rates.weekly.basis).toBe(
+      "calibrated",
+    );
+  });
+
+  it("stores the account ledger and survives corrupt or blocked storage", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => void values.set(key, value),
+    };
+    const ledger = updateAccountLedger({}, one(), NOW);
+    writeAccountLedger(storage, ledger);
+    expect(readAccountLedger(storage)).toEqual(ledger);
+    values.set(
+      ACCOUNT_LEDGER_KEY,
+      JSON.stringify({ good: { account: "a", sinceMs: 1 }, bad: { account: "", sinceMs: -1 } }),
+    );
+    expect(readAccountLedger(storage)).toEqual({ good: { account: "a", sinceMs: 1 } });
+    values.set(ACCOUNT_LEDGER_KEY, "{not json");
+    expect(readAccountLedger(storage)).toEqual({});
+    const blocked = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {
+        throw new Error("blocked");
+      },
+    };
+    expect(readAccountLedger(blocked)).toEqual({});
+    expect(() => writeAccountLedger(blocked, ledger)).not.toThrow();
+  });
+});
+
+describe("environments that answer with no cost", () => {
+  const sameAccountTwice: EnvironmentProviders[] = [
+    { environmentId: ENV_A, providers: [codex({})] },
+    { environmentId: ENV_B, providers: [codex({ checkedAtMs: NOW - HOUR })] },
+  ];
+
+  it.each([
+    ["still refreshing", { refreshing: true }],
+    ["partial", { status: "partial" as const }],
+    ["failed", { status: "failed" as const }],
+    ["from an incompatible server", { contractVersion: USAGE_CONTRACT_VERSION + 1 }],
+  ])("waits for an empty answer %s, then stores only the completed figure", (_label, options) => {
+    const intermediate = run({
+      environments: sameAccountTwice,
+      daily: [
+        status(ENV_A, summary(ENV_A, WEEK)),
+        status(ENV_B, summary(ENV_B, [], options), { isPending: false }),
+      ],
+    });
+    expect(intermediate.rates.weekly).toMatchObject({ basis: "public", blocked: "incomplete" });
+    expect(rememberCalibrations({}, [intermediate], NOW)).toEqual({});
+    // B's scan finishes with its own $550: the figure doubles, and only that one is stored.
+    const completed = run({
+      environments: sameAccountTwice,
+      daily: [status(ENV_A, summary(ENV_A, WEEK)), status(ENV_B, summary(ENV_B, WEEK))],
+    });
+    expect(completed.rates.weekly.usdPerWindow).toBeCloseTo(1100 / 0.55);
+    expect(rememberCalibrations({}, [completed], NOW).codex?.weekly?.usdPerWindow).toBeCloseTo(
+      1100 / 0.55,
+    );
+  });
+
+  it("still counts a settled empty answer as zero", () => {
+    const estimate = run({
+      environments: sameAccountTwice,
+      daily: [status(ENV_A, summary(ENV_A, WEEK)), status(ENV_B, summary(ENV_B, []))],
+    });
+    expect(estimate.rates.weekly.usdPerWindow).toBeCloseTo(550 / 0.55);
+  });
+});
+
+describe("mixed accounts never read as no limit", () => {
+  const plusSession: ServerProviderUsageWindow = {
+    id: "session",
+    kind: "session",
+    label: "5h",
+    usedPercent: 30,
+    resetsAt: iso(NOW + 3 * HOUR),
+    windowDurationMins: 300,
+  };
+  const plus = (checkedAtMs: number) =>
+    codex({
+      email: "b@example.com",
+      label: "ChatGPT Plus Subscription",
+      windows: [weekly(40), plusSession],
+      checkedAtMs,
+    });
+
+  it.each([
+    ["Pro listed first and newer", codex({}), plus(NOW - MINUTE), false],
+    ["Plus listed first, Pro newer", codex({}), plus(NOW - MINUTE), true],
+    ["Plus newer", codex({ checkedAtMs: NOW - MINUTE }), plus(NOW), false],
+  ])("with %s", (_label, pro, plusServer, plusFirst) => {
+    const entries: EnvironmentProviders[] = [
+      { environmentId: ENV_A, providers: [pro] },
+      { environmentId: ENV_B, providers: [plusServer] },
+    ];
+    const estimate = run({
+      environments: plusFirst ? entries.toReversed() : entries,
+      daily: [status(ENV_A, summary(ENV_A, WEEK)), status(ENV_B, summary(ENV_B, WEEK))],
+    });
+    expect(estimate.account).toBeNull();
+    expect(estimate.rates.session.basis).not.toBe("noLimit");
+    expect(estimate.rates.session).toMatchObject({ blocked: "mixedAccounts" });
+    const value: LimitEstimates = {
+      measure: "session",
+      byProvider: new Map([["codex", estimate]]),
+      rates: new Map(),
+      onMeasureChange: () => {},
+      onPlanChange: () => {},
+    };
+    expect(missingShareLabel(value, "codex")).not.toBe("No limit");
+    const text = rateBasisText(estimate.rates.session, "session", estimate);
+    expect(text).not.toContain("No 5-hour limit");
+    expect(text).toContain("more than one account");
   });
 });

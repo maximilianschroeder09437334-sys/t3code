@@ -25,8 +25,12 @@ import { useUsage } from "../../state/usage";
 import type { ShareRates } from "./UsageProviderChart";
 import {
   estimateLimits,
+  readAccountLedger,
   readRemembered,
+  updateAccountLedger,
+  writeAccountLedger,
   writeRemembered,
+  type AccountLedger,
   type EnvironmentProviders,
 } from "./usageLimitCalibration";
 
@@ -110,6 +114,7 @@ function LimitEstimatesValue({
   const presentations = useAtomValue(environmentPresentations.presentationsWithProvidersAtom);
   // Read once; later calibrations only matter to the next visit.
   const [remembered] = useState(() => readRemembered(browserStorage()));
+  const [seenAccounts, setSeenAccounts] = useState(() => readAccountLedger(browserStorage()));
 
   useImperativeHandle(ref, () => ({
     refresh: async () => {
@@ -126,6 +131,30 @@ function LimitEstimatesValue({
       providers: presentation.serverConfig?.providers ?? null,
     }),
   );
+  // A new or switched account counts from when it is first seen, so earlier history in its
+  // home never calibrates it.
+  const accounts = updateAccountLedger(seenAccounts, environments, nowMs);
+  const accountsKey = accounts === seenAccounts ? "" : JSON.stringify(accounts);
+  const persistAccounts = useEffectEvent(() => {
+    const storage = browserStorage();
+    // Another tab may have seen the same account earlier; its stamp stays valid.
+    const next: Record<string, AccountLedger[string]> = { ...accounts };
+    for (const [key, entry] of Object.entries(readAccountLedger(storage))) {
+      const current = next[key];
+      if (entry === undefined) continue;
+      if (current === undefined) next[key] = entry;
+      else if (current.account === entry.account && entry.sinceMs < current.sinceMs) {
+        next[key] = entry;
+      }
+    }
+    writeAccountLedger(storage, next);
+    setSeenAccounts(next);
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stamps newly seen accounts once, so their since time stays fixed across renders and visits
+  useEffect(() => {
+    if (accountsKey !== "") persistAccounts();
+  }, [accountsKey]);
+
   const estimates = estimateLimits({
     providers: ESTIMATE_PROVIDERS.filter((provider) => !hiddenProviders.has(provider)),
     environments,
@@ -134,17 +163,18 @@ function LimitEstimatesValue({
     hourly: { window: windows.hourly, statuses: hourly.environments },
     planSettings,
     remembered,
+    accounts,
     nowMs,
   });
 
-  // Only settled calibrations persist; the key changes once per new reading.
+  // Only settled calibrations persist; the key changes with each new reading or figure.
   const toRemember = refreshing ? [] : estimates.filter((estimate) => estimate.account !== null);
   const rememberKey = JSON.stringify(
     toRemember.flatMap((estimate) =>
       (["weekly", "session"] as const).flatMap((measureKey) => {
         const rate = estimate.rates[measureKey];
         return rate.basis === "calibrated"
-          ? [estimate.provider, measureKey, estimate.account, rate.observedAtMs]
+          ? [estimate.provider, measureKey, estimate.account, rate.observedAtMs, rate.usdPerWindow]
           : [];
       }),
     ),
