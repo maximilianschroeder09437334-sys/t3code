@@ -96,7 +96,13 @@ import {
   type LimitEstimates,
   type LimitEstimatesHandle,
 } from "./usageLimitEstimates";
-import { missingShareLabel, rateBasisText, shareRowDetail } from "./usageLimitText";
+import {
+  MEASURE_HEADING,
+  missingShareLabel,
+  modelShareColumns,
+  rateBasisText,
+  shareRowDetail,
+} from "./usageLimitText";
 import {
   costTypeSegments,
   limitShareSegments,
@@ -668,6 +674,8 @@ function UsageOverview({
     (provider) => providersWithData.has(provider) || loading.providers.has(provider),
   );
   const estimates = useLimitEstimates();
+  // Phones show one share column, so it is the selected window's.
+  const shareColumns = modelShareColumns(estimates?.measure ?? "weekly");
   // Only Claude Code and Codex have estimates; the Usage view leaves other providers out.
   const shownProviders =
     estimates === null
@@ -753,7 +761,7 @@ function UsageOverview({
                   : formatTokens(merged.totalTokens)}
             </p>
             {estimates !== null ? (
-              <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <p className="inline-flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                 <span>
                   {topShare === undefined
                     ? "No Claude Code or Codex usage"
@@ -872,7 +880,7 @@ function UsageOverview({
               {shownHourly ? "Hourly" : "Daily"} {metric === "tokens" ? "processed tokens" : "cost"}
             </h2>
           ) : (
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
               <h2 className="text-sm font-medium text-foreground">
                 {shownHourly ? "Hourly" : "Daily"} share of {LIMIT_MEASURE_LABEL[estimates.measure]}{" "}
                 limit <span className="font-normal text-muted-foreground">· estimate</span>
@@ -1037,9 +1045,11 @@ function UsageOverview({
               <tr className="border-b border-border text-right text-xs text-muted-foreground">
                 <th className="py-2 pr-3 pl-2 text-left font-normal">#</th>
                 <th className="w-full py-2 text-left font-normal">Model</th>
-                <th className="py-2 pl-6 font-normal">{estimates === null ? "Cost" : "Weekly"}</th>
+                <th className="py-2 pl-6 font-normal">
+                  {estimates === null ? "Cost" : MEASURE_HEADING[shareColumns.primary]}
+                </th>
                 <th className="hidden py-2 pl-6 font-normal sm:table-cell">
-                  {estimates === null ? "Share" : "5-hour"}
+                  {estimates === null ? "Share" : MEASURE_HEADING[shareColumns.secondary]}
                 </th>
                 <th className="py-2 pr-2 pl-6 font-normal">Tokens</th>
               </tr>
@@ -1092,7 +1102,9 @@ function UsageOverview({
                         {isModelCostUnknown(model) ? (
                           <span className="text-muted-foreground">Unpriced</span>
                         ) : estimates !== null ? (
-                          formatLimitShare(share(model.provider, model.costUsd, "weekly"))
+                          formatLimitShare(
+                            share(model.provider, model.costUsd, shareColumns.primary),
+                          )
                         ) : (
                           formatUsd(model.costUsd)
                         )}
@@ -1101,7 +1113,9 @@ function UsageOverview({
                         {estimates !== null
                           ? isModelCostUnknown(model)
                             ? ""
-                            : formatLimitShare(share(model.provider, model.costUsd, "session"))
+                            : formatLimitShare(
+                                share(model.provider, model.costUsd, shareColumns.secondary),
+                              )
                           : rowShare === null
                             ? ""
                             : formatPercent(rowShare)}
@@ -1213,18 +1227,22 @@ const PLAN_AUTO = "auto";
 function LimitEstimateDetails({ estimates }: { readonly estimates: LimitEstimates }) {
   return (
     <Popover>
-      <PopoverTrigger render={<InlineButton tone="muted" />} aria-label="How limits are estimated">
+      <PopoverTrigger
+        render={<InlineButton tone="muted" touchTarget="padded" />}
+        aria-label="How limits are estimated"
+      >
         <InfoIcon className="size-3" aria-hidden />
       </PopoverTrigger>
-      <PopoverPopup side="bottom" align="start" className="w-80">
-        <div className="flex flex-col gap-4 text-xs text-muted-foreground">
+      {/* Bounded by the viewport so it stays readable and scrollable on a phone. */}
+      <PopoverPopup side="bottom" align="start" width="md">
+        <div className="flex max-h-[min(70vh,32rem)] flex-col gap-4 overflow-y-auto text-xs text-muted-foreground">
           <p>
             Estimated from API-priced cost divided by what a full window holds. Models count by
             their API price.
           </p>
           {[...estimates.byProvider.values()].map((estimate) => (
             <div key={estimate.provider} className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                 <span className="flex items-center gap-2 text-sm text-foreground">
                   <ProviderMark provider={estimate.provider} className="size-3.5" />
                   {PROVIDER_PRESENTATION[estimate.provider].label}
@@ -1247,7 +1265,7 @@ function LimitEstimateDetails({ estimates }: { readonly estimates: LimitEstimate
                     <SelectValue>
                       {estimate.planSource === "setting"
                         ? estimate.plan.label
-                        : `${estimate.plan.label} (${estimate.planSource === "detected" ? "detected" : "default"})`}
+                        : `${estimate.plan.label} · ${estimate.planSource === "detected" ? "detected" : "default"}`}
                     </SelectValue>
                   </SelectTrigger>
                   <SelectPopup align="end" alignItemWithTrigger={false}>

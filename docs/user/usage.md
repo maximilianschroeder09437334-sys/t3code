@@ -127,8 +127,8 @@ that fills a whole window. That figure comes from the first of these that is ava
 2. **Earlier window:** the last calibration of the same account and plan from the past 21 days,
    kept in this browser.
 3. **Public estimate:** third-party measurements for the plan, from November 2026. Claude Pro
-   about $165 a week and $13 per 5 hours, Max about $1,250 and $125, Ultra (Max 20x) about $1,600
-   and $280. ChatGPT Plus about $55 and $7.50, Pro 100 about $350, Pro 200 about $700 and Pro 500
+   ($20) about $165 a week and $13 per 5 hours, Max 5x ($100) about $1,250 and $125, Max 20x /
+   Ultra ($200) about $1,600 and $280. ChatGPT Plus about $55 and $7.50, Pro 100 about $350, Pro 200 about $700 and Pro 500
    about $1,650 a week. Pro 5-hour figures are derived from the weekly figure.
 
 A window reads **No limit** only when a current, successful check of a plan known to drop that
@@ -137,8 +137,8 @@ as an estimate or **Unknown**. Each provider's usage by type and speed is a shar
 provider's own limit, so shares of different providers are never added together.
 
 Select the info icon under the headline to see which source each window uses and to set your plan.
-The plan is detected from the account's sign-in when possible, otherwise Claude defaults to Max and
-Codex to Plus. Models count by their API price, because providers publish no per-model weights for
+The plan is detected from the account's sign-in when possible. A Claude sign-in that only says Max,
+or no plan at all, counts as Max 5x ($100); Codex defaults to Plus. Models count by their API price, because providers publish no per-model weights for
 the shared limits. Usage that Usage cannot see, such as the Claude or ChatGPT apps or other
 machines, also fills the limits, so calibrated figures read low when you use those. These are
 estimates, not provider figures.

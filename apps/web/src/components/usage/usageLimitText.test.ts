@@ -6,7 +6,13 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import type { LimitEstimates } from "./usageLimitEstimates";
-import { missingShareLabel, rateBasisText, shareRowDetail } from "./usageLimitText";
+import {
+  MEASURE_HEADING,
+  missingShareLabel,
+  modelShareColumns,
+  rateBasisText,
+  shareRowDetail,
+} from "./usageLimitText";
 
 const plan = (id: string) => SUBSCRIPTION_PLANS.find((entry) => entry.id === id)!;
 
@@ -77,5 +83,13 @@ describe("missing limit states", () => {
     expect(text("otherAccounts")).toContain("can't tell apart");
     // Early in a window a thin reading is normal and needs no note.
     expect(text("thin")).toBe("$700.00 API fills it, public estimate for ChatGPT Pro 200.");
+  });
+});
+
+describe("model share columns", () => {
+  it("puts the selected window first, the only share column a phone shows", () => {
+    expect(modelShareColumns("session")).toEqual({ primary: "session", secondary: "weekly" });
+    expect(modelShareColumns("weekly")).toEqual({ primary: "weekly", secondary: "session" });
+    expect(MEASURE_HEADING[modelShareColumns("session").primary]).toBe("5-hour");
   });
 });

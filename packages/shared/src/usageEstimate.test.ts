@@ -85,6 +85,41 @@ describe("detectPlan", () => {
   });
 });
 
+describe("Claude Max 5x", () => {
+  it("maps every Max 5x sign-in to the $100 plan and only 20x sign-ins to Ultra", () => {
+    for (const auth of [
+      { type: "claude_max_5x_subscription", label: "Claude Max Subscription" },
+      { type: "max5", label: "Claude Max Subscription" },
+      { type: "max", label: "Claude Max Subscription" },
+      { type: "claude_max_subscription" },
+    ]) {
+      expect(detectPlan("claude", auth)).toBe("claude-max");
+    }
+    expect(
+      detectPlan("claude", {
+        type: "claude_max_20x_subscription",
+        label: "Claude Ultra Subscription",
+      }),
+    ).toBe("claude-ultra");
+    expect(detectPlan("claude", { type: "max20" })).toBe("claude-ultra");
+  });
+
+  it("has a public figure for the $100 plan and uses it when the plan is unknown", () => {
+    const { plan: fallback, source } = resolvePlan("claude", undefined, null);
+    expect(source).toBe("default");
+    expect(fallback).toMatchObject({
+      id: "claude-max",
+      label: "Claude Max 5x ($100)",
+      weeklyUsd: 1250,
+      sessionUsd: 125,
+    });
+    // Still changeable by the setting.
+    expect(resolvePlan("claude", "claude-ultra", "claude-max").plan.label).toBe(
+      "Claude Max 20x / Ultra ($200)",
+    );
+  });
+});
+
 describe("resolvePlan", () => {
   it("prefers the setting, then detection, then the provider default", () => {
     expect(resolvePlan("claude", "claude-pro", "claude-ultra")).toMatchObject({

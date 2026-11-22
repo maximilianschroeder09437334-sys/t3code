@@ -26,12 +26,25 @@ export interface SubscriptionPlan {
  * Codex Pro 5-hour figures are weekly / 6, Plus's measured ratio.
  */
 export const SUBSCRIPTION_PLANS: readonly SubscriptionPlan[] = [
-  { id: "claude-pro", provider: "claude", label: "Claude Pro", weeklyUsd: 165, sessionUsd: 13 },
-  { id: "claude-max", provider: "claude", label: "Claude Max", weeklyUsd: 1250, sessionUsd: 125 },
+  {
+    id: "claude-pro",
+    provider: "claude",
+    label: "Claude Pro ($20)",
+    weeklyUsd: 165,
+    sessionUsd: 13,
+  },
+  // Max 5x, the $100 plan: mulletiq.com measured $1,248 a week and $125 per 5 hours.
+  {
+    id: "claude-max",
+    provider: "claude",
+    label: "Claude Max 5x ($100)",
+    weeklyUsd: 1250,
+    sessionUsd: 125,
+  },
   {
     id: "claude-ultra",
     provider: "claude",
-    label: "Claude Ultra (Max 20x)",
+    label: "Claude Max 20x / Ultra ($200)",
     weeklyUsd: 1600,
     sessionUsd: 280,
   },
@@ -59,6 +72,7 @@ export const SUBSCRIPTION_PLANS: readonly SubscriptionPlan[] = [
   },
 ];
 
+/** A plain "max" sign-in does not tell 5x from 20x, so it and an unknown plan mean Max 5x. */
 const DEFAULT_PLAN: Record<EstimateProvider, string> = {
   claude: "claude-max",
   codex: "codex-plus",
@@ -93,6 +107,7 @@ export function detectPlan(
   if (text.includes("apikey") || text.includes("bedrock")) return null;
   if (provider === "claude") {
     if (text.includes("ultra") || text.includes("max20")) return "claude-ultra";
+    // Max 5x (claude_max_5x_subscription, max5) and a plain "max" sign-in.
     if (text.includes("max")) return "claude-max";
     if (text.includes("pro")) return "claude-pro";
     return null;

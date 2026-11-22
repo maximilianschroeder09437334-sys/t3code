@@ -80,3 +80,21 @@ export function rateBasisText(
       return `${unreported}Unknown: no ${window} figure for ${estimate.plan.label}.${notes}`;
   }
 }
+
+export const MEASURE_HEADING: Record<LimitMeasure, string> = {
+  weekly: "Weekly",
+  session: "5-hour",
+};
+
+/**
+ * The model table's share columns: the selected window first, because narrow screens show only
+ * the first; the other window follows where there is room.
+ */
+export function modelShareColumns(measure: LimitMeasure): {
+  readonly primary: LimitMeasure;
+  readonly secondary: LimitMeasure;
+} {
+  return measure === "weekly"
+    ? { primary: "weekly", secondary: "session" }
+    : { primary: "session", secondary: "weekly" };
+}
