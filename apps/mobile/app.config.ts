@@ -246,7 +246,9 @@ const config: ExpoConfig = {
   scheme: isMaxiBuild ? ["t3code-maxi", variant.scheme] : variant.scheme,
   // fingerprint.config.js and the production workflow match this exact line; keep the override below it.
   version: repoEnv.T3CODE_MOBILE_VERSION ?? "2.3.0",
-  ...(isMaxiBuild ? { version: isMaxiAndroidBuild ? MAXI_ANDROID_MARKETING_VERSION : MAXI_IOS_MARKETING_VERSION } : {}),
+  ...(isMaxiBuild
+    ? { version: isMaxiAndroidBuild ? MAXI_ANDROID_MARKETING_VERSION : MAXI_IOS_MARKETING_VERSION }
+    : {}),
   runtimeVersion: {
     // Skip costly fingerprinting on dev launches; preview and production OTAs require matching native projects.
     policy: runtimeVersionPolicy,
