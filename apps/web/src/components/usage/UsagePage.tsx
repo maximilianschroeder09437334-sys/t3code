@@ -81,6 +81,7 @@ import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
+import { UsageModelTable } from "./UsageModelTable";
 import { UsageShareBar } from "./UsageShareBar";
 import {
   LIMIT_MEASURE_LABEL,
@@ -1040,95 +1041,48 @@ function UsageOverview({
         </div>
 
         {breakdown === "model" ? (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-right text-xs text-muted-foreground">
-                <th className="py-2 pr-3 pl-2 text-left font-normal">#</th>
-                <th className="w-full py-2 text-left font-normal">Model</th>
-                <th className="py-2 pl-6 font-normal">
-                  {estimates === null ? "Cost" : MEASURE_HEADING[shareColumns.primary]}
-                </th>
-                <th className="hidden py-2 pl-6 font-normal sm:table-cell">
-                  {estimates === null ? "Share" : MEASURE_HEADING[shareColumns.secondary]}
-                </th>
-                <th className="py-2 pr-2 pl-6 font-normal">Tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              {breakdownModels.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="py-6 text-center text-muted-foreground">
-                    No activity in this window.
-                  </td>
-                </tr>
-              ) : (
-                breakdownModels.map((model, index) => {
-                  const key = `${model.provider}:${model.model}`;
-                  const value = modelValue(model);
-                  const hasBar = value > 0 && breakdownPeak > 0;
-                  const rowShare = modelShare(model, metric === "tokens" ? "tokens" : "cost");
-                  const rowFigures = figureClass(loadingProviders.has(model.provider));
-                  return (
-                    <tr
-                      key={key}
-                      className="relative border-b border-border/50 text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-muted/50 has-focus-visible:bg-muted/50"
-                    >
-                      <td className="py-2.5 pr-3 pl-2 text-left text-xs">{index + 1}</td>
-                      <td className="py-2.5 text-left whitespace-normal">
-                        <button
-                          type="button"
-                          onClick={() => onSelectModel(key)}
-                          className={cn(
-                            "flex items-center gap-2 text-left text-foreground outline-none after:absolute after:inset-0",
-                            !hasBar && "py-1",
-                          )}
-                        >
-                          <ProviderMark provider={model.provider} className="size-3.5" />
-                          {model.model}
-                        </button>
-                        {hasBar ? (
-                          <div aria-hidden className={cn("mt-1.5 h-0.5 max-w-48", rowFigures)}>
-                            <div
-                              className="h-full rounded-full"
-                              style={{
-                                width: `max(0.5rem, ${(value / breakdownPeak) * 100}%)`,
-                                backgroundColor: PROVIDER_PRESENTATION[model.provider].color,
-                              }}
-                            />
-                          </div>
-                        ) : null}
-                      </td>
-                      <td className={cn("py-2.5 pl-6 text-foreground", rowFigures)}>
-                        {isModelCostUnknown(model) ? (
-                          <span className="text-muted-foreground">Unpriced</span>
-                        ) : estimates !== null ? (
-                          formatLimitShare(
-                            share(model.provider, model.costUsd, shareColumns.primary),
-                          )
-                        ) : (
-                          formatUsd(model.costUsd)
-                        )}
-                      </td>
-                      <td className={cn("hidden py-2.5 pl-6 sm:table-cell", rowFigures)}>
-                        {estimates !== null
-                          ? isModelCostUnknown(model)
-                            ? ""
-                            : formatLimitShare(
-                                share(model.provider, model.costUsd, shareColumns.secondary),
-                              )
-                          : rowShare === null
-                            ? ""
-                            : formatPercent(rowShare)}
-                      </td>
-                      <td className={cn("py-2.5 pr-2 pl-6", rowFigures)}>
-                        {formatTokens(model.totalTokens)}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+          <UsageModelTable
+            headings={
+              estimates === null
+                ? { primary: "Cost", secondary: "Share" }
+                : {
+                    primary: MEASURE_HEADING[shareColumns.primary],
+                    secondary: MEASURE_HEADING[shareColumns.secondary],
+                  }
+            }
+            rows={breakdownModels.map((model) => {
+              const value = modelValue(model);
+              const rowShare = modelShare(model, metric === "tokens" ? "tokens" : "cost");
+              const unpriced = isModelCostUnknown(model);
+              return {
+                key: `${model.provider}:${model.model}`,
+                model: model.model,
+                mark: <ProviderMark provider={model.provider} className="size-3.5" />,
+                color: PROVIDER_PRESENTATION[model.provider].color,
+                barFraction: value > 0 && breakdownPeak > 0 ? value / breakdownPeak : null,
+                primary: unpriced ? (
+                  <span className="text-muted-foreground">Unpriced</span>
+                ) : estimates !== null ? (
+                  formatLimitShare(share(model.provider, model.costUsd, shareColumns.primary))
+                ) : (
+                  formatUsd(model.costUsd)
+                ),
+                secondary:
+                  estimates !== null
+                    ? unpriced
+                      ? ""
+                      : formatLimitShare(
+                          share(model.provider, model.costUsd, shareColumns.secondary),
+                        )
+                    : rowShare === null
+                      ? ""
+                      : formatPercent(rowShare),
+                tokens: formatTokens(model.totalTokens),
+                figuresClassName: figureClass(loadingProviders.has(model.provider)),
+              };
+            })}
+            onSelect={onSelectModel}
+          />
         ) : (
           <div
             className="overflow-x-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
@@ -1138,21 +1092,21 @@ function UsageOverview({
           >
             <table className="w-full text-sm whitespace-nowrap">
               <colgroup>
-                <col className="w-2/5" />
+                <col className="sm:w-2/5" />
               </colgroup>
               <thead>
                 <tr className="border-b border-border text-left text-xs text-muted-foreground">
                   <th className="py-2 pl-2 font-normal">{shownHourly ? "Hour" : "Day"}</th>
                   {shownProviders.map((provider) => (
-                    <th key={provider} className="py-2 pl-4 text-right font-normal">
+                    <th key={provider} className="py-2 pl-2 text-right font-normal sm:pl-4">
                       {PROVIDER_PRESENTATION[provider].label}
                     </th>
                   ))}
                   {/* Shares of different providers' limits do not add up. */}
                   {estimates === null ? (
-                    <th className="py-2 pl-4 text-right font-normal">Total</th>
+                    <th className="py-2 pl-2 text-right font-normal sm:pl-4">Total</th>
                   ) : null}
-                  <th className="py-2 pr-2 pl-4 text-right font-normal">Tokens</th>
+                  <th className="hidden py-2 pr-2 pl-4 text-right font-normal sm:table-cell">Tokens</th>
                 </tr>
               </thead>
               <tbody>
@@ -1182,7 +1136,7 @@ function UsageOverview({
                           <td
                             key={provider}
                             className={cn(
-                              "py-2 pl-4 text-right text-muted-foreground tabular-nums",
+                              "py-2 pl-2 text-right text-muted-foreground tabular-nums sm:pl-4",
                               figureClass(loadingProviders.has(provider)),
                             )}
                           >
@@ -1195,7 +1149,7 @@ function UsageOverview({
                       {estimates === null ? (
                         <td
                           className={cn(
-                            "py-2 pl-4 text-right text-foreground tabular-nums",
+                            "py-2 pl-2 text-right text-foreground tabular-nums sm:pl-4",
                             figureClass(loadingPartial),
                           )}
                         >
@@ -1204,7 +1158,7 @@ function UsageOverview({
                       ) : null}
                       <td
                         className={cn(
-                          "py-2 pr-2 pl-4 text-right text-muted-foreground tabular-nums",
+                          "hidden py-2 pr-2 pl-4 text-right text-muted-foreground tabular-nums sm:table-cell",
                           figureClass(loadingPartial),
                         )}
                       >
