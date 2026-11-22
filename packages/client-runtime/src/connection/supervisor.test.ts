@@ -557,7 +557,7 @@ describe("EnvironmentSupervisor", () => {
         delays.push(delay);
         yield* TestClock.adjust(delay);
       }
-      // Ten minutes of 4 s checks, then backoff that never polls faster than that.
+      // Approval checks remain frequent; expired approvals keep using the normal backoff.
       expect(delays.slice(0, 150).every((delay) => delay === 4_000)).toBe(true);
       expect(delays.slice(150).every((delay) => delay >= 4_000)).toBe(true);
       expect(delays.at(-1)).toBeGreaterThanOrEqual(32_000);
@@ -1047,6 +1047,29 @@ describe("EnvironmentSupervisor", () => {
         (state) => state.phase === "connected" && state.generation === 2,
       );
       expect(yield* Ref.get(harness.hostChecks)).toEqual(["RelayConnectionTarget"]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("replaces the socket immediately after a mobile network path change", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        prepare: (_attempt, target) => Effect.succeed(preparedFor(target)),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(LAN_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      const reconnected = yield* Effect.forkChild(
+        awaitState(
+          supervisor.state,
+          (state) => state.phase === "connected" && state.generation === 2,
+        ),
+      );
+      yield* harness.wake("network-path-changed");
+      yield* Fiber.join(reconnected);
+      expect(yield* Ref.get(harness.sessionCount)).toBe(2);
+      expect(yield* Ref.get(harness.releaseCount)).toBe(1);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 

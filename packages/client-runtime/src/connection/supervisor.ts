@@ -152,8 +152,10 @@ export interface EnvironmentSupervisorOptions {
   }) => Effect.Effect<Option.Option<ConnectionCatalogEntry>>;
 }
 
-function retryDelayMs(failureCount: number, random: number): number {
-  const ceiling = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (failureCount + 1));
+function retryDelayMs(failureCount: number, random: number, foreground: boolean): number {
+  const base = foreground ? 250 : RETRY_BASE_DELAY_MS;
+  const maximum = foreground ? 4_000 : RETRY_MAX_DELAY_MS;
+  const ceiling = Math.min(maximum, base * 2 ** (failureCount + 1));
   return Math.round(ceiling / 2 + (ceiling / 2) * random);
 }
 
@@ -309,6 +311,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   const intent = yield* Ref.make(initialIntent);
   const signals = yield* Queue.unbounded<SupervisorSignal>();
   const resetRetryState = yield* Ref.make(false);
+  const foregroundFastRetry = yield* Ref.make(false);
   const probeUnanswered = yield* Ref.make(false);
   const state = yield* SubscriptionRef.make<SupervisorConnectionState>(
     !initialIntent.desired
@@ -640,6 +643,12 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     }
     if (next._tag === "BetterRouteAvailable") {
       yield* Ref.set(preferredRouteId, Option.some(next.routeId));
+      return "reset" as const;
+    }
+    if (next._tag === "Wakeup" && next.reason === "network-path-changed") {
+      return "reset" as const;
+    }
+    if (next._tag === "NetworkChanged" && next.network !== "offline") {
       return "reset" as const;
     }
     // Only a session over T3 Connect holds the old account's credential.
@@ -1238,16 +1247,19 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       const awaitingApproval =
         error.reason === "approval-pending" && approvalWaits <= APPROVAL_PENDING_FAST_RETRIES;
       if (!awaitingApproval) backoffFailures += 1;
+      const fastRetry = yield* Ref.get(foregroundFastRetry);
       const delayMs = awaitingApproval
         ? APPROVAL_PENDING_RETRY_DELAY_MS
         : firstLoss
-          ? Math.round(SESSION_LOSS_RETRY_DELAY_MS * (0.5 + (yield* Random.next) / 2))
+          ? fastRetry
+            ? 0
+            : Math.round(SESSION_LOSS_RETRY_DELAY_MS * (0.5 + (yield* Random.next) / 2))
           : error.reason === "approval-pending"
             ? Math.max(
                 APPROVAL_PENDING_RETRY_DELAY_MS,
-                retryDelayMs(backoffFailures - 1, yield* Random.next),
+                retryDelayMs(backoffFailures - 1, yield* Random.next, fastRetry),
               )
-            : retryDelayMs(backoffFailures - 1, yield* Random.next);
+            : retryDelayMs(backoffFailures - 1, yield* Random.next, fastRetry);
       pendingRetry = Option.map(attemptSpan, (previousAttempt) => ({
         previousAttempt,
         failureCount,
@@ -1295,10 +1307,26 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     Stream.filter(ConnectionWakeups.reachesConnectionSupervisor),
     Stream.runForEach((reason) =>
       // A long suspension can hide a network change the platform never reported.
-      (reason === "network-changed" || reason === "application-active-long"
+      (reason === "network-changed" ||
+      reason === "network-path-changed" ||
+      reason === "application-active-long"
         ? forgetSilentRoutes
         : Effect.void
-      ).pipe(Effect.andThen(signal({ _tag: "Wakeup", reason }))),
+      ).pipe(
+        Effect.andThen(
+          reason === "application-background"
+            ? Ref.set(foregroundFastRetry, false)
+            : reason === "network-changed" ||
+                reason === "network-path-changed" ||
+                reason === "application-active" ||
+                reason === "application-active-long"
+              ? Ref.set(foregroundFastRetry, true)
+              : Effect.void,
+        ),
+        Effect.andThen(
+          reason === "application-background" ? Effect.void : signal({ _tag: "Wakeup", reason }),
+        ),
+      ),
     ),
     Effect.forkScoped,
   );

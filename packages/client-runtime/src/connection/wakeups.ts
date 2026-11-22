@@ -6,8 +6,10 @@ export type ConnectionWakeup =
   | "application-active"
   | "application-active-probe"
   | "application-active-long"
+  | "application-background"
   | "application-focused"
   | "credentials-changed"
+  | "network-path-changed"
   | "network-changed";
 
 function isApplicationActiveWakeup(reason: ConnectionWakeup): boolean {
@@ -19,7 +21,11 @@ function isApplicationActiveWakeup(reason: ConnectionWakeup): boolean {
 }
 
 export function resetsRetryBackoff(reason: ConnectionWakeup): boolean {
-  return isApplicationActiveWakeup(reason) || reason === "network-changed";
+  return (
+    isApplicationActiveWakeup(reason) ||
+    reason === "network-changed" ||
+    reason === "network-path-changed"
+  );
 }
 
 export function shouldResubscribeAfterWakeup(reason: ConnectionWakeup): boolean {

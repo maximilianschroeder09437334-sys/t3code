@@ -399,6 +399,51 @@ describe("RpcSessionFactory", () => {
     }),
   );
 
+  it.effect("keeps the mobile heartbeat healthy while a responsive host sends frames", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory({
+        pingInterval: "1 second",
+        pingTimeout: "2 seconds",
+      });
+      const session = yield* factory.connect(PREPARED);
+      const readyFiber = yield* Effect.forkChild(session.ready);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* completeInitialConfig(socket);
+      yield* Fiber.join(readyFiber);
+      const closedFiber = yield* Effect.forkChild(Effect.exit(session.closed));
+
+      for (let index = 0; index < 5; index++) {
+        yield* TestClock.adjust("1 second");
+        socket.serverMessage(encodeJson({ _tag: "Pong" }));
+        yield* Effect.yieldNow;
+      }
+
+      expect(closedFiber.pollUnsafe()).toBeUndefined();
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("drops a mobile socket after its short heartbeat timeout", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory({
+        pingInterval: "1 second",
+        pingTimeout: "2 seconds",
+      });
+      const session = yield* factory.connect(PREPARED);
+      const readyFiber = yield* Effect.forkChild(session.ready);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* completeInitialConfig(socket);
+      yield* Fiber.join(readyFiber);
+      const closedFiber = yield* Effect.forkChild(Effect.exit(session.closed));
+
+      yield* TestClock.adjust("3 seconds");
+      yield* Effect.yieldNow;
+
+      expect(closedFiber.pollUnsafe()).toBeDefined();
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
   it.effect("closes the websocket when the session scope is released", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();

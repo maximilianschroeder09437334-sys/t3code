@@ -7,6 +7,6 @@ type RpcClientFactory = typeof makeWsRpcProtocolClient;
 export type WsRpcProtocolClient =
   RpcClientFactory extends Effect.Effect<infer Client, any, any> ? Client : never;
 
-// Pings go out every 5 seconds, and a server busy for a few seconds stops
-// answering them. Allow 15 seconds without any frame before dropping the socket.
+// Defaults balance idle detection against hosts that are busy with provider work.
+export const PING_INTERVAL = "5 seconds";
 export const PING_TIMEOUT = "15 seconds";

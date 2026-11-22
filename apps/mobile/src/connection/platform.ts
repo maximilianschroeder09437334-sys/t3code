@@ -6,7 +6,6 @@ import {
   Wakeups,
 } from "@t3tools/client-runtime/connection";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
-import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -21,7 +20,6 @@ import { authClientMetadata } from "../lib/authClientMetadata";
 import * as Runtime from "../lib/runtime";
 import * as MobileStorage from "../persistence/mobile-storage";
 import { appAtomRegistry } from "../state/atom-registry";
-import { mobileApplicationActiveWakeup } from "./app-state-wakeups";
 import * as EnvironmentOwnedDataCleanup from "./environment-owned-data-cleanup";
 import * as ConnectionStorage from "./storage";
 
@@ -78,23 +76,31 @@ const layerConnectivity = Connectivity.layer({
 });
 
 /** Wake connections on network path changes; online/offline misses Wi-Fi-to-cellular moves. */
-const networkPathChanges = Stream.callback<"network-changed">((queue) =>
+const networkPathChanges = Stream.callback<"network-path-changed">((queue) =>
   Effect.acquireRelease(
     Effect.sync(() => {
       let active = true;
       let previous: Network.NetworkStateType | undefined;
+      let previousConnected: boolean | undefined;
       const record = (state: Network.NetworkState) => {
         const type = state.isConnected === true ? state.type : undefined;
-        if (previous !== undefined && type !== undefined && type !== previous) {
-          Queue.offerUnsafe(queue, "network-changed");
+        const connected = state.isConnected === true;
+        if (
+          previousConnected !== undefined &&
+          connected &&
+          (!previousConnected || (type !== undefined && type !== previous))
+        ) {
+          Queue.offerUnsafe(queue, "network-path-changed");
         }
-        previous = type ?? previous;
+        if (type !== undefined) previous = type;
+        previousConnected = connected;
       };
       // Seed the current type: the listener reports only changes and would miss the first move.
       void Network.getNetworkStateAsync()
         .then((state) => {
           if (active && previous === undefined && state.isConnected === true) {
             previous = state.type;
+            previousConnected = true;
           }
         })
         .catch(() => undefined);
@@ -113,25 +119,14 @@ const networkPathChanges = Stream.callback<"network-changed">((queue) =>
 const layerWakeups = Wakeups.layer({
   changes: Stream.mergeAll(
     [
-      Stream.callback<"application-active-probe" | "application-active-long">((queue) =>
+      Stream.callback<"application-active-long" | "application-background">((queue) =>
         Effect.acquireRelease(
-          Effect.gen(function* () {
-            const nowMs = yield* Clock.currentTimeMillis;
-            let backgroundedAtMs = AppState.currentState === "background" ? nowMs : null;
-            return AppState.addEventListener("change", (state) => {
-              if (state === "background") {
-                backgroundedAtMs = Date.now();
-                return;
-              }
-              if (state === "active") {
-                Queue.offerUnsafe(
-                  queue,
-                  mobileApplicationActiveWakeup(backgroundedAtMs, Date.now()),
-                );
-                backgroundedAtMs = null;
-              }
-            });
-          }),
+          Effect.sync(() =>
+            AppState.addEventListener("change", (state) => {
+              if (state === "active") Queue.offerUnsafe(queue, "application-active-long");
+              else if (state === "background") Queue.offerUnsafe(queue, "application-background");
+            }),
+          ),
           (subscription) => Effect.sync(() => subscription.remove()),
         ).pipe(Effect.asVoid),
       ),
