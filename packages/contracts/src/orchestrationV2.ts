@@ -2269,6 +2269,29 @@ export const OrchestrationV2LatestVisibleMessageSummary = Schema.Struct({
 export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
+/** One thing a thread waits on, derived from that thread's own projection. */
+export const OrchestrationV2WaitTarget = Schema.Struct({
+  source: Schema.Literals([
+    "thread_wait",
+    "delegate_wait",
+    "subagent",
+    "awaited_child",
+    "report_wait",
+    "handoff",
+  ]),
+  /** Null means the waiting thread's own environment. */
+  environmentId: Schema.NullOr(EnvironmentId),
+  /** Null for work that has no thread yet (a starting delegate) or never gets one (a native subagent). */
+  threadId: Schema.NullOr(ThreadId),
+  title: Schema.NullOr(Schema.String),
+  taskId: Schema.optional(Schema.String),
+  itemId: Schema.optional(TurnItemId),
+});
+export type OrchestrationV2WaitTarget = typeof OrchestrationV2WaitTarget.Type;
+
+export const OrchestrationV2WaitPhase = Schema.Literals(["working", "waiting", "needs", "ended"]);
+export type OrchestrationV2WaitPhase = typeof OrchestrationV2WaitPhase.Type;
+
 export const OrchestrationV2ThreadShell = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -2323,6 +2346,10 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
     Schema.NullOr(Schema.Literals(["preparing", "starting", "running", "waiting"])),
   ),
   blockedOnThreadWait: Schema.optional(Schema.Boolean),
+  /** What this thread waits on, from its own projection only. Absent from older servers. */
+  waitingOn: Schema.optional(Schema.Array(OrchestrationV2WaitTarget)),
+  /** This thread's own wait state; clients join phases along `waitingOn`. Absent from older servers. */
+  waitPhase: Schema.optional(OrchestrationV2WaitPhase),
   status: OrchestrationV2ShellThreadStatus,
   lastError: Schema.optional(Schema.NullOr(Schema.String)),
   lastErrorClass: Schema.optional(Schema.NullOr(OrchestrationV2ProviderFailureClass)),
@@ -2394,10 +2421,13 @@ export function isLiveSubagentShell(
   thread: Pick<
     OrchestrationV2ThreadShell,
     "activityRunStatus" | "status" | "pendingRuntimeRequest" | "pendingBackgroundTasks"
-  >,
+  > &
+    Partial<Pick<OrchestrationV2ThreadShell, "waitPhase">>,
 ): boolean {
   return (
     (thread.activityRunStatus ?? null) !== null ||
+    // A child that waits on other work still holds its parent, so its Waiting can be resolved.
+    thread.waitPhase === "waiting" ||
     LIVE_SHELL_STATUSES.has(thread.status) ||
     thread.pendingRuntimeRequest !== null ||
     (thread.pendingBackgroundTasks?.length ?? 0) > 0

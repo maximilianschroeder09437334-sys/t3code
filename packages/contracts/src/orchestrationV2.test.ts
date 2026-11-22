@@ -12,8 +12,10 @@ import {
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
   OrchestrationV2Subagent,
+  OrchestrationV2ThreadShell,
   OrchestrationV2ThreadShellJson,
   OrchestrationV2SubagentJson,
+  isLiveSubagentShell,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
@@ -581,6 +583,90 @@ describe("thread open stats", () => {
     const opens = { openedAt: 1, score: 1, picks: [{ query: "upl", at: 1 }] };
     expect(decode({ ...shell, opens }).opens).toEqual(opens);
     expect(decode({ ...shell, opens: { openedAt: "2026-10-01", score: 1 } }).opens).toBeNull();
+  });
+});
+
+describe("thread wait fields across versions", () => {
+  const shell = {
+    id: "thread-test",
+    projectId: "project-test",
+    title: "Thread",
+    providerInstanceId: "codex",
+    modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    activeProviderThreadId: null,
+    lineage: { rootThreadId: "thread-test", parentThreadId: null, relationshipToParent: null },
+    forkedFrom: null,
+    createdBy: "user",
+    creationSource: "mobile",
+    latestRunId: null,
+    activeRunId: null,
+    status: "completed",
+    pendingRuntimeRequest: null,
+    latestVisibleMessage: null,
+    latestUserMessageAt: null,
+    hasActionableProposedPlan: false,
+    itemCount: 0,
+    visibleItemCount: 0,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+  };
+  const waitFields = {
+    waitPhase: "waiting",
+    waitingOn: [
+      {
+        source: "subagent",
+        environmentId: null,
+        threadId: null,
+        title: "Explore",
+        itemId: "item-1",
+        taskId: "toolu_1",
+      },
+    ],
+  };
+
+  it("a shell from an older server decodes without wait fields", () => {
+    const decoded = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson)(shell);
+    expect(decoded.waitPhase).toBeUndefined();
+    expect(decoded.waitingOn).toBeUndefined();
+  });
+
+  it("the prior decoder reads a newer shell and drops the wait fields", () => {
+    const { waitingOn: _waitingOn, waitPhase: _waitPhase, ...priorFields } =
+      OrchestrationV2ThreadShell.fields;
+    const priorDecode = Schema.decodeUnknownSync(Schema.toCodecJson(Schema.Struct(priorFields)));
+    const decoded = priorDecode({ ...shell, ...waitFields });
+    expect(decoded.title).toBe("Thread");
+    expect("waitPhase" in decoded).toBe(false);
+    expect("waitingOn" in decoded).toBe(false);
+  });
+
+  it("this decoder keeps the wait fields", () => {
+    const decoded = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson)({
+      ...shell,
+      ...waitFields,
+    });
+    expect(decoded.waitPhase).toBe("waiting");
+    expect(decoded.waitingOn?.[0]?.threadId).toBeNull();
+  });
+
+  it("a waiting subagent child stays live for shell trimming", () => {
+    const idle = {
+      activityRunStatus: null,
+      status: "completed" as const,
+      pendingRuntimeRequest: null,
+      pendingBackgroundTasks: [],
+    };
+    expect(isLiveSubagentShell(idle)).toBe(false);
+    expect(isLiveSubagentShell({ ...idle, waitPhase: "ended" })).toBe(false);
+    expect(isLiveSubagentShell({ ...idle, waitPhase: "waiting" })).toBe(true);
   });
 });
 
