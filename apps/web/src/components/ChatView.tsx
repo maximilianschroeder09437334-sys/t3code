@@ -138,7 +138,7 @@ import {
 } from "react";
 import { BackgroundThreadContext } from "./chat/backgroundThread";
 import { WorkspaceMutationIdContext } from "./chat/ChatMarkdownMedia";
-import { useLocation, useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   assistantCitationFromLocation,
   useSideChatCitationReveal,
@@ -604,6 +604,13 @@ export default function ChatView(props: ChatViewProps) {
   // Selects primitives: an object here is new on every router store update, which
   // re-renders ChatView on unrelated navigation state changes.
   const citationHref = useLocation({ select: (location) => location.href });
+  // Only a thread route's `?item=` names a turn item; Home's names a Home row.
+  const revealItemId =
+    useSearch({
+      from: "/_chat/$environmentId/$threadId",
+      shouldThrow: false,
+      select: (search) => search.item ?? null,
+    }) ?? null;
   const citationKey = useLocation({
     select: (location) => location.state.assistantCitationActivation ?? location.state.__TSR_key,
   });
@@ -3553,6 +3560,7 @@ export default function ChatView(props: ChatViewProps) {
                   {...(threadHistoryControls === undefined
                     ? {}
                     : { historyControls: threadHistoryControls })}
+                  revealItemId={embedded ? null : revealItemId}
                 />
               </WorkspaceMutationIdContext>
 

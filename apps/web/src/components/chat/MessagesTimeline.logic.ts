@@ -2873,3 +2873,53 @@ export function sameRowsInput(
   }
   return Object.keys(left).length === Object.keys(right).length;
 }
+
+/** The row that shows a turn item: its own row, a work group holding it, or the fold hiding it. */
+export function timelineRowIndexForItem(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  itemId: string,
+): number {
+  return rows.findIndex((row) => {
+    if (row.id === itemId) return true;
+    switch (row.kind) {
+      case "work":
+        return row.groupedEntries.some((entry) => entry.id === itemId);
+      case "work-live":
+        return row.entry.id === itemId || row.groupedEntries.some((entry) => entry.id === itemId);
+      case "turn-fold":
+      case "attempt-fold":
+        return row.deferredWorkItemIds?.includes(itemId) ?? false;
+      default:
+        return false;
+    }
+  });
+}
+
+export type TimelineItemRevealStep =
+  | { readonly kind: "scroll"; readonly index: number }
+  | { readonly kind: "load-earlier" }
+  | { readonly kind: "none" };
+
+/**
+ * What an `?item=` link needs next: scroll to the item's row, page in earlier history until the
+ * item is loaded, or nothing (no item, list not ready, or the item has no row to show).
+ */
+export function resolveTimelineItemReveal(input: {
+  readonly itemId: string | null;
+  readonly rows: ReadonlyArray<MessagesTimelineRow>;
+  readonly entries: ReadonlyArray<{ readonly id: string }>;
+  readonly listReady: boolean;
+  readonly history?:
+    | { readonly hasMoreHistory: boolean; readonly loading: boolean; readonly error: string | null }
+    | undefined;
+}): TimelineItemRevealStep {
+  if (input.itemId === null || !input.listReady) return { kind: "none" };
+  const index = timelineRowIndexForItem(input.rows, input.itemId);
+  if (index >= 0) return { kind: "scroll", index };
+  if (input.entries.some((entry) => entry.id === input.itemId)) return { kind: "none" };
+  const history = input.history;
+  if (history?.hasMoreHistory && !history.loading && history.error === null) {
+    return { kind: "load-earlier" };
+  }
+  return { kind: "none" };
+}
