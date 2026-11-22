@@ -489,6 +489,11 @@ export interface ActiveShellIndexEntry extends Pick<
 > {
   /** False only when no run, request, work item, or watch can make the shell live. */
   readonly mayBeLive: boolean;
+  /**
+   * For a subagent with an open run, the sender of its presented run: a superset of the shell's
+   * `latestRunSenderThreadId` while that run is open. Trims keep that sender (display only).
+   */
+  readonly openRunSenderThreadId: ThreadId | null;
   /** Whether it delegated a task to a linked environment, whose clients nest that task under it. */
   readonly hasRemoteTasks: boolean;
 }
@@ -8213,6 +8218,36 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
       )`;
     };
+    /**
+     * The in-memory sender walk from the run whose payload is `run`: hook and usage-limit
+     * continuations back to the run a message started, then that message's sender, one
+     * primary-key lookup per hop. `t` is the thread row.
+     */
+    const runSenderThreadId = (run: Statement.Fragment) => sql`(
+      WITH RECURSIVE sender_origin(payload_json, depth) AS (
+        SELECT ${run}, 0
+        UNION ALL
+        SELECT parent.payload_json, origin.depth + 1
+        FROM sender_origin origin JOIN orchestration_v2_projection_runs parent
+          ON parent.run_id = COALESCE(
+              json_extract(origin.payload_json, '$.hookContinuationOfRunId'),
+              json_extract(origin.payload_json, '$.usageLimitContinuationOfRunId')
+            )
+            AND parent.thread_id = t.thread_id
+            AND parent.run_id IS NOT json_extract(origin.payload_json, '$.id')
+        WHERE origin.depth < 8
+      )
+      SELECT CASE
+          WHEN json_type(sender_message.payload_json, '$.linkedSender') IS NULL
+            THEN json_extract(sender_message.payload_json, '$.senderThreadId')
+        END
+      FROM (
+        SELECT payload_json FROM sender_origin ORDER BY depth DESC LIMIT 1
+      ) origin
+      JOIN orchestration_v2_projection_messages sender_message
+        ON sender_message.message_id = json_extract(origin.payload_json, '$.userMessageId')
+          AND sender_message.thread_id = t.thread_id
+    )`;
     // The newest run not held or outlived before it started, matching latestUnheldRun.
     const presentedShellRunId = (threadId: Statement.Fragment) => sql`(
       SELECT candidate.run_id
@@ -8307,33 +8342,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     AND origin_message.message_id = json_extract(origin.payload_json, '$.userMessageId')
                 WHERE json_extract(origin_message.payload_json, '$.createdBy') = 'user'
               ) AS latest_run_human_authored,
-              (
-                -- The in-memory sender walk: hook and usage-limit continuations back to the run
-                -- a message started, then that message's sender, one primary-key lookup per hop.
-                WITH RECURSIVE sender_origin(payload_json, depth) AS (
-                  SELECT presented.payload_json, 0
-                  UNION ALL
-                  SELECT parent.payload_json, origin.depth + 1
-                  FROM sender_origin origin JOIN orchestration_v2_projection_runs parent
-                    ON parent.run_id = COALESCE(
-                        json_extract(origin.payload_json, '$.hookContinuationOfRunId'),
-                        json_extract(origin.payload_json, '$.usageLimitContinuationOfRunId')
-                      )
-                      AND parent.thread_id = t.thread_id
-                      AND parent.run_id IS NOT json_extract(origin.payload_json, '$.id')
-                  WHERE origin.depth < 8
-                )
-                SELECT CASE
-                    WHEN json_type(sender_message.payload_json, '$.linkedSender') IS NULL
-                      THEN json_extract(sender_message.payload_json, '$.senderThreadId')
-                  END
-                FROM (
-                  SELECT payload_json FROM sender_origin ORDER BY depth DESC LIMIT 1
-                ) origin
-                JOIN orchestration_v2_projection_messages sender_message
-                  ON sender_message.message_id = json_extract(origin.payload_json, '$.userMessageId')
-                    AND sender_message.thread_id = t.thread_id
-              ) AS latest_run_sender_thread_id,
+              ${runSenderThreadId(sql`presented.payload_json`)} AS latest_run_sender_thread_id,
               json_extract(presented.payload_json, '$.startedAt') AS latest_run_started_at,
               presented.completed_at AS latest_run_completed_at,
               EXISTS (
@@ -9581,6 +9590,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly snoozed_until: string | null;
         readonly may_be_live: number;
         readonly has_remote_tasks: number;
+        readonly open_run_sender_thread_id: string | null;
       }>`
         SELECT
           t.thread_id,
@@ -9671,7 +9681,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             WHERE subagent.origin = 'app_owned'
               AND subagent.child_thread_id IS NULL
               AND json_type(subagent.payload_json, '$.remoteChild') = 'object'
-          ) AS has_remote_tasks
+          ) AS has_remote_tasks,
+          CASE
+            WHEN json_extract(t.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+              AND EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_runs r
+                WHERE r.thread_id = t.thread_id
+                  AND r.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+              )
+              THEN ${runSenderThreadId(sql`(
+                SELECT presented.payload_json FROM orchestration_v2_projection_runs presented
+                WHERE presented.run_id = ${presentedShellRunId(sql.literal("t.thread_id"))}
+              )`)}
+          END AS open_run_sender_thread_id
         FROM orchestration_v2_projection_threads t
         WHERE t.deleted_at IS NULL
           AND t.archived_at IS NULL
@@ -9691,6 +9713,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
         mayBeLive: row.may_be_live === 1,
         hasRemoteTasks: row.has_remote_tasks === 1,
+        openRunSenderThreadId:
+          row.open_run_sender_thread_id === null
+            ? null
+            : ThreadId.make(row.open_run_sender_thread_id),
       }));
     }, Effect.mapError(shellSnapshotReadError));
 

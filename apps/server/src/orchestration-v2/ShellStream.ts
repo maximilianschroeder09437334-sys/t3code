@@ -248,14 +248,44 @@ function hiddenChildAncestorIds(
   return ancestorIds;
 }
 
+const OPEN_RUN_STATUSES: ReadonlySet<OrchestrationV2ThreadShell["status"]> = new Set([
+  "queued",
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+/**
+ * The thread, other than its parent, whose agent started a subagent's open run. Clients show that
+ * sender Waiting on the run (`waitDriverOf` in client-runtime threadWait), so a trim keeps it,
+ * even when the sender is a completed subagent with nothing else holding it. Display only.
+ */
+function openRunSenderId(thread: OrchestrationV2ThreadShell): string | null {
+  if (thread.lineage.relationshipToParent !== "subagent") return null;
+  const sender = thread.latestRunSenderThreadId ?? null;
+  if (sender === null || sender === thread.id || sender === thread.lineage.parentThreadId) {
+    return null;
+  }
+  const open = (thread.activityRunStatus ?? null) !== null || OPEN_RUN_STATUSES.has(thread.status);
+  return open ? sender : null;
+}
+
 function omitIdleSubagentShellsWith(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
   facts: Pick<ShellTrimFacts, "subagentParentIds" | "remoteTaskParentIds">,
 ): ReadonlyArray<OrchestrationV2ThreadShell> {
+  // From the shells themselves: an indexed read includes every live child, so both reads agree.
+  const senderIds = new Set<string>();
+  for (const thread of threads) {
+    const sender = openRunSenderId(thread);
+    if (sender !== null) senderIds.add(sender);
+  }
   return threads.filter(
     (thread) =>
       thread.lineage.relationshipToParent !== "subagent" ||
       isLiveSubagentShell(thread) ||
+      senderIds.has(thread.id) ||
       facts.subagentParentIds.has(thread.id) ||
       facts.remoteTaskParentIds.has(thread.id),
   );
@@ -298,10 +328,9 @@ function omitOlderSettledShellsWith(
 }
 
 /**
- * Idle subagent children have no sidebar row, so clients that opt in read them from their thread
- * family instead. A child stays while it is live or the parent of another child, so the request
- * and working walks over shell rows never meet a gap in a nested chain. It also stays as the
- * parent of a task in a linked environment, whose clients nest that task under it.
+ * Idle subagent children have no sidebar row; opted-in clients read them from their thread family.
+ * A child stays while live, the parent of another child (no gaps in nested walks), the sender of
+ * another child's open run (so its Waiting resolves), or the parent of a linked-environment task.
  */
 export function omitIdleSubagentShells(
   threads: ReadonlyArray<OrchestrationV2ThreadShell>,
@@ -374,12 +403,20 @@ function shellSubscriberThreadIds(
   options: ShellSubscriberOptions,
 ): ReadonlyArray<ThreadId> {
   const facts = shellTrimFacts(index);
+  // A superset of the senders `omitIdleSubagentShellsWith` keeps: senders of every live child.
+  const senderIds = new Set<string>();
+  for (const entry of index) {
+    if (entry.mayBeLive && entry.openRunSenderThreadId !== null) {
+      senderIds.add(entry.openRunSenderThreadId);
+    }
+  }
   const subagents = index.filter(
     (entry) =>
       entry.lineage.relationshipToParent === "subagent" &&
       (!options.omitIdleSubagents ||
         entry.mayBeLive ||
         entry.hasRemoteTasks ||
+        senderIds.has(entry.id) ||
         facts.subagentParentIds.has(entry.id)),
   );
   const ancestorIds = hiddenChildAncestorIds([

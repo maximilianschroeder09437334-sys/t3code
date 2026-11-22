@@ -26,7 +26,7 @@ import * as Statement from "effect/sql/Statement";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import { loadSubscriberShellSnapshot } from "./ShellStream.ts";
+import { activeShellRowsForSubscriber, loadSubscriberShellSnapshot } from "./ShellStream.ts";
 import { presentThreadShell } from "../../../../packages/client-runtime/src/state/models.ts";
 import {
   resolveThreadWaits,
@@ -640,7 +640,7 @@ it.effect("the sender lookup searches the messages primary key and adds no scan"
     const statements: Array<ReturnType<Statement.Statement<unknown>["compile"]>> = [];
     const observe: Statement.Transformer = (statement) => {
       const compiled = statement.compile();
-      if (compiled[0].includes("latest_run_sender_thread_id")) statements.push(compiled);
+      if (/(latest|open)_run_sender_thread_id/u.test(compiled[0])) statements.push(compiled);
       return Effect.succeed(statement);
     };
     yield* h.store
@@ -649,7 +649,15 @@ it.effect("the sender lookup searches the messages primary key and adds no scan"
     yield* h.store
       .getShellSnapshot()
       .pipe(Effect.provideService(Statement.CurrentTransformer, observe));
+    // The trims' index reads the same walk for live subagents.
+    yield* h.store
+      .listActiveShellIndex()
+      .pipe(Effect.provideService(Statement.CurrentTransformer, observe));
     assert.isAbove(statements.length, 0, "a shell read selects the sender");
+    assert.isTrue(
+      statements.some(([query]) => query.includes("open_run_sender_thread_id")),
+      "the shell index selects the sender",
+    );
     for (const [query, params] of statements) {
       const details = (yield* sql.unsafe<{ readonly detail: string }>(
         `EXPLAIN QUERY PLAN ${query}`,
@@ -794,6 +802,135 @@ it.effect(
         ),
         h.id("k"),
         "and the parent does not take it back",
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "a trimmed snapshot keeps a completed subagent sender while the sibling run it started is live",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness("sibling");
+      const sql = yield* SqlClient.SqlClient;
+      const environmentId = EnvironmentId.make("env-sibling");
+      const finish = Effect.fnUntraced(function* (name: string, ordinal = 1) {
+        yield* h.startRun(name, ordinal);
+        yield* h.message(name, ordinal);
+        yield* h.endRun(name, ordinal, "completed");
+      });
+      /** A fresh subscriber snapshot, as on reconnect: Home, no thread family mounted. */
+      const subscribe = (options: { omitIdleSubagents: boolean; omitOlderSettled: boolean }) =>
+        loadSubscriberShellSnapshot({
+          sql,
+          listShellIndex: h.store.listActiveShellIndex(),
+          readThreads: (threadIds) =>
+            h.store.readShellSnapshot({
+              location: "active",
+              ...(threadIds === undefined ? {} : { threadIds }),
+            }),
+          listProjects: Effect.succeed([]),
+          latestSequence: Effect.succeed(0),
+          options,
+        }).pipe(Effect.map((loaded) => loaded.snapshot.threads));
+      const resolve = (threads: ReadonlyArray<OrchestrationV2ThreadShell>, ready = true) =>
+        resolveThreadWaits({
+          threads: threads.map((thread) => presentThreadShell(environmentId, thread)),
+          environmentReady: () => ready,
+        });
+      const summary = (waits: ReturnType<typeof resolve>, name: string) => {
+        const wait = waits.get(threadWaitKey(environmentId, h.id(name)));
+        return wait === undefined
+          ? null
+          : {
+              waiting: wait.waiting,
+              open: wait.targets
+                .filter((target) => target.state !== "ended")
+                .map((target) => `${target.threadId ?? target.taskId}:${target.state}`)
+                .toSorted(),
+            };
+      };
+      const snapshots = Effect.gen(function* () {
+        const full = (yield* h.store.getShellSnapshot()).threads;
+        return {
+          full,
+          indexed: yield* subscribe({ omitIdleSubagents: true, omitOlderSettled: true }),
+          indexedIdleOnly: yield* subscribe({ omitIdleSubagents: true, omitOlderSettled: false }),
+          inMemory: activeShellRowsForSubscriber(full, true).threads,
+        };
+      });
+
+      // P finished. S and C are P's subagents; C went idle earlier. S's t3_thread_send resumes C
+      // (no tracking task under S), then S completes with nothing of its own left.
+      yield* h.createThread("p");
+      yield* finish("p");
+      yield* h.createThread("s", "p");
+      yield* h.createThread("c", "p");
+      yield* h.createThread("idle", "p");
+      yield* finish("idle");
+      yield* finish("c");
+      yield* h.startRun("s", 1);
+      yield* h.message("s", 1, { senderThreadId: h.id("p") });
+      yield* h.startRun("c", 2);
+      yield* h.message("c", 2, { senderThreadId: h.id("s") });
+      yield* h.endRun("s", 1, "completed");
+
+      const index = yield* h.store.listActiveShellIndex();
+      assert.equal(
+        index.find((entry) => entry.id === h.id("c"))?.openRunSenderThreadId,
+        h.id("s"),
+        "the index names the sender of C's open run",
+      );
+      assert.isNull(index.find((entry) => entry.id === h.id("idle"))?.openRunSenderThreadId);
+
+      const live = yield* snapshots;
+      const fullWaits = resolve(live.full);
+      assert.deepEqual(summary(fullWaits, "s"), { waiting: true, open: [`${h.id("c")}:live`] });
+      assert.deepEqual(summary(fullWaits, "p"), {
+        waiting: true,
+        open: [`${h.id("s")}:live`],
+      });
+      for (const [name, threads] of [
+        ["indexed", live.indexed],
+        ["indexed idle-only", live.indexedIdleOnly],
+        ["in-memory", live.inMemory],
+      ] as const) {
+        // P first: on the old trim it resolved not-waiting (Done) while C ran.
+        const waits = resolve(threads);
+        for (const thread of ["p", "s", "c"]) {
+          assert.deepEqual(summary(waits, thread), summary(fullWaits, thread), `${name} ${thread}`);
+        }
+        const ids = new Set(threads.map((thread) => thread.id));
+        assert.isTrue(ids.has(h.id("s")), `${name}: the completed sender S stays`);
+        assert.isFalse(ids.has(h.id("idle")), `${name}: the idle sibling is still trimmed`);
+      }
+
+      // Reconnect: disconnected keeps P waiting (unknown), a fresh trimmed snapshot restores it.
+      assert.isTrue(
+        resolve(live.indexed, false).get(threadWaitKey(environmentId, h.id("p")))?.waiting,
+      );
+      const reconnected = resolve(
+        yield* subscribe({ omitIdleSubagents: true, omitOlderSettled: true }),
+      );
+      assert.deepEqual(summary(reconnected, "p"), summary(fullWaits, "p"), "reconnected P");
+      assert.deepEqual(summary(reconnected, "s"), summary(fullWaits, "s"), "reconnected S");
+
+      // C completes: P and S clear in full and trimmed snapshots, and the idle S is trimmed again.
+      yield* h.endRun("c", 2, "completed");
+      const done = yield* snapshots;
+      for (const [name, threads] of [
+        ["full", done.full],
+        ["indexed", done.indexed],
+        ["indexed idle-only", done.indexedIdleOnly],
+        ["in-memory", done.inMemory],
+      ] as const) {
+        const waits = resolve(threads);
+        assert.isFalse(summary(waits, "p")?.waiting ?? false, `${name}: P clears`);
+        assert.isFalse(summary(waits, "s")?.waiting ?? false, `${name}: S clears`);
+      }
+      assert.notInclude(
+        done.indexed.map((thread) => thread.id),
+        h.id("s"),
+        "an idle sender with no open run is trimmed",
       );
     }).pipe(Effect.provide(layerTest)),
 );

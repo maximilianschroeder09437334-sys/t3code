@@ -756,6 +756,7 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
                 snoozedUntil: null,
                 mayBeLive: thread.activityRunStatus !== null,
                 hasRemoteTasks: thread.id.startsWith("remote-"),
+                openRunSenderThreadId: null,
               })),
             ),
           readShellSnapshot: (options?: { readonly threadIds?: ReadonlyArray<string> }) =>

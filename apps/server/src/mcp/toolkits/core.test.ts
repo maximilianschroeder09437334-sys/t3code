@@ -786,6 +786,7 @@ it.effect("an MCP pin lands above every existing pin, as a client pin does", () 
     pinOrderKey,
     mayBeLive: false,
     hasRemoteTasks: false,
+    openRunSenderThreadId: null,
   });
   return Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
