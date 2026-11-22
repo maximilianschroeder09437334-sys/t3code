@@ -164,6 +164,8 @@ export interface EnvironmentThreadShell {
   readonly waitingOn?: OrchestrationV2ThreadShell["waitingOn"];
   /** The thread's own wait phase; clients join phases along `waitingOn` (see threadWait.ts). */
   readonly waitPhase?: OrchestrationV2ThreadShell["waitPhase"];
+  /** The thread whose agent started the latest run; absent from servers without it. */
+  readonly latestRunSenderThreadId?: ThreadId | null;
   /** Server-derived first step in the last completed report's Next steps section. */
   readonly homeFirstNextStep?: string | null;
   readonly homeNeedsYou?: boolean;
@@ -331,6 +333,9 @@ export function presentThreadShell(
     blockedOnThreadWait: thread.blockedOnThreadWait ?? false,
     ...(thread.waitingOn === undefined ? {} : { waitingOn: thread.waitingOn }),
     ...(thread.waitPhase === undefined ? {} : { waitPhase: thread.waitPhase }),
+    ...(thread.latestRunSenderThreadId === undefined
+      ? {}
+      : { latestRunSenderThreadId: thread.latestRunSenderThreadId }),
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
     ...(thread.latestUserAuthoredMessageAt === undefined
       ? {}

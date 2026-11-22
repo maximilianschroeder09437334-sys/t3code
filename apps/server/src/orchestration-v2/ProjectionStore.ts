@@ -1157,6 +1157,7 @@ type ShellThreadRow = {
   readonly latest_run_status: string | null;
   readonly latest_run_requested_at: string | null;
   readonly latest_run_human_authored: number;
+  readonly latest_run_sender_thread_id: string | null;
   readonly latest_run_started_at: string | null;
   readonly latest_run_completed_at: string | null;
   readonly latest_run_stop_requested: number;
@@ -1906,6 +1907,25 @@ export function threadShellFromProjection(
     if (parent === undefined || parent.id === notificationRun.id) break;
     notificationRun = parent;
   }
+  // The sender walk also follows usage-limit resumes: their message has no sender of its own.
+  let senderRun = latestRun;
+  for (let depth = 0; depth < 8; depth++) {
+    const parentId =
+      senderRun?.hookContinuationOfRunId ?? senderRun?.usageLimitContinuationOfRunId;
+    if (parentId === undefined) break;
+    const parent = runs.find((run) => run.id === parentId);
+    if (parent === undefined || parent.id === senderRun?.id) break;
+    senderRun = parent;
+  }
+  const senderMessageId = senderRun?.userMessageId;
+  const senderMessage =
+    senderMessageId === undefined
+      ? undefined
+      : projection.messages.find((message) => message.id === senderMessageId);
+  const latestRunSenderThreadId =
+    senderMessage === undefined || senderMessage.linkedSender !== undefined
+      ? null
+      : (senderMessage.senderThreadId ?? null);
   const latestUserMessage = userMessages[0] ?? null;
   const pendingBackgroundTasks = derivePendingBackgroundWork({
     latestRun,
@@ -1996,6 +2016,7 @@ export function threadShellFromProjection(
       projection.messages.some(
         (message) => message.id === notificationRun.userMessageId && message.createdBy === "user",
       ),
+    latestRunSenderThreadId,
     latestRunStartedAt: latestRun?.startedAt ?? null,
     latestRunCompletedAt: latestRun?.completedAt ?? null,
     latestRunStopRequested:
@@ -2172,6 +2193,8 @@ type ShellThreadState = {
   readonly latestRunStatus: OrchestrationV2ShellThreadStatus;
   readonly latestRunRequestedAt: DateTime.Utc | null;
   readonly latestRunHumanAuthored: boolean;
+  /** Absent for reads that never build shells. */
+  readonly latestRunSenderThreadId?: ThreadId | null;
   readonly latestRunStartedAt: DateTime.Utc | null;
   readonly latestRunCompletedAt: DateTime.Utc | null;
   readonly latestRunStopRequested: boolean;
@@ -2456,6 +2479,9 @@ function shellFromState(input: {
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunHumanAuthored: input.state.latestRunHumanAuthored,
+    ...(input.state.latestRunSenderThreadId === undefined
+      ? {}
+      : { latestRunSenderThreadId: input.state.latestRunSenderThreadId }),
     latestRunStartedAt: input.state.latestRunStartedAt,
     latestRunCompletedAt: input.state.latestRunCompletedAt,
     latestRunStopRequested: input.state.latestRunStopRequested,
@@ -8282,6 +8308,33 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     AND origin_message.message_id = json_extract(origin.payload_json, '$.userMessageId')
                 WHERE json_extract(origin_message.payload_json, '$.createdBy') = 'user'
               ) AS latest_run_human_authored,
+              (
+                -- The in-memory sender walk: hook and usage-limit continuations back to the run
+                -- a message started, then that message's sender, one primary-key lookup per hop.
+                WITH RECURSIVE sender_origin(payload_json, depth) AS (
+                  SELECT presented.payload_json, 0
+                  UNION ALL
+                  SELECT parent.payload_json, origin.depth + 1
+                  FROM sender_origin origin JOIN orchestration_v2_projection_runs parent
+                    ON parent.run_id = COALESCE(
+                        json_extract(origin.payload_json, '$.hookContinuationOfRunId'),
+                        json_extract(origin.payload_json, '$.usageLimitContinuationOfRunId')
+                      )
+                      AND parent.thread_id = t.thread_id
+                      AND parent.run_id IS NOT json_extract(origin.payload_json, '$.id')
+                  WHERE origin.depth < 8
+                )
+                SELECT CASE
+                    WHEN json_type(sender_message.payload_json, '$.linkedSender') IS NULL
+                      THEN json_extract(sender_message.payload_json, '$.senderThreadId')
+                  END
+                FROM (
+                  SELECT payload_json FROM sender_origin ORDER BY depth DESC LIMIT 1
+                ) origin
+                JOIN orchestration_v2_projection_messages sender_message
+                  ON sender_message.message_id = json_extract(origin.payload_json, '$.userMessageId')
+                    AND sender_message.thread_id = t.thread_id
+              ) AS latest_run_sender_thread_id,
               json_extract(presented.payload_json, '$.startedAt') AS latest_run_started_at,
               presented.completed_at AS latest_run_completed_at,
               EXISTS (
@@ -9138,6 +9191,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           latestRunRequestedAt,
           latestRunHumanAuthored:
             row.blocking_run_id !== null ? false : row.latest_run_human_authored === 1,
+          latestRunSenderThreadId:
+            row.blocking_run_id !== null || row.latest_run_sender_thread_id === null
+              ? null
+              : ThreadId.make(row.latest_run_sender_thread_id),
           latestRunStartedAt,
           latestRunCompletedAt,
           latestRunStopRequested,

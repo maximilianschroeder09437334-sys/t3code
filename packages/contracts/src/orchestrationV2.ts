@@ -2324,6 +2324,13 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStopRequested: Schema.optional(Schema.Boolean),
   latestRunHumanAuthored: Schema.optional(Schema.Boolean),
+  /**
+   * The thread in this environment whose agent sent the message that started the latest run,
+   * followed back through hook and usage-limit continuations. Null for user and client sends,
+   * linked-environment senders and a run that blocks the queue. Display only: clients show that
+   * thread waiting on this one while it runs. Absent from older servers.
+   */
+  latestRunSenderThreadId: Schema.optional(Schema.NullOr(ThreadId)),
   /** The latest run answers a background-work progress wake, like a Monitor line, not a terminal one. Absent from older servers. */
   latestRunBackgroundWake: Schema.optional(Schema.Boolean),
   /** First ordered next step from the last completed assistant report, for Home across clients. */
