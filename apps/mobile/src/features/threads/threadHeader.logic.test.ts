@@ -12,6 +12,7 @@ it("keeps the desktop surface order and marks unavailable mobile surfaces", () =
     canOpenFiles: false,
     isGitRepo: true,
     hasPullRequest: false,
+    hasSideChat: true,
   });
 
   expect(items.map((item) => item.label)).toEqual([
@@ -27,6 +28,7 @@ it("keeps the desktop surface order and marks unavailable mobile surfaces", () =
   expect(items.filter((item) => item.available).map((item) => item.label)).toEqual([
     "Terminal",
     "Diff",
+    "Side chat",
   ]);
   expect(items.find((item) => item.id === "browser")).toMatchObject({
     available: false,

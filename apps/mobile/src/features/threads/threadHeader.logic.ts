@@ -30,6 +30,7 @@ export function mobileThreadSurfaces(input: {
   readonly canOpenFiles: boolean;
   readonly isGitRepo: boolean;
   readonly hasPullRequest: boolean;
+  readonly hasSideChat: boolean;
 }): ReadonlyArray<MobileSurfaceItem> {
   return [
     { id: "browser", label: "Browser", available: false, reason: "Not on mobile yet" },
@@ -64,6 +65,11 @@ export function mobileThreadSurfaces(input: {
       reason: "Not on mobile yet",
     },
     { id: "device", label: "Device", available: false, reason: "Not available for this thread" },
-    { id: "side-chat", label: "Side chat", available: false, reason: "Not on mobile yet" },
+    {
+      id: "side-chat",
+      label: "Side chat",
+      available: input.hasSideChat,
+      reason: input.hasSideChat ? undefined : "No side chats for this thread",
+    },
   ];
 }

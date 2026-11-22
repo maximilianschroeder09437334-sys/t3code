@@ -9,6 +9,9 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText } from "../../components/ui/AppText";
 import type { ThreadGitControlsProps } from "./ThreadGitControls";
 import { formatContextUsage, mobileThreadSurfaces } from "./threadHeader.logic";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { useSideChats } from "../../state/entities";
+import { useOpenLinkedThread } from "./useOpenLinkedThread";
 
 export function ThreadHeader(props: {
   readonly title: string;
@@ -29,6 +32,12 @@ export function ThreadHeader(props: {
   const goBack = useWorkspaceBackNavigation();
   const { startNewTask } = useAdaptiveWorkspaceLayout();
   const [sheet, setSheet] = useState<"details" | "surfaces" | null>(null);
+  const threadRef = {
+    environmentId: EnvironmentId.make(String(props.gitControls.environmentId)),
+    threadId: ThreadId.make(String(props.gitControls.threadId)),
+  };
+  const sideChats = useSideChats(threadRef);
+  const openLinkedThread = useOpenLinkedThread();
   const actions: AppBarAction[] = [
     {
       accessibilityLabel: "Thread details",
@@ -78,6 +87,7 @@ export function ThreadHeader(props: {
     canOpenFiles: props.gitControls.canOpenFiles,
     isGitRepo: props.gitControls.gitStatus?.isRepo ?? false,
     hasPullRequest: Boolean(props.gitControls.gitStatus?.pr),
+    hasSideChat: sideChats.length > 0,
   });
   const surfaceIcons = {
     browser: "globe",
@@ -97,6 +107,15 @@ export function ThreadHeader(props: {
     files: openFiles,
     diff: openGit,
     "pull-request": openGit,
+    "side-chat": () => {
+      const sideChat = sideChats[0];
+      if (!sideChat) return;
+      dismiss();
+      openLinkedThread({
+        environmentId: String(props.gitControls.environmentId),
+        threadId: String(sideChat.id),
+      });
+    },
   };
 
   return (
