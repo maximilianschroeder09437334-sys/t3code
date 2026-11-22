@@ -99,6 +99,9 @@ export function withCreationProvenance(
     case "thread.merge_back":
     case "delegated_task.request":
       return { ...command, ...provenance };
+    case "thread.model-selection.set":
+    case "provider.switch":
+      return { ...command, createdBy: provenance.createdBy };
     default:
       return command;
   }

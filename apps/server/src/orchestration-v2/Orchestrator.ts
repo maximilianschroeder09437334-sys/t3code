@@ -45,6 +45,7 @@ import {
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
+  type OrchestrationV2Actor,
   type OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
@@ -1034,6 +1035,20 @@ function followsCurrentConversation(
     message?.followsThreadSelection === true ||
     (message?.notification?.source.kind === "monitor" && !isBufferedProviderNotification(message))
   );
+}
+
+/**
+ * A person's model pick authorizes agent turns on the thread, so it replaces the agent's chosen
+ * selection while keeping the rest of the intent. Agent and system picks leave the intent as is.
+ */
+function userAgentExecutionIntent(
+  thread: Pick<OrchestrationV2AppThread, "agentExecutionIntent">,
+  modelSelection: ModelSelection,
+  actor: OrchestrationV2Actor | undefined,
+): Pick<OrchestrationV2AppThread, "agentExecutionIntent"> {
+  return actor === "user" && thread.agentExecutionIntent !== undefined
+    ? { agentExecutionIntent: { ...thread.agentExecutionIntent, modelSelection } }
+    : {};
 }
 
 function queuedRunModelSelection(
@@ -3156,6 +3171,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     ...projection.thread,
                     providerInstanceId: queuedRun.providerInstanceId,
                     modelSelection: queuedRun.modelSelection,
+                    ...userAgentExecutionIntent(
+                      projection.thread,
+                      queuedRun.modelSelection,
+                      queuedMessage?.createdBy,
+                    ),
                     updatedAt: now,
                   },
                 },
@@ -5220,6 +5240,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             providerInstanceId: command.modelSelection.instanceId,
             modelSelection: command.modelSelection,
+            ...userAgentExecutionIntent(thread, command.modelSelection, command.createdBy),
             updatedAt: now,
           };
       }
@@ -6333,6 +6354,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...input.projection.thread,
             providerInstanceId: input.modelSelection.instanceId,
             modelSelection: input.modelSelection,
+            ...userAgentExecutionIntent(
+              input.projection.thread,
+              input.modelSelection,
+              input.createdBy,
+            ),
             updatedAt: now,
           },
         });
@@ -6671,6 +6697,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...input.projection.thread,
           providerInstanceId: input.modelSelection.instanceId,
           modelSelection: input.modelSelection,
+          ...userAgentExecutionIntent(
+            input.projection.thread,
+            input.modelSelection,
+            input.createdBy,
+          ),
           updatedAt: now,
         },
       });
@@ -8179,6 +8210,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...projection.thread,
           providerInstanceId: modelSelection.instanceId,
           modelSelection,
+          ...userAgentExecutionIntent(projection.thread, modelSelection, command.createdBy),
           updatedAt: now,
         },
       });

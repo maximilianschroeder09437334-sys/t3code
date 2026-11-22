@@ -124,7 +124,16 @@ function startWithMissingWorktree(
     };
   },
   actor: "agent" | "user" = "agent",
-  messageCreatedBy?: "agent" | "user",
+  messageCreatedBy?: "agent" | "user" | "system",
+  runSelection: {
+    readonly instanceId: ReturnType<typeof ProviderInstanceId.make>;
+    readonly model: string;
+    readonly options: ReadonlyArray<{ readonly id: string; readonly value: string }>;
+  } = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+    options: [{ id: "effort", value: "medium" }],
+  },
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -160,12 +169,8 @@ function startWithMissingWorktree(
         id: runId,
         ...(agentOpus
           ? {
-              modelSelection: {
-                instanceId: ProviderInstanceId.make("claudeAgent"),
-                model: "claude-opus-5-5",
-                options: [{ id: "effort", value: "medium" }],
-              },
-              providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+              modelSelection: runSelection,
+              providerInstanceId: runSelection.instanceId,
             }
           : {}),
         status: "starting",
@@ -411,6 +416,65 @@ it("starts a person's follow-up in an agent-created thread without recorded prov
   );
   await expect(fixture.start).resolves.toBeDefined();
   expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+});
+
+// After a person switches an agent thread's model, the orchestrator re-stamps the intent with
+// their pick, so wake and agent turns on that pick pass provenance while policy still runs.
+it.each(["system", "agent"] as const)(
+  "starts a %s turn on the pick a person re-stamped into the intent",
+  async (messageCreatedBy) => {
+    const userPick = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "medium" }],
+    };
+    const fixture = startWithMissingWorktree(
+      "/tmp/project",
+      undefined,
+      true,
+      { modelSelection: userPick, interactionMode: "plan", planningPurpose: "Keep planning" },
+      "agent",
+      messageCreatedBy,
+      userPick,
+    );
+    await expect(fixture.start).resolves.toBeDefined();
+    expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+  },
+);
+
+it("still applies the agent policy to a person's re-stamped pick", async () => {
+  // Matches the run, so provenance passes, but no reasoning effort is advertised.
+  const userPick = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+    options: [],
+  };
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    { modelSelection: userPick },
+    "agent",
+    "system",
+    userPick,
+  );
+  await expect(fixture.start).rejects.toBeUndefined();
+  expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn-item.updated",
+          payload: expect.objectContaining({
+            title: "Agent model selection blocked",
+            failure: expect.objectContaining({
+              message: expect.stringContaining("reasoning effort"),
+            }),
+          }),
+        }),
+      ]),
+    }),
+  );
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
 });
 
 it("starts an agent-created Opus turn in default mode without a planning purpose", async () => {

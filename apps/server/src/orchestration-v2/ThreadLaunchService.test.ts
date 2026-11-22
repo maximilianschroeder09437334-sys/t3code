@@ -25,6 +25,7 @@ import {
   EventId,
   GitCommandError,
   MessageId,
+  type ModelSelection,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -673,6 +674,130 @@ it.effect("runs a thread-bound automation on the provider the thread uses now", 
     assert.deepStrictEqual(run?.modelSelection, claudeModelSelection);
     assert.deepStrictEqual(projection.thread.modelSelection, claudeModelSelection);
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerScheduledTasks)));
+});
+
+it.effect("only a person's model pick replaces an agent thread's selection intent", () => {
+  const harness = makeHarness({ adapters: [adapter, claudeAdapter] });
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const threadId = ThreadId.make("thread:intent-follows-user");
+    const agentSelection = {
+      ...modelSelection,
+      options: [{ id: "reasoningEffort", value: "high" }],
+    };
+    const userSelection = {
+      ...claudeModelSelection,
+      options: [{ id: "effort", value: "medium" }],
+    };
+    const intentFields = {
+      interactionMode: "plan" as const,
+      planningPurpose: "Design the bounded retry policy",
+    };
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:intent-create"),
+      threadId,
+      projectId,
+      title: "Agent work",
+      modelSelection: agentSelection,
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+      branch: null,
+      worktreePath: null,
+      createdBy: "agent",
+      creationSource: "mcp",
+      agentExecutionIntent: { modelSelection: agentSelection, ...intentFields },
+    });
+    const intentOf = () =>
+      threads.getThreadProjection(threadId).pipe(Effect.map((p) => p.thread.agentExecutionIntent));
+
+    // t3_thread_configure dispatches without provenance; an agent's own pick keeps the intent.
+    yield* threads.dispatch({
+      type: "thread.model-selection.set",
+      commandId: CommandId.make("command:intent-mcp"),
+      threadId,
+      modelSelection: userSelection,
+    });
+    yield* threads.dispatch({
+      type: "thread.model-selection.set",
+      commandId: CommandId.make("command:intent-agent-back"),
+      threadId,
+      modelSelection: agentSelection,
+      createdBy: "agent",
+    });
+    assert.deepStrictEqual(yield* intentOf(), {
+      modelSelection: agentSelection,
+      ...intentFields,
+    });
+
+    // The web route stamps a person's pick, which becomes the provenance agent turns check.
+    const userPick = (commandId: string, selection: ModelSelection) =>
+      ThreadManagement.withCreationProvenance(
+        {
+          type: "thread.model-selection.set",
+          commandId: CommandId.make(commandId),
+          threadId,
+          modelSelection: selection,
+        },
+        { createdBy: "user", creationSource: "web" },
+      );
+    yield* threads.dispatch(userPick("command:intent-user-2", userSelection));
+    assert.deepStrictEqual(yield* intentOf(), {
+      modelSelection: userSelection,
+      ...intentFields,
+    });
+
+    // A person's turn carrying a new pick re-stamps it too.
+    yield* threads.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("command:intent-user-message"),
+      threadId,
+      messageId: MessageId.make("message:intent-user"),
+      createdBy: "user",
+      creationSource: "web",
+      text: "Back to Codex",
+      attachments: [],
+      modelSelection: agentSelection,
+      dispatchMode: { type: "defer_start" },
+    });
+    const projection = yield* threads.getThreadProjection(threadId);
+    assert.deepStrictEqual(projection.thread.modelSelection, agentSelection);
+    assert.deepStrictEqual(projection.thread.agentExecutionIntent, {
+      modelSelection: agentSelection,
+      ...intentFields,
+    });
+
+    // Another agent's message that carries a pick leaves the person's provenance alone.
+    yield* threads.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("command:intent-agent-message"),
+      threadId,
+      messageId: MessageId.make("message:intent-agent"),
+      createdBy: "agent",
+      creationSource: "mcp",
+      text: "Agent picks a model",
+      attachments: [],
+      modelSelection: userSelection,
+      dispatchMode: { type: "defer_start" },
+    });
+    assert.deepStrictEqual(yield* intentOf(), {
+      modelSelection: agentSelection,
+      ...intentFields,
+    });
+
+    // The stamp lives in the event payload, so replay rebuilds the same intent.
+    const switched = yield* threads.streamStoredEventsFrom({ threadId }).pipe(
+      Stream.filter((stored) => stored.commandId === CommandId.make("command:intent-user-2")),
+      Stream.map((stored) => stored.event),
+      Stream.runHead,
+    );
+    const event = Option.getOrUndefined(switched);
+    assert.equal(event?.type, "thread.provider-switched");
+    assert.deepStrictEqual(
+      event?.type === "thread.provider-switched" ? event.payload.agentExecutionIntent : undefined,
+      { modelSelection: userSelection, ...intentFields },
+    );
+  }).pipe(Effect.provide(harness.layer));
 });
 
 it.effect("retains automation and sender attribution while a message waits in the queue", () => {

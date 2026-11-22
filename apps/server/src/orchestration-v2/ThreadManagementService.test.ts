@@ -89,6 +89,24 @@ it("stamps authoritative provenance on commands that create threads or messages"
   expect(stamped).not.toHaveProperty("initialMessage");
 });
 
+it.each(["thread.model-selection.set", "provider.switch"] as const)(
+  "stamps a client's %s as the person's pick, overriding a claimed actor",
+  (type) => {
+    const stamped = ThreadManagementService.withCreationProvenance(
+      {
+        type,
+        commandId: CommandId.make("command:thread-management:model"),
+        threadId: ThreadId.make("thread:thread-management:model"),
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        createdBy: "agent",
+      },
+      { createdBy: "user", creationSource: "web" },
+    );
+    expect(stamped).toMatchObject({ type, createdBy: "user" });
+    expect(stamped).not.toHaveProperty("creationSource");
+  },
+);
+
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
 );

@@ -3452,6 +3452,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     modelSelection: ModelSelection,
+    /** Stamped by the server; only a person's pick replaces the thread's agent selection intent. */
+    createdBy: Schema.optional(OrchestrationV2Actor),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-session.detach"),
@@ -3694,6 +3696,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     modelSelection: ModelSelection,
+    /** Stamped by the server; only a person's pick replaces the thread's agent selection intent. */
+    createdBy: Schema.optional(OrchestrationV2Actor),
   }),
 ]);
 export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
