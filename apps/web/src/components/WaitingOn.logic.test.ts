@@ -6,6 +6,7 @@ import {
   TurnItemId,
   type OrchestrationV2WaitTarget,
 } from "@t3tools/contracts";
+import { deriveThreadWaitState } from "@t3tools/shared/orchestrationV2WaitState";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
@@ -17,7 +18,7 @@ import {
   resolveThreadStatusPill,
   resolveWindowTitleThreadStatus,
 } from "./Sidebar.logic";
-import { openWaitTargets, waitTargetRoute } from "./WaitingOn.logic";
+import { liveWaitTargets, openWaitTargets, waitTargetRoute } from "./WaitingOn.logic";
 
 const env = EnvironmentId.make("environment-test");
 const remote = EnvironmentId.make("environment-remote");
@@ -202,5 +203,185 @@ describe("Waiting from the resolved wait", () => {
       environmentId: remote,
       threadId: ThreadId.make("b"),
     });
+  });
+});
+
+describe("Waiting for awaited work, PR checks and lineage children (WP A1, A2)", () => {
+  const idle = { status: "idle", activeRunId: null } as never;
+  const completed = {
+    runId: "run-a",
+    status: "completed",
+    requestedAt: "2026-11-22T11:00:00.000Z",
+    startedAt: "2026-11-22T11:00:00.000Z",
+    completedAt: "2026-11-22T11:30:00.000Z",
+    assistantMessageId: null,
+  } as never;
+  const roster = [
+    {
+      taskId: "bwngue5o4",
+      kind: "command" as const,
+      awaited: true as const,
+      description: "vp test --run apps/server",
+    },
+  ];
+  /** The server's wait fields for a completed thread holding this roster, from the real rule. */
+  const derived = (pendingBackgroundTasks: typeof roster, providerSessionStatus = "ready") => {
+    const state = deriveThreadWaitState({
+      activeRun: null,
+      hasActivityRun: false,
+      latestRunStatus: "completed",
+      turnItems: [],
+      pendingBackgroundTasks,
+      providerSessionStatus: providerSessionStatus as never,
+      reportWait: null,
+      handoffSuccessorThreadId: null,
+      needsYou: false,
+      archivedOrDeleted: false,
+      settled: false,
+    });
+    return { waitPhase: state.waitPhase, waitingOn: [...state.waitingOn] };
+  };
+
+  it("reads an idle thread on an awaited command as Waiting everywhere, with Open at its row", () => {
+    // The live f700bdf9 shape: run completed, the roster's awaited command parks it at idle.
+    const a = thread("a", {
+      runtime: idle,
+      latestRun: completed,
+      pendingBackgroundTasks: roster as never,
+      ...derived(roster),
+      waitingOn: derived(roster).waitingOn.map((target) => ({
+        ...target,
+        itemId: TurnItemId.make("item-bash"),
+      })),
+    });
+    const wait = resolve([a]).get(threadWaitKey(env, a.id));
+    expect(wait?.waiting).toBe(true);
+    expect(resolveSidebarThreadStatus(a, wait)).toBe("waiting");
+    expect(resolveSidebarRowStatus(a, wait)).toBe("waiting");
+    expect(resolveThreadStatusPill({ thread: a, wait })?.label).toBe("Waiting");
+    expect(homeRow([a])?.section).toBe("waiting");
+    expect(formatHomeTimeLabel(a, NOW, undefined, wait)).toMatch(/^waiting /);
+    const [target] = openWaitTargets(wait);
+    expect(target?.title).toBe("vp test --run apps/server");
+    expect(waitTargetRoute({ environmentId: env, threadId: a.id }, target!)).toEqual({
+      environmentId: env,
+      threadId: a.id,
+      item: "item-bash",
+    });
+  });
+
+  it("moves an idle Running row without a live target to done, label and section alike", () => {
+    // The same roster after its session stopped: the hold died with the provider process.
+    const a = thread("a", {
+      runtime: idle,
+      latestRun: completed,
+      pendingBackgroundTasks: roster as never,
+      ...derived(roster, "stopped"),
+    });
+    const wait = resolve([a]).get(threadWaitKey(env, a.id));
+    expect(wait?.waiting).toBe(false);
+    // No Waiting status or pill without a live target, though the roster still holds it.
+    expect(resolveSidebarThreadStatus(a, wait)).toBe("ready");
+    expect(resolveThreadStatusPill({ thread: a, wait })?.label).not.toBe("Waiting");
+    const row = homeRow([a]);
+    expect(row?.section).toBe("done");
+    expect(formatHomeTimeLabel(a, NOW, undefined, row?.wait)).toMatch(/^done /);
+  });
+
+  it("opens a PR checks target in the pull request view, and without its link at the waiter", () => {
+    const url = "https://github.com/owner/repo/pull/42";
+    const a = thread("a", {
+      runtime: idle,
+      latestRun: completed,
+      pullRequests: [
+        {
+          host: "github.com",
+          repository: "owner/repo",
+          number: 42,
+          url,
+          source: "manual",
+          linkedAt: "2026-11-22T10:00:00.000Z",
+          snapshot: null,
+          stack: null,
+        },
+      ],
+      waitPhase: "waiting",
+      waitingOn: [
+        on(null, {
+          source: "awaited_child",
+          title: "PR #42 checks",
+          taskId: "pull-request-watch:github.com/owner/repo#42",
+        }),
+        on(null, {
+          source: "awaited_child",
+          title: "PR #7 checks",
+          taskId: "pull-request-watch:github.com/owner/repo#7",
+        }),
+      ],
+    });
+    const wait = resolve([a]).get(threadWaitKey(env, a.id));
+    const [pr, unlinked] = openWaitTargets(wait);
+    expect(waitTargetRoute({ environmentId: env, threadId: a.id }, pr!)).toEqual({
+      pullRequestUrl: url,
+    });
+    expect(waitTargetRoute({ environmentId: env, threadId: a.id }, unlinked!)).toEqual({
+      environmentId: env,
+      threadId: a.id,
+    });
+  });
+
+  const subagentOf = (parent: string) => ({
+    rootThreadId: ThreadId.make(parent),
+    parentThreadId: ThreadId.make(parent),
+    relationshipToParent: "subagent" as const,
+  });
+
+  it("shows a lineage-only parent Waiting on its live child on every surface, Open to the child", () => {
+    const parent = thread("p", { latestRun: completed, waitPhase: "ended", waitingOn: [] });
+    const child = thread("c", {
+      title: "Pipeline child",
+      lineage: subagentOf("p"),
+      runtime: running,
+      waitPhase: "working",
+      waitingOn: [],
+    });
+    const wait = resolve([parent, child]).get(threadWaitKey(env, parent.id));
+    expect(wait?.waiting).toBe(true);
+    expect(resolveSidebarRowStatus(parent, wait)).toBe("waiting");
+    expect(resolveThreadStatusPill({ thread: parent, wait })?.label).toBe("Waiting");
+    expect(homeRow([parent, child], "p")?.section).toBe("waiting");
+    const [target] = openWaitTargets(wait);
+    expect(target?.title).toBe("Pipeline child");
+    expect(waitTargetRoute({ environmentId: env, threadId: parent.id }, target!)).toEqual({
+      environmentId: env,
+      threadId: ThreadId.make("c"),
+    });
+    // The child finished: the parent is done again.
+    const finished = thread("c", {
+      lineage: subagentOf("p"),
+      latestRun: completed,
+      waitPhase: "ended",
+      waitingOn: [],
+    });
+    const after = resolve([parent, finished]).get(threadWaitKey(env, parent.id));
+    expect(after?.waiting).toBe(false);
+    expect(resolveSidebarRowStatus(parent, after)).not.toBe("waiting");
+  });
+
+  it("lists a running parent's live child as Also running, not Waiting", () => {
+    const parent = thread("p", { runtime: running, waitPhase: "working", waitingOn: [] });
+    const child = thread("c", {
+      lineage: subagentOf("p"),
+      runtime: running,
+      waitPhase: "working",
+      waitingOn: [],
+    });
+    const row = homeRow([parent, child], "p");
+    expect(row?.section).toBe("running");
+    expect(row?.wait?.waiting).toBe(false);
+    expect(openWaitTargets(row?.wait)).toEqual([]);
+    expect(liveWaitTargets(row?.wait).map((target) => target.threadId)).toEqual([
+      ThreadId.make("c"),
+    ]);
   });
 });

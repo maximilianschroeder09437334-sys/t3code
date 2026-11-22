@@ -444,3 +444,277 @@ describe("resolveThreadWaits", () => {
     expect(endedStats.ops).toBeLessThanOrEqual(4 * (endedGraph.threads.length + endedGraph.edges));
   });
 });
+
+describe("resolveThreadWaits implicit lineage and sender edges (WP A2, A3)", () => {
+  const subagentOf = (parent: string) => ({
+    rootThreadId: ThreadId.make(parent),
+    parentThreadId: ThreadId.make(parent),
+    relationshipToParent: "subagent" as const,
+  });
+  /** A completed, unsettled thread with nothing of its own left: the server says ended. */
+  const done = (id: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+    raw(id, {
+      waitPhase: "ended",
+      waitingOn: [],
+      status: "completed",
+      latestRunId: `run-${id}` as never,
+      ...overrides,
+    });
+  /** A subagent child whose run is open. */
+  const busyChild = (id: string, parent: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+    raw(id, {
+      lineage: subagentOf(parent),
+      waitPhase: "working",
+      waitingOn: [],
+      status: "running",
+      latestRunId: `run-${id}` as never,
+      activeRunId: `run-${id}` as never,
+      activityRunStatus: "running",
+      ...overrides,
+    });
+  const childDone = (id: string, parent: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+    done(id, { lineage: subagentOf(parent), ...overrides });
+
+  it("a completed unsettled parent waits on its working lineage child, then clears when it ends", () => {
+    const parent = done("p");
+    const live = resolve([[env1, [parent, busyChild("c", "p")]]]);
+    expect(waitOf(live, "p")).toEqual({
+      waiting: true,
+      targets: [
+        {
+          title: "c",
+          environmentId: env1,
+          threadId: ThreadId.make("c"),
+          waiterThreadId: ThreadId.make("p"),
+          source: "awaited_child",
+          state: "live",
+        },
+      ],
+    });
+    // The same pair once the child's run completed: nothing holds the parent.
+    const ended = resolve([[env1, [parent, childDone("c", "p")]]]);
+    expect(waitOf(ended, "p")?.waiting).toBe(false);
+    expect(waitOf(ended, "p")?.targets).toEqual([]);
+  });
+
+  it("a parent waits on a child that needs the user, marked needs you", () => {
+    const wait = waitOf(
+      resolve([[env1, [done("p"), childDone("c", "p", { waitPhase: "needs" })]]]),
+      "p",
+    );
+    expect(wait?.waiting).toBe(true);
+    expect(wait?.targets[0]).toMatchObject({ threadId: "c", state: "live", suffix: "needs you" });
+  });
+
+  it("follows P -> C -> G when the middle child ended by itself", () => {
+    const threads = [done("p"), childDone("c", "p"), busyChild("g", "c")];
+    const result = resolve([[env1, threads]]);
+    expect(waitOf(result, "p")?.waiting).toBe(true);
+    expect(waitOf(result, "c")?.waiting).toBe(true);
+    expect(waitOf(result, "p")?.targets[0]).toMatchObject({ threadId: "c", state: "live" });
+    expect(waitOf(result, "c")?.targets[0]).toMatchObject({ threadId: "g", state: "live" });
+    // G finishing clears the whole chain.
+    const cleared = resolve([[env1, [done("p"), childDone("c", "p"), childDone("g", "c")]]]);
+    expect(waitOf(cleared, "p")?.waiting).toBe(false);
+    expect(waitOf(cleared, "c")?.waiting).toBe(false);
+  });
+
+  it("adds a lineage child once next to an explicit target on the same child", () => {
+    const parent = raw("p", {
+      waitPhase: "waiting",
+      waitingOn: [on("c", { source: "awaited_child", taskId: "task-c" })],
+    });
+    const wait = waitOf(resolve([[env1, [parent, busyChild("c", "p")]]]), "p");
+    expect(wait?.targets).toHaveLength(1);
+    expect(wait?.targets[0]).toMatchObject({ taskId: "task-c", state: "live" });
+  });
+
+  it("appends live children to a working parent without making it Waiting", () => {
+    const parent = raw("p", {
+      waitPhase: "working",
+      waitingOn: [],
+      status: "running",
+      latestRunId: "run-p" as never,
+      activeRunId: "run-p" as never,
+      activityRunStatus: "running",
+    });
+    const wait = waitOf(resolve([[env1, [parent, busyChild("c", "p")]]]), "p");
+    expect(wait?.waiting).toBe(false);
+    expect(wait?.targets).toEqual([expect.objectContaining({ threadId: "c", state: "live" })]);
+  });
+
+  it("never resurrects a settled, archived or failed parent", () => {
+    const child = busyChild("c", "p");
+    const parents = {
+      settled: done("p", { settledOverride: "settled" }),
+      archived: done("p", { archivedAt: v2ThreadShell.updatedAt }),
+      failed: done("p", { status: "failed" }),
+      cancelled: done("p", { status: "cancelled" }),
+    };
+    for (const [name, parent] of Object.entries(parents)) {
+      const wait = waitOf(resolve([[env1, [parent, child]]]), "p");
+      expect(wait?.waiting, name).toBe(false);
+    }
+    // Settled or archived children hold nobody either.
+    for (const closed of [
+      busyChild("c", "p", { settledOverride: "settled" }),
+      busyChild("c", "p", { archivedAt: v2ThreadShell.updatedAt }),
+    ]) {
+      expect(waitOf(resolve([[env1, [done("p"), closed]]]), "p")?.waiting).toBe(false);
+    }
+  });
+
+  it("gives a parent from a server without wait fields no entry, and reads such a child by its lifecycle", () => {
+    const oldParent = raw("p", { status: "completed", latestRunId: "run-p" as never });
+    expect(waitOf(resolve([[env1, [oldParent, busyChild("c", "p")]]]), "p")).toBeUndefined();
+    const { waitPhase: _phase, waitingOn: _on, ...legacyChild } = busyChild("c", "p");
+    const wait = waitOf(resolve([[env1, [done("p"), legacyChild]]]), "p");
+    expect(wait?.waiting).toBe(true);
+    expect(wait?.targets[0]).toMatchObject({ threadId: "c", state: "live" });
+  });
+
+  it("terminates on a lineage cycle and keeps it ended without a live exit", () => {
+    const a = done("a", { lineage: subagentOf("b") });
+    const b = done("b", { lineage: subagentOf("a") });
+    const result = resolve([[env1, [a, b]]]);
+    expect(waitOf(result, "a")?.waiting).toBe(false);
+    expect(waitOf(result, "b")?.waiting).toBe(false);
+    // With a live child hanging off the cycle, both wait.
+    const withLive = resolve([[env1, [a, b, busyChild("c", "a")]]]);
+    expect(waitOf(withLive, "a")?.waiting).toBe(true);
+    expect(waitOf(withLive, "b")?.waiting).toBe(true);
+  });
+
+  it("keeps a lineage wait through reconnects: unknown while disconnected, then the fresh answer", () => {
+    const parent = done("p");
+    const threads = [parent, busyChild("c", "p")];
+    expect(waitOf(resolve([[env1, threads]]), "p")?.waiting).toBe(true);
+    // Disconnected: the cached child is unknown, still waiting, and its Open has no route.
+    const disconnected = waitOf(resolve([[env1, threads]], { notReady: [env1] }), "p");
+    expect(disconnected?.waiting).toBe(true);
+    expect(disconnected?.targets[0]).toMatchObject({ state: "unknown", suffix: "not connected" });
+    // Synchronized again with the child ended, or gone from the snapshot: the parent clears.
+    expect(waitOf(resolve([[env1, [parent, childDone("c", "p")]]]), "p")?.waiting).toBe(false);
+    expect(waitOf(resolve([[env1, [parent]]]), "p")?.waiting).toBe(false);
+  });
+
+  it("shows the sender of a child's open run waiting on it, not the lineage parent", () => {
+    const sender = done("s");
+    const parent = done("p");
+    const child = busyChild("c", "p", { latestRunSenderThreadId: ThreadId.make("s") });
+    const live = resolve([[env1, [sender, parent, child]]]);
+    expect(waitOf(live, "s")?.waiting).toBe(true);
+    expect(waitOf(live, "s")?.targets).toEqual([
+      expect.objectContaining({ threadId: "c", source: "awaited_child", state: "live" }),
+    ]);
+    expect(waitOf(live, "p")?.waiting).toBe(false);
+    // The run completed: neither waits; the parent does not take the ended run back.
+    const ended = resolve([
+      [
+        env1,
+        [sender, parent, childDone("c", "p", { latestRunSenderThreadId: ThreadId.make("s") })],
+      ],
+    ]);
+    expect(waitOf(ended, "s")?.waiting).toBe(false);
+    expect(waitOf(ended, "p")?.waiting).toBe(false);
+    // Still needing the user after the sender's run ended: no driver, so neither waits.
+    const asks = resolve([
+      [
+        env1,
+        [
+          sender,
+          parent,
+          childDone("c", "p", { latestRunSenderThreadId: ThreadId.make("s"), waitPhase: "needs" }),
+        ],
+      ],
+    ]);
+    expect(waitOf(asks, "s")?.waiting).toBe(false);
+    expect(waitOf(asks, "p")?.waiting).toBe(false);
+  });
+
+  it("keeps the lineage rule for a parent sender, a self sender or no sender field", () => {
+    for (const latestRunSenderThreadId of [ThreadId.make("p"), ThreadId.make("c"), null]) {
+      const child = busyChild("c", "p", { latestRunSenderThreadId });
+      expect(waitOf(resolve([[env1, [done("p"), child]]]), "p")?.waiting).toBe(true);
+    }
+    // A completed, unsettled sender still shows its live child: the child's run decides.
+    const sender = done("s");
+    const child = busyChild("c", "p", { latestRunSenderThreadId: ThreadId.make("s") });
+    expect(waitOf(resolve([[env1, [sender, done("p"), child]]]), "s")?.waiting).toBe(true);
+  });
+
+  it("never makes the sender of a top-level thread wait", () => {
+    const target = raw("t", {
+      waitPhase: "working",
+      waitingOn: [],
+      status: "running",
+      latestRunId: "run-t" as never,
+      activityRunStatus: "running",
+      latestRunSenderThreadId: ThreadId.make("s"),
+    });
+    expect(waitOf(resolve([[env1, [done("s"), target]]]), "s")?.waiting).toBe(false);
+  });
+
+  it("stays linear on one parent of 5k children and a 1k-deep chain among 10k shells", () => {
+    const threads: Array<OrchestrationV2ThreadShell> = [done("root")];
+    let edges = 0;
+    for (let index = 0; index < 5000; index++) {
+      threads.push(index === 4999 ? busyChild(`w${index}`, "root") : childDone(`w${index}`, "root"));
+      edges++;
+    }
+    threads.push(done("chain0"));
+    for (let depth = 1; depth < 1000; depth++) {
+      threads.push(
+        depth === 999
+          ? busyChild(`chain${depth}`, `chain${depth - 1}`)
+          : childDone(`chain${depth}`, `chain${depth - 1}`),
+      );
+      edges++;
+    }
+    while (threads.length < 10_000) threads.push(done(`quiet${threads.length}`));
+    const stats: ThreadWaitResolveStats = { ops: 0 };
+    const result = resolve([[env1, threads]], { stats });
+    expect(waitOf(result, "root")?.waiting).toBe(true);
+    expect(waitOf(result, "root")?.targets).toEqual([
+      expect.objectContaining({ threadId: "w4999", state: "live" }),
+    ]);
+    expect(waitOf(result, "chain0")?.waiting).toBe(true);
+    expect(stats.ops).toBeLessThanOrEqual(4 * (threads.length + edges));
+  });
+});
+
+describe("resolveThreadWaits pull request watch targets (WP A1)", () => {
+  it("carries the watched link's URL so Open can show the pull request", () => {
+    const link = {
+      host: "GitHub.com",
+      repository: "Owner/Repo",
+      number: 42,
+      url: "https://github.com/Owner/Repo/pull/42",
+      source: "manual" as const,
+      linkedAt: "2026-11-22T10:00:00.000Z",
+      snapshot: null,
+      stack: null,
+    };
+    const waiter = raw("a", {
+      waitPhase: "waiting",
+      pullRequests: [link],
+      waitingOn: [
+        on(null, {
+          source: "awaited_child",
+          title: "PR #42 checks",
+          taskId: "pull-request-watch:github.com/owner/repo#42",
+        }),
+        on(null, { source: "awaited_child", title: "PR #9 checks", taskId: "pull-request-watch:github.com/owner/repo#9" }),
+      ],
+    });
+    const wait = waitOf(resolve([[env1, [waiter]]]), "a");
+    expect(wait?.waiting).toBe(true);
+    expect(wait?.targets[0]).toMatchObject({
+      title: "PR #42 checks",
+      state: "live",
+      pullRequestUrl: "https://github.com/Owner/Repo/pull/42",
+    });
+    // No matching link: no URL, so Open falls back to the waiter.
+    expect(wait?.targets[1]).not.toHaveProperty("pullRequestUrl");
+  });
+});
