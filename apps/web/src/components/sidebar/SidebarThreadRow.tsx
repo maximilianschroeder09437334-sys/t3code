@@ -2,6 +2,8 @@ import { useAtomMount } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
+import { WaitingOnPopover } from "../WaitingOnPopover";
+import { useThreadWait } from "../../state/threadWaits";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { requestCustomSnooze } from "../CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
@@ -732,7 +734,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     : null;
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarRowStatus({ ...thread, lastVisitedAt });
+  const wait = useThreadWait(thread.environmentId, thread.id);
+  const status = resolveSidebarRowStatus({ ...thread, lastVisitedAt }, wait);
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
   const wokeAtDate = props.wokeAt === null ? null : parseTimestampDate(props.wokeAt);
   const isWoke =
@@ -808,6 +811,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                         }
                       : null;
   const isWokeStatus = topStatus?.icon === "woke";
+  // Waiting from a resolved wait opens what it waits on, so it stays clickable like Woke.
+  const isWaitingOnStatus = status === "waiting" && wait?.waiting === true;
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
     effectiveEnvMode: thread.worktreePath === null ? "local" : "worktree",
@@ -1489,7 +1494,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 >
                   <span
                     className={cn(
-                      isWokeStatus
+                      isWokeStatus || isWaitingOnStatus
                         ? "pointer-events-auto"
                         : "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:right-0 group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-any-hover/sidebar-row:absolute group-any-hover/sidebar-row:right-0 group-any-hover/sidebar-row:opacity-0",
                       "flex items-center self-center justify-self-end tabular-nums text-secondary-label",
@@ -1517,6 +1522,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           />
                           <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
                         </Tooltip>
+                      ) : isWaitingOnStatus ? (
+                        <WaitingOnPopover
+                          waiter={threadRef}
+                          wait={wait}
+                          trigger={
+                            <button
+                              type="button"
+                              aria-label="Show what this thread is waiting on"
+                              onClick={(event) => event.stopPropagation()}
+                              onDoubleClick={(event) => event.stopPropagation()}
+                              className={cn(
+                                "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                                topStatus.className,
+                              )}
+                            />
+                          }
+                        >
+                          <TopStatusIcon icon={topStatus.icon} className="size-4" />
+                          {topStatus.label}
+                        </WaitingOnPopover>
                       ) : (
                         <span
                           className={cn(

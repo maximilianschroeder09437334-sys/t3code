@@ -37,6 +37,8 @@ import { useNowMinute } from "../../hooks/useNowMinute";
 import { cn } from "../../lib/utils";
 import { sortScopedProjectsForSidebar, resolveSidebarThreadStatus } from "../Sidebar.logic";
 import { useDelegatedUnderParent, useProjects, useVisibleThreadShells } from "../../state/entities";
+import { useThreadWaits } from "../../state/threadWaits";
+import { HomeWaitingOnLine } from "./HomeWaitingOnLine";
 import { openCommandPalette } from "../../commandPaletteBus";
 import { useUiStateStore } from "../../uiStateStore";
 import { Button } from "../ui/button";
@@ -112,12 +114,14 @@ export function HomeView() {
   const now = `${useNowMinute()}:00.000Z`;
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const delegatedUnderParent = useDelegatedUnderParent();
+  const waits = useThreadWaits();
   const rows = deriveHomeRows({
     threads,
     projects,
     now,
     lastVisitedAt: null,
     delegatedUnderParent,
+    waits,
   });
   const counts = countHomeRows(rows);
   const [filter, setFilter] = useState("all");
@@ -349,7 +353,7 @@ export function HomeView() {
                   {projectGroups.map((group) => {
                     const project = group.project;
                     const age = Math.max(
-                      ...group.rows.map((row) => homeDurationMinutes(row.thread, now)),
+                      ...group.rows.map((row) => homeDurationMinutes(row.thread, now, row.wait)),
                     );
                     const timing =
                       group.rows.length >= 2 && (section === "needs" || section === "running")
@@ -503,7 +507,7 @@ function HomeRowCard({
   const [chainOpen, setChainOpen] = useState(false);
   const { thread } = row;
   const hasUnsentDraft = useThreadHasUnsentDraft(homeThreadRef(thread));
-  const status = resolveSidebarThreadStatus(thread);
+  const status = resolveSidebarThreadStatus(thread, row.wait);
   const stopped = homeThreadWasStopped(thread);
   const timeColor =
     status === "failed"
@@ -547,7 +551,7 @@ function HomeRowCard({
   const time = (
     <span className={cn("flex shrink-0 items-center gap-1.5 text-xs tabular-nums", timeColor)}>
       <TimeIcon className="size-3.5" aria-hidden="true" />
-      {formatHomeTimeLabel(thread, now)}
+      {formatHomeTimeLabel(thread, now, undefined, row.wait)}
     </span>
   );
 
@@ -598,7 +602,9 @@ function HomeRowCard({
             {time}
           </div>
           <div className="mt-1 flex min-h-6 items-center gap-3 ps-6">
-            {row.section === "waiting" && row.waitingOn ? (
+            {row.wait?.waiting === true ? (
+              <HomeWaitingOnLine thread={thread} wait={row.wait} />
+            ) : row.wait === undefined && row.section === "waiting" && row.waitingOn ? (
               <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                 Waiting on{" "}
                 <a
