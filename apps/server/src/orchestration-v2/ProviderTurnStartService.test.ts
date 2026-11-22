@@ -442,6 +442,29 @@ it.each(["system", "agent"] as const)(
   },
 );
 
+// A thread that had no intent gets only the pick (and plan mode) from a person's switch.
+it.each(["system", "agent"] as const)(
+  "starts a %s turn on the minimal intent a person's pick created",
+  async (messageCreatedBy) => {
+    const userPick = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5",
+      options: [{ id: "effort", value: "medium" }],
+    };
+    const fixture = startWithMissingWorktree(
+      "/tmp/project",
+      undefined,
+      true,
+      { modelSelection: userPick, interactionMode: "plan" },
+      "agent",
+      messageCreatedBy,
+      userPick,
+    );
+    await expect(fixture.start).resolves.toBeDefined();
+    expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+  },
+);
+
 it("still applies the agent policy to a person's re-stamped pick", async () => {
   // Matches the run, so provenance passes, but no reasoning effort is advertised.
   const userPick = {

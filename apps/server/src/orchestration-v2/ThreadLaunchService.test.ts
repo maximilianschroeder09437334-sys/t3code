@@ -71,6 +71,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import { agentSelectionMatchesRun } from "./AgentModelPolicy.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
@@ -796,6 +797,107 @@ it.effect("only a person's model pick replaces an agent thread's selection inten
     assert.deepStrictEqual(
       event?.type === "thread.provider-switched" ? event.payload.agentExecutionIntent : undefined,
       { modelSelection: userSelection, ...intentFields },
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a person's model pick gives an agent thread without intent its provenance", () => {
+  const harness = makeHarness({ adapters: [adapter, claudeAdapter] });
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const sourceThreadId = ThreadId.make("thread:intent-fork-source");
+    const forkThreadId = ThreadId.make("thread:intent-fork");
+    const userSelection = {
+      ...claudeModelSelection,
+      options: [{ id: "effort", value: "medium" }],
+    };
+    const userPick = (commandId: string, threadId: ThreadId) =>
+      ThreadManagement.withCreationProvenance(
+        {
+          type: "thread.model-selection.set",
+          commandId: CommandId.make(commandId),
+          threadId,
+          modelSelection: userSelection,
+        },
+        { createdBy: "user", creationSource: "web" },
+      );
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:intent-fork-source"),
+      threadId: sourceThreadId,
+      projectId,
+      title: "Person's work",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    // An agent's t3_thread_transfer fork of that thread copies it without an intent. Forking needs
+    // a finished run, which this harness cannot produce, so create the same persisted state.
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:intent-fork"),
+      threadId: forkThreadId,
+      projectId,
+      title: "Person's work fork",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "plan",
+      branch: null,
+      worktreePath: null,
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    const threadOf = (threadId: ThreadId) =>
+      threads.getThreadProjection(threadId).pipe(Effect.map((p) => p.thread));
+    const fork = yield* threadOf(forkThreadId);
+    assert.equal(fork.createdBy, "agent");
+    assert.isUndefined(fork.agentExecutionIntent);
+
+    // MCP (no actor) and agent picks cannot create provenance.
+    yield* threads.dispatch({
+      type: "thread.model-selection.set",
+      commandId: CommandId.make("command:intent-fork-mcp"),
+      threadId: forkThreadId,
+      modelSelection: userSelection,
+    });
+    yield* threads.dispatch({
+      type: "provider.switch",
+      commandId: CommandId.make("command:intent-fork-agent"),
+      threadId: forkThreadId,
+      modelSelection,
+      createdBy: "agent",
+    });
+    assert.isUndefined((yield* threadOf(forkThreadId)).agentExecutionIntent);
+
+    // A person's pick on the person's own thread needs no intent.
+    yield* threads.dispatch(userPick("command:intent-fork-source-user", sourceThreadId));
+    assert.isUndefined((yield* threadOf(sourceThreadId)).agentExecutionIntent);
+
+    // A person's pick on the fork records a minimal intent the next agent turn can match.
+    yield* threads.dispatch(userPick("command:intent-fork-user", forkThreadId));
+    const picked = yield* threadOf(forkThreadId);
+    assert.deepStrictEqual(picked.agentExecutionIntent, {
+      modelSelection: userSelection,
+      interactionMode: "plan",
+    });
+    assert.isTrue(
+      agentSelectionMatchesRun(picked.agentExecutionIntent!.modelSelection, picked.modelSelection),
+    );
+
+    const switched = yield* threads.streamStoredEventsFrom({ threadId: forkThreadId }).pipe(
+      Stream.filter((stored) => stored.commandId === CommandId.make("command:intent-fork-user")),
+      Stream.map((stored) => stored.event),
+      Stream.runHead,
+    );
+    const event = Option.getOrUndefined(switched);
+    assert.equal(event?.type, "thread.provider-switched");
+    assert.deepStrictEqual(
+      event?.type === "thread.provider-switched" ? event.payload.agentExecutionIntent : undefined,
+      { modelSelection: userSelection, interactionMode: "plan" },
     );
   }).pipe(Effect.provide(harness.layer));
 });
