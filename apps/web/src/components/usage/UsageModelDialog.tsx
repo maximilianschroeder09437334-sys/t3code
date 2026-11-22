@@ -25,6 +25,7 @@ import {
   tokenTypeSegments,
 } from "./usageBreakdown";
 import { shareOf, useLimitEstimates } from "./usageLimitEstimates";
+import { missingShareLabel } from "./usageLimitText";
 import { PROVIDER_PRESENTATION } from "./usageProviders";
 
 export interface UsageChartWindow {
@@ -66,6 +67,12 @@ export function UsageModelDialog({
     estimates === null || costUnknown
       ? null
       : shareOf(estimates, model.provider, model.costUsd, measure);
+  const shareText = (measure: "weekly" | "session") => {
+    const value = share(measure);
+    return value === null && estimates !== null
+      ? missingShareLabel(estimates, model.provider, measure)
+      : formatLimitShare(value);
+  };
   const usdPerWindow = estimates?.rates.get(model.provider);
   const stats = (
     estimates === null
@@ -76,8 +83,8 @@ export function UsageModelDialog({
           hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
         ]
       : [
-          { label: "Weekly", value: costUnknown ? "Unpriced" : formatLimitShare(share("weekly")) },
-          { label: "5-hour", value: costUnknown ? "Unpriced" : formatLimitShare(share("session")) },
+          { label: "Weekly", value: costUnknown ? "Unpriced" : shareText("weekly") },
+          { label: "5-hour", value: costUnknown ? "Unpriced" : shareText("session") },
           { label: "Tokens", value: formatTokens(model.totalTokens) },
           hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
         ]
@@ -150,9 +157,10 @@ export function UsageModelDialog({
                 usdPerWindow === undefined ? null : (
                   <UsageShareBar
                     label="Usage by type"
-                    segments={limitShareSegments([
-                      { segments: costTypeSegments(usage.categoryCost), usdPerWindow },
-                    ])}
+                    segments={limitShareSegments(
+                      costTypeSegments(usage.categoryCost),
+                      usdPerWindow,
+                    )}
                     format={formatLimitShare}
                   />
                 )
@@ -173,9 +181,10 @@ export function UsageModelDialog({
                   usdPerWindow === undefined ? null : (
                     <UsageShareBar
                       label="Usage by speed"
-                      segments={limitShareSegments([
-                        { segments: speedCostSegments(usage.speedCost), usdPerWindow },
-                      ])}
+                      segments={limitShareSegments(
+                        speedCostSegments(usage.speedCost),
+                        usdPerWindow,
+                      )}
                       format={formatLimitShare}
                     />
                   )

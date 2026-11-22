@@ -10,7 +10,7 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import { CircleAlertIcon, ChevronDownIcon, InfoIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { Fragment, useEffect, useEffectEvent, useRef, useState } from "react";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
@@ -88,15 +88,15 @@ import {
   plansFor,
   type EstimateProvider,
   type LimitMeasure,
-  type LimitRate,
-  type ProviderLimitEstimate,
 } from "@t3tools/shared/usageEstimate";
 import {
   LimitEstimatesScope,
   shareOf,
   useLimitEstimates,
   type LimitEstimates,
+  type LimitEstimatesHandle,
 } from "./usageLimitEstimates";
+import { missingShareLabel, rateBasisText, shareRowDetail } from "./usageLimitText";
 import {
   costTypeSegments,
   limitShareSegments,
@@ -214,8 +214,8 @@ export function UsagePage() {
   const showingLimits = metric === "limits";
   const showingShare = metric === "share";
   const chartMetric = metric === "limits" ? "cost" : metric;
-  // Remounts the Usage view's calibration windows so a refresh re-reads them at the new time.
-  const [estimateEpoch, setEstimateEpoch] = useState(0);
+  // Refreshes the Usage view's calibration windows together with the page's own refresh.
+  const limitEstimatesRef = useRef<LimitEstimatesHandle>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [limitsNow, setLimitsNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
@@ -336,13 +336,15 @@ export function UsagePage() {
     }
     refreshingRef.current = true;
     setIsRefreshing(true);
-    if (showingShare) setEstimateEpoch((epoch) => epoch + 1);
-    void Promise.all([refresh(nextWindow), showingShare ? refreshLimits() : undefined]).finally(
-      () => {
-        refreshingRef.current = false;
-        setIsRefreshing(false);
-      },
-    );
+    // The Usage view reads limits and calibration costs together, so neither lags the other.
+    void Promise.all([
+      refresh(nextWindow),
+      showingShare ? refreshLimits() : undefined,
+      showingShare ? limitEstimatesRef.current?.refresh() : undefined,
+    ]).finally(() => {
+      refreshingRef.current = false;
+      setIsRefreshing(false);
+    });
   };
   const connectedLimitsEnvironments = [...presentations]
     .filter(
@@ -527,8 +529,9 @@ export function UsagePage() {
   return (
     <AppRouteModal label="Usage">
       <LimitEstimatesScope
-        epoch={estimateEpoch}
+        ref={limitEstimatesRef}
         nowMs={limitsNow}
+        refreshing={isRefreshing}
         enabled={showingShare}
         selectedEnvironmentIds={selectedEnvironmentIds}
         hiddenProviders={hiddenProviders}
@@ -724,7 +727,7 @@ function UsageOverview({
             selectedEnvironments,
             (bucket) => bucket.provider === provider,
           );
-          return [{ usage, usdPerWindow }];
+          return [{ provider, usage, usdPerWindow }];
         });
 
   return (
@@ -838,7 +841,7 @@ function UsageOverview({
                       ? "-"
                       : estimates !== null
                         ? limitShareOfProvider === null
-                          ? "No limit"
+                          ? missingShareLabel(estimates, provider)
                           : formatLimitShare(limitShareOfProvider)
                         : metric === "cost"
                           ? formatUsd(totals?.costUsd ?? 0)
@@ -944,32 +947,39 @@ function UsageOverview({
           className={cn("grid gap-x-12 gap-y-8 lg:grid-cols-2", figureClass(loadingPartial))}
         >
           {estimates !== null ? (
-            <>
-              <UsageShareBar
-                label="Usage by type"
-                segments={limitShareSegments(
-                  typeParts.map((part) => ({
-                    segments: costTypeSegments(part.usage.categoryCost),
-                    usdPerWindow: part.usdPerWindow,
-                  })),
-                )}
-                format={formatLimitShare}
-              />
-              {typeParts.some(
-                (part) => part.usage.speedCost.fast + part.usage.speedCost.ultrafast > 0,
-              ) ? (
-                <UsageShareBar
-                  label="Usage by speed"
-                  segments={limitShareSegments(
-                    typeParts.map((part) => ({
-                      segments: speedCostSegments(part.usage.speedCost),
-                      usdPerWindow: part.usdPerWindow,
-                    })),
-                  )}
-                  format={formatLimitShare}
-                />
-              ) : null}
-            </>
+            // Each provider has its own pool, so its shares never add to another provider's.
+            typeParts.map((part) => {
+              const pool = (
+                <span className="text-xs text-muted-foreground">
+                  of {PROVIDER_PRESENTATION[part.provider].label}{" "}
+                  {LIMIT_MEASURE_LABEL[estimates.measure]} limit
+                </span>
+              );
+              return (
+                <Fragment key={part.provider}>
+                  <UsageShareBar
+                    label="Usage by type"
+                    aside={pool}
+                    segments={limitShareSegments(
+                      costTypeSegments(part.usage.categoryCost),
+                      part.usdPerWindow,
+                    )}
+                    format={formatLimitShare}
+                  />
+                  {part.usage.speedCost.fast + part.usage.speedCost.ultrafast > 0 ? (
+                    <UsageShareBar
+                      label="Usage by speed"
+                      aside={pool}
+                      segments={limitShareSegments(
+                        speedCostSegments(part.usage.speedCost),
+                        part.usdPerWindow,
+                      )}
+                      format={formatLimitShare}
+                    />
+                  ) : null}
+                </Fragment>
+              );
+            })
           ) : metric === "tokens" ? (
             <UsageShareBar
               label="Tokens by type"
@@ -1196,38 +1206,6 @@ function UsageOverview({
       </section>
     </div>
   );
-}
-
-function shareRowDetail(
-  estimates: LimitEstimates,
-  provider: UsageProviderKind,
-  costUsd: number,
-): string {
-  const other: LimitMeasure = estimates.measure === "weekly" ? "session" : "weekly";
-  const otherShare = shareOf(estimates, provider, costUsd, other);
-  const otherText =
-    otherShare === null
-      ? `no ${LIMIT_MEASURE_LABEL[other]} limit`
-      : `${formatLimitShare(otherShare)} of ${LIMIT_MEASURE_LABEL[other]}`;
-  return `${otherText} · ${formatUsd(costUsd)} API`;
-}
-
-function rateBasisText(rate: LimitRate, measure: LimitMeasure, estimate: ProviderLimitEstimate) {
-  const window = LIMIT_MEASURE_LABEL[measure];
-  if (rate.basis === "noLimit") return `No ${window} limit on this account.`;
-  const usd = rate.usdPerWindow === null ? "" : `${formatUsd(rate.usdPerWindow)} API fills it`;
-  const rejected =
-    rate.rejectedUsdPerWindow === undefined
-      ? ""
-      : ` This window read ${formatUsd(rate.rejectedUsdPerWindow)}, too far off to trust.`;
-  switch (rate.basis) {
-    case "calibrated":
-      return `${usd}, calibrated from ${Math.round(rate.usedPercent ?? 0)}% used now.`;
-    case "remembered":
-      return `${usd}, calibrated in an earlier window.${rejected}`;
-    case "public":
-      return `${usd}, public estimate for ${estimate.plan.label}.${rejected}`;
-  }
 }
 
 const PLAN_AUTO = "auto";

@@ -16,7 +16,7 @@ export interface SubscriptionPlan {
   readonly label: string;
   /** API-priced USD that fills 100% of the weekly window. */
   readonly weeklyUsd: number;
-  /** API-priced USD that fills 100% of the 5-hour window; null when the plan has none. */
+  /** API-priced USD that fills 100% of the 5-hour window; null when no figure is known. */
   readonly sessionUsd: number | null;
 }
 
@@ -63,6 +63,13 @@ const DEFAULT_PLAN: Record<EstimateProvider, string> = {
   claude: "claude-max",
   codex: "codex-plus",
 };
+
+/** Plans whose complete live reading carries only a weekly window when they have no 5-hour limit. */
+const WEEKLY_ONLY_PLANS: ReadonlySet<string> = new Set([
+  "codex-pro-100",
+  "codex-pro-200",
+  "codex-pro-500",
+]);
 
 export function plansFor(provider: EstimateProvider): readonly SubscriptionPlan[] {
   return SUBSCRIPTION_PLANS.filter((plan) => plan.provider === provider);
@@ -126,17 +133,21 @@ export function mainLimitWindow(
   );
 }
 
-/** Start of the window that is current at `nowMs`, or null without a future reset time. */
+/**
+ * Start of the window that was open at `atMs`, or null without a reset after that instant or
+ * without a positive duration.
+ */
 export function currentWindowStart(
   window: ServerProviderUsageWindow,
   measure: LimitMeasure,
-  nowMs: number,
+  atMs: number,
 ): number | null {
   if (window.resetsAt === undefined) return null;
   const resetsAtMs = Date.parse(window.resetsAt);
-  if (!Number.isFinite(resetsAtMs) || resetsAtMs <= nowMs) return null;
-  const durationMs = (window.windowDurationMins ?? DEFAULT_WINDOW_MINS[measure]) * 60_000;
-  return resetsAtMs - durationMs;
+  if (!Number.isFinite(resetsAtMs) || resetsAtMs <= atMs) return null;
+  const durationMins = window.windowDurationMins ?? DEFAULT_WINDOW_MINS[measure];
+  if (!(durationMins > 0)) return null;
+  return resetsAtMs - durationMins * 60_000;
 }
 
 export interface CostPeriod {
@@ -146,22 +157,26 @@ export interface CostPeriod {
 }
 
 /**
- * Cost from `sinceMs` to `nowMs`, assuming each bucket's cost is spread evenly
- * over its period. The current period ends at `nowMs`, since nothing after now
- * has happened yet.
+ * Cost from `sinceMs` to `untilMs`, assuming each bucket's cost is spread evenly over the part
+ * of its period that the data covers, which ends at `dataEndMs` for the bucket still open.
  */
-export function costSince(periods: readonly CostPeriod[], sinceMs: number, nowMs: number): number {
+export function costSince(
+  periods: readonly CostPeriod[],
+  sinceMs: number,
+  untilMs: number,
+  dataEndMs: number = untilMs,
+): number {
   let total = 0;
   for (const period of periods) {
-    if (period.startMs > nowMs) continue;
-    const end = Math.min(period.endMs, nowMs);
+    if (period.startMs > untilMs) continue;
+    const end = Math.min(period.endMs, dataEndMs);
     const length = end - period.startMs;
     if (length <= 0) {
-      // A period that opened this instant holds only work recorded right now.
+      // A period that opened as the data was read holds only work recorded at that instant.
       if (period.startMs >= sinceMs) total += period.costUsd;
       continue;
     }
-    const overlap = end - Math.max(period.startMs, sinceMs);
+    const overlap = Math.min(end, untilMs) - Math.max(period.startMs, sinceMs);
     if (overlap > 0) total += period.costUsd * (overlap / length);
   }
   return total;
@@ -243,8 +258,48 @@ const MIN_COST_USD: Record<LimitMeasure, number> = { weekly: 5, session: 1 };
 /** Calibrations this far from the public figure usually mean usage outside these transcripts. */
 const MAX_DEVIATION = 4;
 
+/** A live percentage is a reading of one instant; older readings no longer match today's cost. */
+const MAX_OBSERVATION_AGE_MS = 15 * 60_000;
+/** Server and browser clocks, and a query window cut at the minute, may differ by this much. */
+const CLOCK_TOLERANCE_MS = 2 * 60_000;
+/** Which windows an account has changes far more slowly than how full they are. */
+const STRUCTURE_MAX_AGE_MS = 24 * 3_600_000;
+
+/** One live limits reading of one account. */
+export interface LimitObservation {
+  readonly windows: readonly ServerProviderUsageWindow[];
+  /** When the windows were read. */
+  readonly checkedAtMs: number;
+  /** The last probe failed, so the windows are an older retained reading. */
+  readonly probeFailed: boolean;
+}
+
+/** API cost history of the observed account, already checked for complete coverage. */
+export interface CostHistory {
+  readonly periods: readonly CostPeriod[];
+  readonly coverageStartMs: number;
+  /** The data runs through this instant. */
+  readonly dataEndMs: number;
+}
+
+/** Why a live reading did not calibrate. */
+export type CalibrationBlock =
+  | "noReading"
+  | "probeFailed"
+  | "stale"
+  | "noReset"
+  | "incomplete"
+  | "otherAccounts"
+  | "mixedAccounts"
+  | "thin";
+
 export type Calibration =
-  | { readonly kind: "calibrated"; readonly usdPerWindow: number; readonly usedPercent: number }
+  | {
+      readonly kind: "calibrated";
+      readonly usdPerWindow: number;
+      readonly usedPercent: number;
+      readonly observedAtMs: number;
+    }
   | { readonly kind: "thin" }
   | { readonly kind: "outOfRange"; readonly usdPerWindow: number; readonly usedPercent: number };
 
@@ -253,6 +308,7 @@ export function calibrateWindow(input: {
   readonly usedPercent: number;
   readonly costUsd: number;
   readonly publicUsd: number | null;
+  readonly observedAtMs: number;
 }): Calibration {
   const { measure, usedPercent, costUsd, publicUsd } = input;
   if (usedPercent < MIN_USED_PERCENT[measure] || costUsd < MIN_COST_USD[measure]) {
@@ -265,69 +321,226 @@ export function calibrateWindow(input: {
   ) {
     return { kind: "outOfRange", usdPerWindow, usedPercent };
   }
-  return { kind: "calibrated", usdPerWindow, usedPercent };
+  return { kind: "calibrated", usdPerWindow, usedPercent, observedAtMs: input.observedAtMs };
+}
+
+/**
+ * Calibrates one window when the reading is current and successful and a cost history covers
+ * the window up to the reading. Cost counts only through the reading's own time.
+ */
+export function calibrateObservation(input: {
+  readonly measure: LimitMeasure;
+  readonly observation: LimitObservation;
+  readonly window: ServerProviderUsageWindow;
+  /** Preferred first; an entry is either complete history or why it is not usable. */
+  readonly costs: readonly (CostHistory | CalibrationBlock)[];
+  readonly publicUsd: number | null;
+  readonly nowMs: number;
+}): Calibration | CalibrationBlock {
+  const { measure, observation, window, nowMs } = input;
+  if (observation.probeFailed) return "probeFailed";
+  const observedAtMs = observation.checkedAtMs;
+  if (
+    !Number.isFinite(observedAtMs) ||
+    observedAtMs > nowMs + CLOCK_TOLERANCE_MS ||
+    nowMs - observedAtMs > MAX_OBSERVATION_AGE_MS
+  ) {
+    return "stale";
+  }
+  const startMs = currentWindowStart(window, measure, observedAtMs);
+  if (startMs === null) return "noReset";
+  // A specific reason, such as another account's usage, says more than missing coverage.
+  let reason: CalibrationBlock | null = null;
+  for (const history of input.costs) {
+    if (typeof history === "string") {
+      if (reason === null || reason === "incomplete") reason = history;
+      continue;
+    }
+    // Data must reach the reading and must not run far past it, or the two mix moments.
+    if (
+      history.coverageStartMs > startMs ||
+      history.dataEndMs < observedAtMs - CLOCK_TOLERANCE_MS ||
+      history.dataEndMs - observedAtMs > MAX_OBSERVATION_AGE_MS
+    ) {
+      reason ??= "incomplete";
+      continue;
+    }
+    return calibrateWindow({
+      measure,
+      usedPercent: window.usedPercent,
+      costUsd: costSince(history.periods, startMs, observedAtMs, history.dataEndMs),
+      publicUsd: input.publicUsd,
+      observedAtMs,
+    });
+  }
+  return reason ?? "incomplete";
+}
+
+/**
+ * True only when a successful, recent reading of a plan known to drop the 5-hour limit lists
+ * the provider-wide weekly window and no 5-hour window at all. Missing data is not proof.
+ */
+export function sessionLimitAbsenceVerified(
+  detectedPlanId: string | null,
+  observation: LimitObservation | undefined,
+  nowMs: number,
+): boolean {
+  if (observation === undefined || observation.probeFailed) return false;
+  if (detectedPlanId === null || !WEEKLY_ONLY_PLANS.has(detectedPlanId)) return false;
+  const age = nowMs - observation.checkedAtMs;
+  if (!(age >= -CLOCK_TOLERANCE_MS && age <= STRUCTURE_MAX_AGE_MS)) return false;
+  return (
+    mainLimitWindow(observation.windows, "weekly") !== undefined &&
+    !observation.windows.some((window) => window.kind === "session")
+  );
 }
 
 export interface RememberedCalibration {
   readonly usdPerWindow: number;
   readonly usedPercent: number;
+  /** When the live reading behind it was taken. */
   readonly at: number;
   readonly planId: string;
+  /** The account or credential it was measured on. */
+  readonly account: string;
 }
 
 /** Remembered calibrations older than this predate most plan and pricing changes. */
-const REMEMBERED_MAX_AGE_MS = 21 * 24 * 3_600_000;
+export const REMEMBERED_MAX_AGE_MS = 21 * 24 * 3_600_000;
 
-export type RateBasis = "calibrated" | "remembered" | "public" | "noLimit";
+export type RememberedCalibrations = {
+  readonly [P in EstimateProvider]?:
+    | { readonly [M in LimitMeasure]?: RememberedCalibration | undefined }
+    | undefined;
+};
+
+const isPositiveFinite = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value > 0;
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0;
+
+function parseRememberedEntry(raw: unknown): RememberedCalibration | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const entry = raw as Record<string, unknown>;
+  if (
+    !isPositiveFinite(entry.usdPerWindow) ||
+    !isPositiveFinite(entry.usedPercent) ||
+    entry.usedPercent > 100 ||
+    !isPositiveFinite(entry.at) ||
+    !isNonEmptyString(entry.planId) ||
+    !isNonEmptyString(entry.account)
+  ) {
+    return undefined;
+  }
+  return {
+    usdPerWindow: entry.usdPerWindow,
+    usedPercent: entry.usedPercent,
+    at: entry.at,
+    planId: entry.planId,
+    account: entry.account,
+  };
+}
+
+/** Keeps each well-formed stored entry and drops the rest one by one. */
+export function parseRememberedCalibrations(raw: unknown): RememberedCalibrations {
+  if (typeof raw !== "object" || raw === null) return {};
+  const result: Partial<
+    Record<EstimateProvider, Partial<Record<LimitMeasure, RememberedCalibration>>>
+  > = {};
+  for (const provider of ESTIMATE_PROVIDERS) {
+    const byMeasure = (raw as Record<string, unknown>)[provider];
+    if (typeof byMeasure !== "object" || byMeasure === null) continue;
+    for (const measure of ["weekly", "session"] as const) {
+      const entry = parseRememberedEntry((byMeasure as Record<string, unknown>)[measure]);
+      if (entry !== undefined) (result[provider] ??= {})[measure] = entry;
+    }
+  }
+  return result;
+}
+
+/** A remembered entry applies only to its own account and plan, within its age limit. */
+export function rememberedApplies(
+  remembered: RememberedCalibration | undefined,
+  account: string | null,
+  planId: string,
+  nowMs: number,
+): remembered is RememberedCalibration {
+  if (remembered === undefined || account === null) return false;
+  const age = nowMs - remembered.at;
+  return (
+    remembered.account === account &&
+    remembered.planId === planId &&
+    isPositiveFinite(remembered.usdPerWindow) &&
+    age >= 0 &&
+    age <= REMEMBERED_MAX_AGE_MS
+  );
+}
+
+/**
+ * calibrated, remembered and public are estimates; noLimit is a verified absence; unknown means
+ * no figure is available for a window the account may have.
+ */
+export type RateBasis = "calibrated" | "remembered" | "public" | "noLimit" | "unknown";
 
 export interface LimitRate {
   readonly basis: RateBasis;
-  /** API-priced USD per 100% of the window; null when the account has no such limit. */
+  /** API-priced USD per 100% of the window; null for noLimit and unknown. */
   readonly usdPerWindow: number | null;
   readonly usedPercent?: number;
+  /** When the live reading behind a calibrated or remembered rate was taken. */
+  readonly observedAtMs?: number;
   /** Set when this window's own data disagreed too much with the public figure to trust. */
   readonly rejectedUsdPerWindow?: number;
+  /** Why this window's own reading did not calibrate. */
+  readonly blocked?: CalibrationBlock;
+  /** A successful reading listed no such window without proving the account has none. */
+  readonly windowUnreported?: boolean;
 }
 
 export function resolveRate(input: {
   readonly measure: LimitMeasure;
   readonly plan: SubscriptionPlan;
-  /** Whether a live limits snapshot was read; then a missing window means no such limit. */
-  readonly hasLimitData: boolean;
-  readonly windowPresent: boolean;
-  readonly calibration: Calibration | null;
+  readonly verifiedNoLimit: boolean;
+  readonly windowUnreported: boolean;
+  readonly calibration: Calibration | CalibrationBlock | null;
   readonly remembered: RememberedCalibration | undefined;
+  /** Null when the account is unknown, so nothing remembered can be matched to it. */
+  readonly account: string | null;
   readonly nowMs: number;
 }): LimitRate {
   const { measure, plan, calibration, remembered, nowMs } = input;
-  if (input.hasLimitData && !input.windowPresent && measure === "session") {
-    return { basis: "noLimit", usdPerWindow: null };
-  }
-  if (calibration?.kind === "calibrated") {
+  if (input.verifiedNoLimit) return { basis: "noLimit", usdPerWindow: null };
+  if (typeof calibration === "object" && calibration?.kind === "calibrated") {
     return {
       basis: "calibrated",
       usdPerWindow: calibration.usdPerWindow,
       usedPercent: calibration.usedPercent,
+      observedAtMs: calibration.observedAtMs,
     };
   }
-  const rejected =
-    calibration?.kind === "outOfRange" ? { rejectedUsdPerWindow: calibration.usdPerWindow } : {};
-  if (
-    remembered !== undefined &&
-    remembered.planId === plan.id &&
-    nowMs - remembered.at <= REMEMBERED_MAX_AGE_MS
-  ) {
+  const notes = {
+    ...(typeof calibration === "object" && calibration?.kind === "outOfRange"
+      ? { rejectedUsdPerWindow: calibration.usdPerWindow }
+      : {}),
+    ...(typeof calibration === "string" ? { blocked: calibration } : {}),
+    ...(typeof calibration === "object" && calibration?.kind === "thin"
+      ? { blocked: "thin" as const }
+      : {}),
+    ...(input.windowUnreported ? { windowUnreported: true } : {}),
+  };
+  if (rememberedApplies(remembered, input.account, plan.id, nowMs)) {
     return {
       basis: "remembered",
       usdPerWindow: remembered.usdPerWindow,
       usedPercent: remembered.usedPercent,
-      ...rejected,
+      observedAtMs: remembered.at,
+      ...notes,
     };
   }
   const publicUsd = measure === "weekly" ? plan.weeklyUsd : plan.sessionUsd;
   return publicUsd === null
-    ? { basis: "noLimit", usdPerWindow: null }
-    : { basis: "public", usdPerWindow: publicUsd, ...rejected };
+    ? { basis: "unknown", usdPerWindow: null, ...notes }
+    : { basis: "public", usdPerWindow: publicUsd, ...notes };
 }
 
 /** Share of a window (1 = 100%) that `costUsd` of API-priced usage fills. */
@@ -348,26 +561,29 @@ export const LIMIT_MEASURE_LABEL: Record<LimitMeasure, string> = {
   session: "5-hour",
 };
 
-type ProviderCostByPeriod = ReadonlyMap<UsageProviderKind, { readonly costUsd: number }>;
-
 export interface ProviderLimitEstimate {
   readonly provider: EstimateProvider;
   readonly plan: SubscriptionPlan;
   readonly planSource: PlanSource;
   readonly detectedPlanId: string | null;
+  /** The account the rates were measured on; null when unknown or when several are selected. */
+  readonly account: string | null;
   readonly rates: Readonly<Record<LimitMeasure, LimitRate>>;
 }
 
-export type RememberedCalibrations = {
-  readonly [P in EstimateProvider]?:
-    | { readonly [M in LimitMeasure]?: RememberedCalibration | undefined }
-    | undefined;
-};
+/** What a provider's cost history can offer for calibration. */
+export type ProviderCosts =
+  | {
+      /** Hourly first: it resolves the 5-hour window and recent weekly starts more finely. */
+      readonly hourly: CostHistory | CalibrationBlock;
+      readonly daily: CostHistory | CalibrationBlock;
+    }
+  | { readonly blocked: CalibrationBlock };
 
 /**
- * Builds one provider's rates. `daily` must reach back past the weekly window's
- * start and `hourly` must cover the last five hours for those windows to
- * calibrate; otherwise they fall back to a remembered or public figure.
+ * Builds one provider's rates from one account's live reading. Each window calibrates only from
+ * a current, successful reading with complete cost history of that account; otherwise it falls
+ * back to a remembered figure for the same account and plan, then to the public figure.
  */
 export function estimateProviderLimits(input: {
   readonly provider: EstimateProvider;
@@ -375,52 +591,46 @@ export function estimateProviderLimits(input: {
   readonly auth:
     | { readonly type?: string | undefined; readonly label?: string | undefined }
     | undefined;
-  /** Live limit windows, or undefined when the provider reported none. */
-  readonly windows: readonly ServerProviderUsageWindow[] | undefined;
-  readonly daily: readonly { readonly day: string; readonly byProvider: ProviderCostByPeriod }[];
-  readonly dailyCoverageStartMs: number | null;
-  readonly hourly: readonly {
-    readonly hourStart: string;
-    readonly byProvider: ProviderCostByPeriod;
-  }[];
-  readonly hourlyCoverageStartMs: number | null;
-  readonly timeZone: string;
+  readonly observation: LimitObservation | undefined;
+  readonly account: string | null;
+  readonly costs: ProviderCosts;
   readonly remembered: RememberedCalibrations;
   readonly nowMs: number;
 }): ProviderLimitEstimate {
-  const { provider, windows, nowMs } = input;
+  const { provider, observation, costs, nowMs } = input;
   const detectedPlanId = detectPlan(provider, input.auth);
   const { plan, source } = resolvePlan(provider, input.planSetting, detectedPlanId);
-  const hasLimitData = windows !== undefined && windows.length > 0;
+  const readingSucceeded =
+    observation !== undefined && !observation.probeFailed && observation.windows.length > 0;
 
   const rateFor = (measure: LimitMeasure): LimitRate => {
-    const window = windows === undefined ? undefined : mainLimitWindow(windows, measure);
-    let calibration: Calibration | null = null;
-    const startMs = window === undefined ? null : currentWindowStart(window, measure, nowMs);
-    if (window !== undefined && startMs !== null) {
-      const useHourly =
-        input.hourlyCoverageStartMs !== null && input.hourlyCoverageStartMs <= startMs;
-      const covered =
-        useHourly || (input.dailyCoverageStartMs !== null && input.dailyCoverageStartMs <= startMs);
-      if (covered) {
-        const periods = useHourly
-          ? hourlyCostPeriods(input.hourly, provider)
-          : dailyCostPeriods(input.daily, provider, input.timeZone);
-        calibration = calibrateWindow({
-          measure,
-          usedPercent: window.usedPercent,
-          costUsd: costSince(periods, startMs, nowMs),
-          publicUsd: measure === "weekly" ? plan.weeklyUsd : plan.sessionUsd,
-        });
-      }
+    const verifiedNoLimit =
+      measure === "session" && sessionLimitAbsenceVerified(detectedPlanId, observation, nowMs);
+    const window =
+      observation === undefined ? undefined : mainLimitWindow(observation.windows, measure);
+    const publicUsd = measure === "weekly" ? plan.weeklyUsd : plan.sessionUsd;
+    let calibration: Calibration | CalibrationBlock | null = null;
+    if (observation?.probeFailed === true) calibration = "probeFailed";
+    else if ("blocked" in costs) calibration = costs.blocked;
+    else if (observation === undefined || window === undefined) calibration = "noReading";
+    else {
+      calibration = calibrateObservation({
+        measure,
+        observation,
+        window,
+        costs: [costs.hourly, costs.daily],
+        publicUsd,
+        nowMs,
+      });
     }
     return resolveRate({
       measure,
       plan,
-      hasLimitData,
-      windowPresent: window !== undefined,
+      verifiedNoLimit,
+      windowUnreported: readingSucceeded && window === undefined && !verifiedNoLimit,
       calibration,
       remembered: input.remembered[provider]?.[measure],
+      account: input.account,
       nowMs,
     });
   };
@@ -430,13 +640,15 @@ export function estimateProviderLimits(input: {
     plan,
     planSource: source,
     detectedPlanId,
+    account: input.account,
     rates: { weekly: rateFor("weekly"), session: rateFor("session") },
   };
 }
 
-const REMEMBER_INTERVAL_MS = 10 * 60_000;
-
-/** Keeps each fresh calibration so the next window can use it before it has enough data. */
+/**
+ * Keeps each calibration under its account so the next window can use it before it has enough
+ * data. A newer reading replaces an older one; another account or plan replaces it outright.
+ */
 export function rememberCalibrations(
   previous: RememberedCalibrations,
   estimates: readonly ProviderLimitEstimate[],
@@ -445,23 +657,35 @@ export function rememberCalibrations(
   const next: Record<string, Record<string, RememberedCalibration | undefined>> = {};
   let changed = false;
   for (const estimate of estimates) {
+    if (estimate.account === null) continue;
     for (const measure of ["weekly", "session"] as const) {
       const rate = estimate.rates[measure];
-      if (rate.basis !== "calibrated" || rate.usdPerWindow === null) continue;
+      if (
+        rate.basis !== "calibrated" ||
+        rate.usdPerWindow === null ||
+        rate.observedAtMs === undefined ||
+        rate.usedPercent === undefined
+      ) {
+        continue;
+      }
+      // Never stamp a reading later than now, so its age stays nonnegative.
+      const at = Math.min(rate.observedAtMs, nowMs);
       const current = previous[estimate.provider]?.[measure];
       if (
         current !== undefined &&
+        current.account === estimate.account &&
         current.planId === estimate.plan.id &&
-        nowMs - current.at < REMEMBER_INTERVAL_MS
+        current.at >= at
       ) {
         continue;
       }
       const forProvider = (next[estimate.provider] ??= { ...previous[estimate.provider] });
       forProvider[measure] = {
         usdPerWindow: rate.usdPerWindow,
-        usedPercent: rate.usedPercent ?? 0,
-        at: nowMs,
+        usedPercent: rate.usedPercent,
+        at,
         planId: estimate.plan.id,
+        account: estimate.account,
       };
       changed = true;
     }

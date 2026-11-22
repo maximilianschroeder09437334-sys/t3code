@@ -55,7 +55,7 @@ describe("model rates", () => {
 });
 
 describe("limitShareSegments", () => {
-  it("adds each provider's cost as a share of that provider's own window", () => {
+  it("converts one provider's cost into shares of that provider's own window", () => {
     const claude = costTypeSegments({
       input: 100,
       cacheRead: 50,
@@ -70,13 +70,26 @@ describe("limitShareSegments", () => {
       output: 20,
       unsplit: 0,
     });
-    const segments = limitShareSegments([
-      { segments: claude, usdPerWindow: 1000 },
-      { segments: codex, usdPerWindow: 100 },
-    ]);
-    const byLabel = new Map(segments.map((segment) => [segment.label, segment.value]));
-    expect(byLabel.get("Input")).toBeCloseTo(0.1 + 0.1);
-    expect(byLabel.get("Output")).toBeCloseTo(0.25 + 0.2);
-    expect(limitShareSegments([])).toEqual([]);
+    // Equal input cost fills each provider's own pool by a different share, and never a sum.
+    const claudeShares = new Map(
+      limitShareSegments(claude, 1000).map((segment) => [segment.label, segment.value]),
+    );
+    const codexShares = new Map(
+      limitShareSegments(codex, 100).map((segment) => [segment.label, segment.value]),
+    );
+    expect(claudeShares.get("Input")).toBeCloseTo(0.1);
+    expect(codexShares.get("Input")).toBeCloseTo(0.1);
+    expect(claudeShares.get("Output")).toBeCloseTo(0.25);
+    expect(codexShares.get("Output")).toBeCloseTo(0.2);
+    const sameCost = costTypeSegments({
+      input: 50,
+      cacheRead: 0,
+      cacheWrite: 0,
+      output: 0,
+      unsplit: 0,
+    });
+    expect(limitShareSegments(sameCost, 1000)[0]?.value).toBeCloseTo(0.05);
+    expect(limitShareSegments(sameCost, 100)[0]?.value).toBeCloseTo(0.5);
+    expect(limitShareSegments(claude, 0)).toEqual([]);
   });
 });

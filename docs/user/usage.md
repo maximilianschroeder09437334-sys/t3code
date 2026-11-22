@@ -120,12 +120,21 @@ Providers publish limits only as percentages, so each share is API-priced cost d
 that fills a whole window. That figure comes from the first of these that is available:
 
 1. **Calibrated:** this account's open window, comparing its live used percentage with the cost
-   Usage sees since the window opened. It needs at least 5% of a weekly or 10% of a 5-hour window.
-2. **Earlier window:** the last calibration from the past 21 days, kept in this browser.
+   Usage sees from the window's start up to that reading. It needs at least 5% of a weekly or 10%
+   of a 5-hour window, a successful limit check from the last 15 minutes, and complete usage from
+   every environment that may use the same account. It is skipped when the selected environments
+   use more than one account, or when another environment's usage can't be matched to an account.
+2. **Earlier window:** the last calibration of the same account and plan from the past 21 days,
+   kept in this browser.
 3. **Public estimate:** third-party measurements for the plan, from November 2026. Claude Pro
    about $165 a week and $13 per 5 hours, Max about $1,250 and $125, Ultra (Max 20x) about $1,600
    and $280. ChatGPT Plus about $55 and $7.50, Pro 100 about $350, Pro 200 about $700 and Pro 500
    about $1,650 a week. Pro 5-hour figures are derived from the weekly figure.
+
+A window reads **No limit** only when a current, successful check of a plan known to drop that
+window, such as ChatGPT Pro's 5-hour window, lists no such window. Otherwise a missing window reads
+as an estimate or **Unknown**. Each provider's usage by type and speed is a share of that
+provider's own limit, so shares of different providers are never added together.
 
 Select the info icon under the headline to see which source each window uses and to set your plan.
 The plan is detected from the account's sign-in when possible, otherwise Claude defaults to Max and
