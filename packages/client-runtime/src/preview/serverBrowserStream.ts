@@ -422,28 +422,86 @@ export interface PreviewFramePainter {
 export function createPreviewFramePainter(
   canvas: HTMLCanvasElement,
   onPainted?: () => void,
+  onError?: (error: Error) => void,
 ): PreviewFramePainter {
   const context = canvas.getContext("2d");
   let stopped = false;
   let decoding = false;
   let waiting: ArrayBuffer | null = null;
+  let cancelFallback: (() => void) | null = null;
+  const paintSource = (source: CanvasImageSource, width: number, height: number) => {
+    if (stopped) return;
+    if (!context) throw new Error("The preview canvas has no 2D drawing context.");
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    context.drawImage(source, 0, 0);
+    onPainted?.();
+  };
   const draw = (jpeg: ArrayBuffer) => {
     decoding = true;
-    void createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }))
-      .then((bitmap) => {
-        if (stopped || !context) {
-          bitmap.close();
+    const blob = new Blob([jpeg], { type: "image/jpeg" });
+    const fallback = (bitmapError?: unknown) =>
+      new Promise<void>((resolve, reject) => {
+        if (stopped) {
+          resolve();
           return;
         }
-        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-        }
-        context.drawImage(bitmap, 0, 0);
-        bitmap.close();
-        onPainted?.();
+        const image = new Image();
+        const url = URL.createObjectURL(blob);
+        let cleaned = false;
+        const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
+          image.onload = null;
+          image.onerror = null;
+          image.src = "";
+          URL.revokeObjectURL(url);
+          cancelFallback = null;
+        };
+        cancelFallback = () => {
+          cleanup();
+          resolve();
+        };
+        image.onload = () => {
+          try {
+            paintSource(image, image.naturalWidth, image.naturalHeight);
+            cleanup();
+            resolve();
+          } catch (error) {
+            cleanup();
+            reject(error);
+          }
+        };
+        image.onerror = () => {
+          cleanup();
+          const detail =
+            bitmapError instanceof Error ? ` Bitmap decoder: ${bitmapError.message}` : "";
+          reject(new Error(`The browser could not decode the preview JPEG.${detail}`));
+        };
+        image.src = url;
+      });
+    const decode =
+      typeof createImageBitmap === "function"
+        ? Promise.resolve()
+            .then(() => (stopped ? null : createImageBitmap(blob)))
+            .then(
+              (bitmap) => {
+                try {
+                  if (bitmap) paintSource(bitmap, bitmap.width, bitmap.height);
+                } finally {
+                  bitmap?.close();
+                }
+              },
+              (error: unknown) => fallback(error),
+            )
+        : fallback();
+    void decode
+      .then(() => undefined)
+      .catch((cause: unknown) => {
+        if (!stopped) onError?.(cause instanceof Error ? cause : new Error(String(cause)));
       })
-      .catch(() => undefined)
       .finally(() => {
         decoding = false;
         const next = waiting;
@@ -460,6 +518,7 @@ export function createPreviewFramePainter(
     stop: () => {
       stopped = true;
       waiting = null;
+      cancelFallback?.();
     },
   };
 }

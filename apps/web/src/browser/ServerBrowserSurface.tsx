@@ -177,8 +177,10 @@ export function ServerBrowserSurface(props: {
   const viewportRef = useRef<PreviewStreamViewport | null>(null);
   const sizeRef = useRef<{ width: number; height: number } | null>(null);
   const hasFrameRef = useRef(false);
+  const [hasFrame, setHasFrame] = useState(false);
   const controlRef = useRef<PreviewStreamControl | null>(null);
   const [control, setControl] = useState<PreviewStreamControl | null>(null);
+  const [frameError, setFrameError] = useState<string | null>(null);
   const [promptText, setPromptText] = useState("");
   const [fileChooser, setFileChooser] = useState<PreviewStreamFileChooser | null>(null);
   const [agentCursor, setAgentCursor] = useState<AgentCursorPlacement | null>(null);
@@ -371,12 +373,22 @@ export function ServerBrowserSurface(props: {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!visible || accessDenied || hostSetup || !access || !cap || !canvas) return;
+    let attemptHasFrame = false;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    const painter = createPreviewFramePainter(canvas, () => {
-      if (hasFrameRef.current) return;
-      hasFrameRef.current = true;
-      firstFrame();
-    });
+    const painter = createPreviewFramePainter(
+      canvas,
+      () => {
+        attemptHasFrame = true;
+        setHasFrame(true);
+        setFrameError(null);
+        if (hasFrameRef.current) return;
+        hasFrameRef.current = true;
+        firstFrame();
+      },
+      (error) => {
+        if (!attemptHasFrame) setFrameError(error.message);
+      },
+    );
     const client = createPreviewStreamClient(
       {
         access,
@@ -464,6 +476,8 @@ export function ServerBrowserSurface(props: {
     clientRef.current = client;
     return () => {
       painter.stop();
+      setHasFrame(false);
+      setFrameError(null);
       if (refreshTimer !== null) clearTimeout(refreshTimer);
       client.stop();
       if (clientRef.current === client) clientRef.current = null;
@@ -926,6 +940,13 @@ export function ServerBrowserSurface(props: {
           <Button variant="outline" size="sm" onClick={() => setHostSetup(null)}>
             Try again
           </Button>
+        </div>
+      ) : null}
+      {visible && !hasFrame && frameError ? (
+        <div className="visible absolute inset-0 z-10 flex items-center justify-center bg-background p-4 text-center">
+          <p role="alert" className="max-w-sm text-sm text-muted-foreground">
+            Browser preview could not decode its first frame: {frameError}
+          </p>
         </div>
       ) : null}
       {visible && accessDenied ? (
