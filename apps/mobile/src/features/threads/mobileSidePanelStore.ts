@@ -2,7 +2,14 @@ import { useSyncExternalStore } from "react";
 
 import type { MobileSurfaceId } from "./threadHeader.logic";
 
-export type MobileSidePanelTabId = Exclude<MobileSurfaceId, "linked-pull-requests" | "device">;
+export type MobileSidePanelTabId =
+  | Exclude<MobileSurfaceId, "side-chat">
+  | "lineage"
+  | `side-chat:${string}`;
+
+export function isMobileSideChatTab(tab: MobileSidePanelTabId): tab is `side-chat:${string}` {
+  return tab.startsWith("side-chat:");
+}
 
 export interface MobileSidePanelTabs {
   readonly tabs: ReadonlyArray<MobileSidePanelTabId>;
@@ -53,9 +60,24 @@ export const mobileSidePanelStore = {
 
   close(key: string, tab: MobileSidePanelTabId): void {
     const current = getSnapshot(key);
-    if (!current.tabs.includes(tab)) return;
+    const closedIndex = current.tabs.indexOf(tab);
+    if (closedIndex === -1) return;
     const tabs = current.tabs.filter((entry) => entry !== tab);
-    const activeTab = current.activeTab === tab ? (tabs.at(-1) ?? null) : current.activeTab;
+    const activeTab =
+      current.activeTab === tab
+        ? (tabs[Math.min(closedIndex, tabs.length - 1)] ?? null)
+        : current.activeTab;
+    publish(key, { tabs, activeTab });
+  },
+
+  reconcile(key: string, available: ReadonlySet<MobileSidePanelTabId>): void {
+    const current = getSnapshot(key);
+    const tabs = current.tabs.filter((tab) => available.has(tab));
+    if (tabs.length === current.tabs.length) return;
+    const activeTab =
+      current.activeTab !== null && tabs.includes(current.activeTab)
+        ? current.activeTab
+        : (tabs.at(-1) ?? null);
     publish(key, { tabs, activeTab });
   },
 };

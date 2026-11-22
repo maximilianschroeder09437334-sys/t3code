@@ -45,6 +45,7 @@ export function useStartSideChat() {
     source: ScopedThreadRef,
     prompt?: string,
     settings?: { readonly runtimeMode: RuntimeMode; readonly modelSelection: ModelSelection },
+    options?: { readonly onCreated?: (target: ScopedThreadRef) => void },
   ): Promise<boolean> => {
     const targetThreadId = ThreadId.make(uuidv4());
     const fork = await forkSideChat({
@@ -82,7 +83,8 @@ export function useStartSideChat() {
       return false;
     }
     if (prompt === undefined) {
-      openLinkedThread({ environmentId: source.environmentId, threadId: targetThreadId });
+      if (options?.onCreated) options.onCreated(targetRef);
+      else openLinkedThread({ environmentId: source.environmentId, threadId: targetThreadId });
       return true;
     }
     if (settings === undefined) {
@@ -126,7 +128,8 @@ export function useStartSideChat() {
       discard();
       return false;
     }
-    openLinkedThread({ environmentId: source.environmentId, threadId: targetThreadId });
+    if (options?.onCreated) options.onCreated(targetRef);
+    else openLinkedThread({ environmentId: source.environmentId, threadId: targetThreadId });
     return true;
   };
 }

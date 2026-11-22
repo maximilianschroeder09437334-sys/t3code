@@ -4,7 +4,7 @@ import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import type { ThreadInspectorMode } from "./thread-inspector-navigation";
 import { useWorkspaceBackNavigation } from "../layout/workspace/useAndroidWorkspaceNavigation";
 import { Modal, Platform, Pressable, ScrollView, View } from "react-native";
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText } from "../../components/ui/AppText";
@@ -19,7 +19,11 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useSideChats } from "../../state/entities";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
-import { mobileSidePanelStore, useMobileSidePanelTabs } from "./mobileSidePanelStore";
+import {
+  isMobileSideChatTab,
+  mobileSidePanelStore,
+  useMobileSidePanelTabs,
+} from "./mobileSidePanelStore";
 import type { MobileSidePanelTabId } from "./mobileSidePanelStore";
 
 export function ThreadHeader(props: {
@@ -39,7 +43,8 @@ export function ThreadHeader(props: {
   readonly onOpenLineage?: () => void;
   readonly canOpenBrowser?: boolean;
   readonly onOpenBrowserPreview?: () => void;
-  readonly onStartNewSideChat?: () => void;
+  readonly onStartNewSideChat?: () => Promise<MobileSidePanelTabId | null>;
+  readonly renderSidePanelSurface?: (tab: MobileSidePanelTabId, sideChatId?: string) => ReactNode;
 }) {
   const goBack = useWorkspaceBackNavigation();
   const { startNewTask } = useAdaptiveWorkspaceLayout();
@@ -55,6 +60,17 @@ export function ThreadHeader(props: {
   const surfaceKey = `${String(threadRef.environmentId)}:${String(threadRef.threadId)}`;
   const surfaceTabs = useMobileSidePanelTabs(surfaceKey);
   const openLinkedThread = useOpenLinkedThread();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops side-chat tabs from the external tab store when their parent no longer lists those chats
+  useEffect(() => {
+    const currentTabs = mobileSidePanelStore.getSnapshot(surfaceKey).tabs;
+    const available = new Set(
+      currentTabs.filter(
+        (tab) =>
+          !isMobileSideChatTab(tab) || sideChats.some((chat) => `side-chat:${chat.id}` === tab),
+      ),
+    );
+    mobileSidePanelStore.reconcile(surfaceKey, available);
+  }, [sideChats, surfaceKey]);
   // Reuse the git menu so publish/review keep their scope checks and default-branch confirmation.
   const gitItems = useThreadGitMenuDefinition(props.gitControls)?.items ?? [];
   const gitItem = (id: string) =>
@@ -76,24 +92,30 @@ export function ThreadHeader(props: {
   // spawning a new shell on every tap; this also works for read-only terminal access.
   const openTerminal = () =>
     props.gitControls.onOpenTerminal(props.gitControls.terminalSessions[0]?.terminalId ?? null);
-  const actions: AppBarAction[] = [
-    {
-      accessibilityLabel: "Thread details",
-      icon: "list.number",
-      onPress: () => setSheet("details"),
-    },
-    {
-      accessibilityLabel: "Open terminal",
-      icon: "terminal",
-      disabled: !props.gitControls.canOpenTerminal,
-      onPress: openTerminal,
-    },
-    {
-      accessibilityLabel: "Open a surface",
-      icon: "square.split.2x1",
-      onPress: () => setSheet("surfaces"),
-    },
-  ];
+  const sideViewAction: AppBarAction = {
+    accessibilityLabel: "Open side view",
+    icon: "square.split.2x1",
+    onPress: () => setSheet("surfaces"),
+  };
+  const actions: AppBarAction[] =
+    Platform.OS === "android"
+      ? [sideViewAction]
+      : [
+          {
+            accessibilityLabel: "Thread details",
+            icon: "list.number",
+            onPress: () => setSheet("details"),
+          },
+          {
+            accessibilityLabel: "Open terminal",
+            icon: "terminal",
+            disabled: !props.gitControls.canOpenTerminal,
+            onPress: openTerminal,
+          },
+          {
+            ...sideViewAction,
+          },
+        ];
   const menus: AppBarMenu[] = [];
   const dismiss = () => setSheet(null);
   const completeDismiss = (action = pendingDismissedAction) => {
@@ -150,8 +172,11 @@ export function ThreadHeader(props: {
     "linked-pull-requests": "link",
     device: "iphone",
     "side-chat": "bubble.left.and.bubble.right",
+    lineage: "person.2",
   } as const;
-  const surfaceHandlers = {
+  const surfaceHandlers: Partial<
+    Record<Exclude<MobileSidePanelTabId, `side-chat:${string}`>, () => void>
+  > = {
     browser: () => props.onOpenBrowserPreview?.(),
     terminal: () => {
       dismiss();
@@ -160,27 +185,38 @@ export function ThreadHeader(props: {
     files: openFiles,
     diff: runGitItem(reviewItem) ?? openGit,
     "pull-request": openGit,
-    "side-chat": () => {
-      const sideChat = sideChats[0];
-      if (!sideChat) return;
-      dismiss();
-      openLinkedThread({
-        environmentId: String(props.gitControls.environmentId),
-        threadId: String(sideChat.id),
-      });
-    },
+    "linked-pull-requests": openGit,
   };
-  const surfaceLabels: Record<MobileSidePanelTabId, string> = {
+  const surfaceLabels: Record<Exclude<MobileSidePanelTabId, `side-chat:${string}`>, string> = {
     browser: "Browser",
     terminal: "Terminal",
     files: "Files",
     diff: "Diff",
     "pull-request": "Pull request",
-    "side-chat": "Side chat",
+    "linked-pull-requests": "Linked pull requests",
+    device: "Device",
+    lineage: "Previous agents",
   };
+  const surfaceLabel = (tab: MobileSidePanelTabId) =>
+    isMobileSideChatTab(tab)
+      ? (sideChats.find((chat) => `side-chat:${chat.id}` === tab)?.title ?? "Side chat")
+      : surfaceLabels[tab];
   const activateSurface = (id: MobileSidePanelTabId) => {
     mobileSidePanelStore.open(surfaceKey, id);
+    if (Platform.OS === "android") {
+      setSheet("surfaces");
+      return;
+    }
     dismiss();
+    if (isMobileSideChatTab(id)) {
+      const sideChat = sideChats.find((chat) => `side-chat:${chat.id}` === id);
+      if (sideChat)
+        openLinkedThread({
+          environmentId: String(props.gitControls.environmentId),
+          threadId: String(sideChat.id),
+        });
+      return;
+    }
     surfaceHandlers[id]?.();
   };
 
@@ -224,22 +260,32 @@ export function ThreadHeader(props: {
                   <View key={tab} className="flex-row items-center rounded-full bg-subtle">
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={`Open ${surfaceLabels[tab]}`}
+                      accessibilityLabel={`Open ${surfaceLabel(tab)}`}
                       accessibilityState={{ selected: surfaceTabs.activeTab === tab }}
                       onPress={() => {
                         mobileSidePanelStore.select(surfaceKey, tab);
+                        if (Platform.OS === "android") return;
                         dismiss();
-                        surfaceHandlers[tab]?.();
+                        if (isMobileSideChatTab(tab)) {
+                          const sideChat = sideChats.find((chat) => `side-chat:${chat.id}` === tab);
+                          if (sideChat)
+                            openLinkedThread({
+                              environmentId: String(props.gitControls.environmentId),
+                              threadId: String(sideChat.id),
+                            });
+                        } else {
+                          surfaceHandlers[tab]?.();
+                        }
                       }}
                       className="py-2 pl-3 pr-1.5 active:opacity-70"
                     >
                       <AppText className="text-xs font-t3-medium text-foreground">
-                        {surfaceLabels[tab]}
+                        {surfaceLabel(tab)}
                       </AppText>
                     </Pressable>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={`Close ${surfaceLabels[tab]} tab`}
+                      accessibilityLabel={`Close ${surfaceLabel(tab)} tab`}
                       onPress={() => mobileSidePanelStore.close(surfaceKey, tab)}
                       className="px-2 py-2 active:opacity-70"
                       hitSlop={8}
@@ -277,121 +323,156 @@ export function ThreadHeader(props: {
               </Pressable>
             </View>
           )}
-          <ScrollView contentContainerClassName="gap-1 p-3">
-            {sheet === "details" ? (
-              <>
-                {surfaceRow(
-                  props.environmentLabel ?? "Environment",
-                  "desktopcomputer",
-                  props.gitControls.canOpenFiles ? openFiles : undefined,
-                  "Open folder and files",
-                )}
-                {props.gitControls.projectScripts.map((script) =>
-                  surfaceRow(
-                    script.name,
-                    "play",
-                    () => {
-                      dismiss();
-                      void props.gitControls.onRunProjectScript(script);
-                    },
-                    script.command,
-                  ),
-                )}
-                {surfaceRow(
-                  "Add project script",
-                  "plus",
-                  undefined,
-                  "Script editing is not available on mobile yet",
-                )}
-                {surfaceRow(
-                  `Branch · ${props.gitControls.gitStatus?.refName ?? props.gitControls.currentBranch ?? "Detached HEAD"}`,
-                  "arrow.triangle.branch",
-                  openGit,
-                )}
-                {surfaceRow(
-                  quickAction?.title ?? "Publish repository",
-                  "arrow.up",
-                  runGitItem(quickAction),
-                  quickAction?.subtitle ?? "Commit, push or open a pull request",
-                )}
-                {surfaceRow(
-                  `Changes · +${props.gitControls.gitStatus?.workingTree?.insertions ?? 0} / −${props.gitControls.gitStatus?.workingTree?.deletions ?? 0}`,
-                  "arrow.left.arrow.right",
-                  runGitItem(reviewItem),
-                  reviewItem?.subtitle,
-                )}
-                {mergeBackItem
-                  ? surfaceRow(
-                      mergeBackItem.title,
-                      PullRequestGlyph.merged,
-                      runGitItem(mergeBackItem),
-                      mergeBackItem.subtitle,
-                    )
-                  : null}
-                {surfaceRow(
-                  `Previous agents · ${props.previousAgentCount ?? 0}`,
-                  "person.2",
-                  props.onOpenLineage ? openLineageAfterDismiss : undefined,
-                  "Lineage",
-                )}
-                <View className="flex-row items-center gap-3 rounded-xl px-4 py-3">
-                  <SymbolView
-                    name="chart.bar.xaxis"
-                    size={19}
-                    tintColorClassName="accent-icon-muted"
-                  />
-                  <View className="flex-1 gap-2">
-                    <View className="flex-row justify-between">
-                      <AppText className="text-sm text-foreground">Context</AppText>
-                      <AppText className="text-xs text-foreground-muted">
-                        {props.contextUsage
-                          ? formatContextUsage(
-                              props.contextUsage.usedTokens,
-                              props.contextUsage.maxTokens,
-                            )
-                          : "No context usage reported"}
-                      </AppText>
-                    </View>
-                    <View className="h-1.5 overflow-hidden rounded-full bg-subtle">
-                      <View
-                        className="h-full rounded-full bg-accent"
-                        style={{
-                          width: `${Math.max(0, Math.min(100, props.contextPercentage ?? 0))}%`,
-                        }}
-                      />
+          {sheet === "surfaces" && Platform.OS === "android" && surfaceTabs.activeTab ? (
+            <View className="flex-1">
+              {props.renderSidePanelSurface?.(
+                surfaceTabs.activeTab,
+                sideChats[0] ? String(sideChats[0].id) : undefined,
+              ) ?? (
+                <View className="flex-1 items-center justify-center px-6">
+                  <AppText className="text-center text-sm text-foreground-muted">
+                    {surfaceLabel(surfaceTabs.activeTab)} is unavailable in this view.
+                  </AppText>
+                </View>
+              )}
+            </View>
+          ) : (
+            <ScrollView contentContainerClassName="gap-1 p-3">
+              {sheet === "details" ? (
+                <>
+                  {surfaceRow(
+                    props.environmentLabel ?? "Environment",
+                    "desktopcomputer",
+                    props.gitControls.canOpenFiles ? openFiles : undefined,
+                    "Open folder and files",
+                  )}
+                  {props.gitControls.projectScripts.map((script) =>
+                    surfaceRow(
+                      script.name,
+                      "play",
+                      () => {
+                        dismiss();
+                        void props.gitControls.onRunProjectScript(script);
+                      },
+                      script.command,
+                    ),
+                  )}
+                  {surfaceRow(
+                    "Add project script",
+                    "plus",
+                    undefined,
+                    "Script editing is not available on mobile yet",
+                  )}
+                  {surfaceRow(
+                    `Branch · ${props.gitControls.gitStatus?.refName ?? props.gitControls.currentBranch ?? "Detached HEAD"}`,
+                    "arrow.triangle.branch",
+                    openGit,
+                  )}
+                  {surfaceRow(
+                    quickAction?.title ?? "Publish repository",
+                    "arrow.up",
+                    runGitItem(quickAction),
+                    quickAction?.subtitle ?? "Commit, push or open a pull request",
+                  )}
+                  {surfaceRow(
+                    `Changes · +${props.gitControls.gitStatus?.workingTree?.insertions ?? 0} / −${props.gitControls.gitStatus?.workingTree?.deletions ?? 0}`,
+                    "arrow.left.arrow.right",
+                    runGitItem(reviewItem),
+                    reviewItem?.subtitle,
+                  )}
+                  {mergeBackItem
+                    ? surfaceRow(
+                        mergeBackItem.title,
+                        PullRequestGlyph.merged,
+                        runGitItem(mergeBackItem),
+                        mergeBackItem.subtitle,
+                      )
+                    : null}
+                  {surfaceRow(
+                    `Previous agents · ${props.previousAgentCount ?? 0}`,
+                    "person.2",
+                    props.onOpenLineage ? openLineageAfterDismiss : undefined,
+                    "Lineage",
+                  )}
+                  <View className="flex-row items-center gap-3 rounded-xl px-4 py-3">
+                    <SymbolView
+                      name="chart.bar.xaxis"
+                      size={19}
+                      tintColorClassName="accent-icon-muted"
+                    />
+                    <View className="flex-1 gap-2">
+                      <View className="flex-row justify-between">
+                        <AppText className="text-sm text-foreground">Context</AppText>
+                        <AppText className="text-xs text-foreground-muted">
+                          {props.contextUsage
+                            ? formatContextUsage(
+                                props.contextUsage.usedTokens,
+                                props.contextUsage.maxTokens,
+                              )
+                            : "No context usage reported"}
+                        </AppText>
+                      </View>
+                      <View className="h-1.5 overflow-hidden rounded-full bg-subtle">
+                        <View
+                          className="h-full rounded-full bg-accent"
+                          style={{
+                            width: `${Math.max(0, Math.min(100, props.contextPercentage ?? 0))}%`,
+                          }}
+                        />
+                      </View>
                     </View>
                   </View>
-                </View>
-              </>
-            ) : sheet === "surface-list" ? (
-              <>
-                {surfaceAvailability.map((item) =>
-                  surfaceRow(
-                    item.label,
-                    surfaceIcons[item.id],
-                    item.available && item.id !== "linked-pull-requests" && item.id !== "device"
-                      ? () => activateSurface(item.id as MobileSidePanelTabId)
-                      : undefined,
-                    item.available ? undefined : item.reason,
-                  ),
-                )}
-                {props.onStartNewSideChat
-                  ? surfaceRow("New side chat", "plus", () => {
-                      dismiss();
-                      props.onStartNewSideChat?.();
-                    })
-                  : null}
-              </>
-            ) : surfaceTabs.tabs.length === 0 ? (
-              <AppText className="px-4 py-6 text-center text-sm text-foreground-muted">
-                No surfaces open. Add one to get started.
-              </AppText>
-            ) : (
-              <AppText className="px-4 py-6 text-center text-sm text-foreground-muted">
-                Choose an open surface above or add another.
-              </AppText>
-            )}
-          </ScrollView>
+                </>
+              ) : sheet === "surface-list" ? (
+                <>
+                  {surfaceRow("Thread details", "list.number", () => setSheet("details"))}
+                  {surfaceAvailability.map((item) =>
+                    surfaceRow(
+                      item.label,
+                      surfaceIcons[item.id],
+                      item.available &&
+                        (Platform.OS === "android" ||
+                          (item.id !== "linked-pull-requests" && item.id !== "device"))
+                        ? () => {
+                            if (item.id === "side-chat") {
+                              const sideChat = sideChats[0];
+                              if (sideChat) activateSurface(`side-chat:${sideChat.id}`);
+                            } else {
+                              activateSurface(item.id);
+                            }
+                          }
+                        : undefined,
+                      item.available ? undefined : item.reason,
+                    ),
+                  )}
+                  {sideChats.map((sideChat) =>
+                    surfaceRow(sideChat.title, surfaceIcons["side-chat"], () =>
+                      activateSurface(`side-chat:${sideChat.id}`),
+                    ),
+                  )}
+                  {Platform.OS === "android"
+                    ? surfaceRow("Previous agents", surfaceIcons.lineage, () =>
+                        activateSurface("lineage"),
+                      )
+                    : null}
+                  {props.onStartNewSideChat
+                    ? surfaceRow("New side chat", "plus", async () => {
+                        const tab = await props.onStartNewSideChat?.();
+                        if (tab) activateSurface(tab);
+                      })
+                    : null}
+                </>
+              ) : surfaceTabs.tabs.length === 0 ? (
+                <AppText className="px-4 py-6 text-center text-sm text-foreground-muted">
+                  No surfaces open. Add one to get started.
+                </AppText>
+              ) : (
+                <AppText className="px-4 py-6 text-center text-sm text-foreground-muted">
+                  Choose an open surface above or add another.
+                </AppText>
+              )}
+            </ScrollView>
+          )}
         </View>
       </Modal>
     </>

@@ -247,7 +247,7 @@ type ThreadTerminalRouteScreenProps = StaticScreenProps<{
   readonly environmentId: string;
   readonly threadId: string;
   readonly terminalId?: string;
-}>;
+}> & { readonly onCloseInline?: () => void };
 
 type ThreadSelection = ReturnType<typeof useThreadSelection>;
 
@@ -330,6 +330,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       hasExplicitTerminalId={explicitTerminalId !== null}
       access={access}
       knownSessions={knownSessions}
+      onCloseInline={props.onCloseInline}
     />
   );
 }
@@ -362,6 +363,7 @@ function ThreadTerminal(props: {
   readonly hasExplicitTerminalId: boolean;
   readonly access: ReturnType<typeof useTerminalAccess>;
   readonly knownSessions: ReturnType<typeof useKnownTerminalSessions>;
+  readonly onCloseInline?: () => void;
 }) {
   const { params, routeEnvironmentId, thread: selectedThread, terminalId } = props;
   const { selectedThreadProject, selectedEnvironmentConnection } = props.selection;
@@ -691,6 +693,10 @@ function ThreadTerminal(props: {
   };
 
   const handleCloseTerminal = () => {
+    if (props.onCloseInline) {
+      props.onCloseInline();
+      return;
+    }
     if (navigation.canGoBack()) {
       navigation.goBack();
       return;

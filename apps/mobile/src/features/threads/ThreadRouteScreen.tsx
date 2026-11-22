@@ -123,6 +123,14 @@ import {
   threadRouteOpensDraft,
 } from "./thread-route-hydration";
 import { ThreadHeader } from "./ThreadHeader";
+import { BrowserPreviewInline } from "../browser/BrowserPreviewRouteScreen";
+import {
+  isMobileSideChatTab,
+  mobileSidePanelStore,
+  type MobileSidePanelTabId,
+} from "./mobileSidePanelStore";
+import { ThreadTerminalRouteScreen } from "../terminal/ThreadTerminalRouteScreen";
+import { DevicePreviewScreen } from "../devices/DevicePreviewRouteScreen";
 import { resumeThread } from "./resume-thread";
 import {
   useAndroidWorkspaceBack,
@@ -140,6 +148,8 @@ import { useThreadStatusAnnouncements } from "./useThreadStatusAnnouncements";
 import type { ThreadInspectorMode, ThreadInspectorTarget } from "./thread-inspector-navigation";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import { ThreadAgentsSheet } from "./ThreadAgentsSheet";
+import { ThreadPullRequestsSheet } from "./ThreadPullRequestsSheet";
 import {
   deriveLatestContextWindowSnapshot,
   latestProviderTurnTokenUsage,
@@ -1081,11 +1091,108 @@ function ThreadRouteContent(
                       threadId: selectedThread.id,
                     })
                   }
-                  onStartNewSideChat={() =>
-                    void startSideChat(
+                  onStartNewSideChat={async () => {
+                    let tab: MobileSidePanelTabId | null = null;
+                    const created = await startSideChat(
                       scopeThreadRef(selectedThread.environmentId, selectedThread.id),
-                    )
-                  }
+                      undefined,
+                      undefined,
+                      {
+                        onCreated: (target) => {
+                          tab = `side-chat:${target.threadId}`;
+                        },
+                      },
+                    );
+                    return created ? tab : null;
+                  }}
+                  renderSidePanelSurface={(tab) => {
+                    const parentSurfaceKey = `${String(selectedThread.environmentId)}:${String(selectedThread.id)}`;
+                    const closeTab = () => mobileSidePanelStore.close(parentSurfaceKey, tab);
+                    if (tab === "browser") {
+                      return (
+                        <BrowserPreviewInline
+                          environmentId={String(selectedThread.environmentId)}
+                          threadId={String(selectedThread.id)}
+                        />
+                      );
+                    }
+                    if (tab === "files") return renderFilesInspector();
+                    if (tab === "diff" || tab === "pull-request") return renderGitInspector();
+                    if (tab === "terminal") {
+                      return (
+                        <ThreadTerminalRouteScreen
+                          route={{
+                            params: {
+                              environmentId: String(selectedThread.environmentId),
+                              threadId: String(selectedThread.id),
+                              terminalId: threadGitControlProps.terminalSessions[0]?.terminalId,
+                            },
+                          }}
+                          onCloseInline={closeTab}
+                        />
+                      );
+                    }
+                    if (tab === "device") {
+                      return (
+                        <DevicePreviewScreen
+                          environmentId={selectedThread.environmentId}
+                          threadId={selectedThread.id}
+                          onClose={closeTab}
+                          keepOpenWhenEmpty
+                        />
+                      );
+                    }
+                    if (tab === "linked-pull-requests") {
+                      return (
+                        <ThreadPullRequestsSheet
+                          route={{
+                            params: {
+                              environmentId: String(selectedThread.environmentId),
+                              threadId: String(selectedThread.id),
+                            },
+                          }}
+                          onCloseInline={closeTab}
+                        />
+                      );
+                    }
+                    if (tab === "lineage") {
+                      return (
+                        <ThreadAgentsSheet
+                          route={{
+                            params: {
+                              environmentId: selectedThread.environmentId,
+                              threadId: selectedThread.id,
+                            },
+                          }}
+                          onCloseInline={closeTab}
+                          onOpenChildThread={(child) =>
+                            mobileSidePanelStore.open(
+                              parentSurfaceKey,
+                              `side-chat:${child.threadId}`,
+                            )
+                          }
+                        />
+                      );
+                    }
+                    if (isMobileSideChatTab(tab)) {
+                      const sideChatId = tab.slice("side-chat:".length);
+                      if (!sideChatId) return null;
+                      return (
+                        <ThreadRouteScreen
+                          route={{
+                            params: {
+                              environmentId: String(selectedThread.environmentId),
+                              threadId: sideChatId,
+                            },
+                          }}
+                          inspectorPresentation={{
+                            onClose: closeTab,
+                          }}
+                        />
+                      );
+                    }
+                    return null;
+                  }}
                   onOpenLineage={() => {
                     if (selectedThread) {
                       navigation.navigate("ThreadAgents", {

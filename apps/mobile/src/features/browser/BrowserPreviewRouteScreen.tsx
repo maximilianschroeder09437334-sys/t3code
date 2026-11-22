@@ -4,20 +4,29 @@ import * as Dialog from "../../components/ui/Dialog";
 import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { EnvironmentId, ThreadId, type PreviewSessionSnapshot } from "@t3tools/contracts";
 import { normalizePreviewUrl, previewPdfAssetUrl } from "@t3tools/shared/preview";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import * as Option from "effect/Option";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Platform, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ControlPill } from "../../components/ui/ControlPill";
+import { AppText } from "../../components/ui/AppText";
 import { useContentTopInset } from "../../components/ui/useBarInset";
 import { useAppForeground } from "../../lib/appState";
 
-import { useThreadServerBrowserTabs } from "../../state/preview";
+import { previewEnvironment, useThreadServerBrowserTabs } from "../../state/preview";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { usePreparedConnection } from "../../state/session";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { BrowserTabMenu } from "./BrowserTabMenu";
-import { browserTabTitle, browserTabUrl, latestBrowserTab } from "./browserTabs";
+import {
+  browserOpenErrorMessage,
+  browserTabTitle,
+  browserTabUrl,
+  latestBrowserTab,
+  normalizeBrowserAddressDraft,
+} from "./browserTabs";
 import {
   PreviewStreamWebView,
   type PreviewPictureInPictureState,
@@ -45,6 +54,22 @@ export function BrowserPreviewRouteScreen({ route }: BrowserPreviewRouteScreenPr
       threadId={ThreadId.make(threadId)}
       initialTabId={route.params.tabId ?? null}
       onClose={onClose}
+      embedded={false}
+    />
+  );
+}
+
+export function BrowserPreviewInline(props: {
+  readonly environmentId: string;
+  readonly threadId: string;
+}) {
+  return (
+    <BrowserPreviewScreen
+      environmentId={EnvironmentId.make(props.environmentId)}
+      threadId={ThreadId.make(props.threadId)}
+      initialTabId={null}
+      onClose={() => {}}
+      embedded
     />
   );
 }
@@ -67,11 +92,13 @@ function BrowserPreviewScreen({
   threadId,
   initialTabId,
   onClose,
+  embedded,
 }: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly initialTabId: string | null;
   readonly onClose: () => void;
+  readonly embedded: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const contentTopInset = useContentTopInset();
@@ -85,6 +112,9 @@ function BrowserPreviewScreen({
   const [streaming, setStreaming] = useState(false);
   const [canControl, setCanControl] = useState(false);
   const streamRef = useRef<PreviewStreamRef>(null);
+  const openPreview = useAtomCommand(previewEnvironment.open, "open browser tab");
+  const [emptyAddress, setEmptyAddress] = useState("");
+  const [openingTab, setOpeningTab] = useState(false);
   const { tabs, loaded } = useThreadServerBrowserTabs({ environmentId, threadId, enabled: true });
   const tab = tabs.find((entry) => entry.tabId === selectedTabId) ?? latestBrowserTab(tabs);
   const pdfUri =
@@ -94,10 +124,21 @@ function BrowserPreviewScreen({
     setPictureInPicture(NO_PICTURE_IN_PICTURE);
     setSelectedTabId(tabId);
   }
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- closes the focused route through the navigator once the thread has no browser tabs left
-  useEffect(() => {
-    if (focused && loaded && tabs.length === 0) onClose();
-  }, [focused, loaded, tabs.length, onClose]);
+  const openAddress = async () => {
+    if (openingTab) return;
+    const url = normalizeBrowserAddressDraft(emptyAddress);
+    if (url === null) {
+      Dialog.alert("Could not open this address", "Enter an http or https URL.");
+      return;
+    }
+    setOpeningTab(true);
+    const result = await openPreview({ environmentId, input: { threadId, url } });
+    setOpeningTab(false);
+    if (result._tag === "Failure") {
+      const failure = squashAtomCommandFailure(result);
+      Dialog.alert("Browser could not open this page", browserOpenErrorMessage(failure));
+    }
+  };
   const onPictureInPicture = (state: PreviewPictureInPictureState, detail?: string) => {
     setPictureInPicture({ supported: state.supported, active: state.active });
     if (detail) Dialog.alert("Picture in picture is unavailable", detail);
@@ -111,50 +152,52 @@ function BrowserPreviewScreen({
   return (
     <View
       className="flex-1 bg-sheet"
-      style={{ paddingTop: contentTopInset, paddingBottom: insets.bottom }}
+      style={{ paddingTop: embedded ? 0 : contentTopInset, paddingBottom: insets.bottom }}
     >
-      <SheetHeader
-        title={tab ? browserTabTitle(tab) : "Browser"}
-        onClose={onClose}
-        accessibilityLabel="Close browser"
-        actions={
-          // Android WebView cannot play video in picture in picture.
-          Platform.OS === "ios" &&
-          pictureInPicture.supported &&
-          (pictureInPicture.active || pdfUri === null)
-            ? [
-                {
-                  accessibilityLabel: pictureInPicture.active
-                    ? "Exit picture in picture"
-                    : "Picture in picture",
-                  icon: {
-                    ios: pictureInPicture.active ? "pip.exit" : "pip.enter",
-                    android: "visibility",
+      {embedded ? null : (
+        <SheetHeader
+          title={tab ? browserTabTitle(tab) : "Browser"}
+          onClose={onClose}
+          accessibilityLabel="Close browser"
+          actions={
+            // Android WebView cannot play video in picture in picture.
+            Platform.OS === "ios" &&
+            pictureInPicture.supported &&
+            (pictureInPicture.active || pdfUri === null)
+              ? [
+                  {
+                    accessibilityLabel: pictureInPicture.active
+                      ? "Exit picture in picture"
+                      : "Picture in picture",
+                    icon: {
+                      ios: pictureInPicture.active ? "pip.exit" : "pip.enter",
+                      android: "visibility",
+                    },
+                    selected: pictureInPicture.active,
+                    onPress: () => streamRef.current?.togglePictureInPicture(),
                   },
-                  selected: pictureInPicture.active,
-                  onPress: () => streamRef.current?.togglePictureInPicture(),
-                },
-              ]
-            : []
-        }
-        menus={
-          tabs.length > 1
-            ? [
-                {
-                  title: "Tabs",
-                  icon: "square.on.square",
-                  items: tabs.map((entry) => ({
-                    id: entry.tabId,
-                    title: browserTabTitle(entry),
-                    subtitle: browserTabUrl(entry),
-                    selected: entry.tabId === tabId,
-                    onPress: () => selectTab(entry.tabId),
-                  })),
-                },
-              ]
-            : []
-        }
-      />
+                ]
+              : []
+          }
+          menus={
+            tabs.length > 1
+              ? [
+                  {
+                    title: "Tabs",
+                    icon: "square.on.square",
+                    items: tabs.map((entry) => ({
+                      id: entry.tabId,
+                      title: browserTabTitle(entry),
+                      subtitle: browserTabUrl(entry),
+                      selected: entry.tabId === tabId,
+                      onPress: () => selectTab(entry.tabId),
+                    })),
+                  },
+                ]
+              : []
+          }
+        />
+      )}
       {tab ? (
         <>
           <BrowserAddressBar
@@ -185,8 +228,38 @@ function BrowserPreviewScreen({
           )}
         </>
       ) : (
-        <View className="flex-1 items-center justify-center">
-          {focused && foreground ? (
+        <View className="flex-1 justify-center gap-3 px-5">
+          <TextInput
+            accessibilityLabel="Address"
+            editable={!openingTab}
+            value={emptyAddress}
+            onChangeText={setEmptyAddress}
+            onSubmitEditing={() => void openAddress()}
+            placeholder="Enter a website address"
+            placeholderTextColorClassName="accent-placeholder"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            returnKeyType="go"
+            selectTextOnFocus
+            className="h-12 rounded-xl border border-input-border bg-input px-4 font-sans text-sm text-foreground"
+          />
+          <ControlPill
+            icon="arrow.up.right"
+            accessibilityLabel="Open address"
+            label="Open"
+            variant="primary"
+            disabled={openingTab || emptyAddress.trim().length === 0}
+            onPress={() => void openAddress()}
+          />
+          <AppText className="text-center text-sm text-foreground-muted">
+            {openingTab
+              ? "Opening page…"
+              : loaded
+                ? "Enter an address to open a browser tab."
+                : "Connecting to the browser…"}
+          </AppText>
+          {!loaded && focused && foreground ? (
             <AppActivityIndicator color={themeVariables["--color-icon"]} />
           ) : null}
         </View>

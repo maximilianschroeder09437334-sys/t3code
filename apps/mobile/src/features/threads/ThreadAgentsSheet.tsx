@@ -40,7 +40,17 @@ export function useThreadTurnSubagents(target: AgentsTarget | null): ThreadTurnS
   );
 }
 
-export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
+export function ThreadAgentsSheet({
+  route,
+  onCloseInline,
+  onOpenChildThread,
+}: StaticScreenProps<AgentsTarget> & {
+  readonly onCloseInline?: () => void;
+  readonly onOpenChildThread?: (child: {
+    environmentId: EnvironmentId;
+    threadId: ThreadId;
+  }) => void;
+}) {
   const target = route.params;
   const navigation = useNavigation();
   const openInspector = useOpenThreadInspector();
@@ -50,6 +60,10 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
   const openChildThread = (child: { environmentId: EnvironmentId; threadId: ThreadId }) => {
     void Haptics.selectionAsync();
+    if (onOpenChildThread) {
+      onOpenChildThread(child);
+      return;
+    }
     if (
       openInspector(target, {
         type: "thread",
@@ -100,7 +114,7 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
 
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
-      <SheetHeader title="Previous agents" onClose={() => navigation.goBack()} />
+      <SheetHeader title="Previous agents" onClose={onCloseInline ?? (() => navigation.goBack())} />
       <ScreenContent>{content}</ScreenContent>
     </View>
   );

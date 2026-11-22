@@ -1,4 +1,17 @@
 import type { PreviewSessionSnapshot } from "@t3tools/contracts";
+import { normalizePreviewUrl } from "@t3tools/shared/preview";
+
+export function normalizeBrowserAddressDraft(value: string): string | null {
+  try {
+    return normalizePreviewUrl(value);
+  } catch {
+    return null;
+  }
+}
+
+export function browserOpenErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Check the server connection and try again.";
+}
 
 export function latestBrowserTab(tabs: ReadonlyArray<PreviewSessionSnapshot>) {
   return tabs.reduce<PreviewSessionSnapshot | null>(

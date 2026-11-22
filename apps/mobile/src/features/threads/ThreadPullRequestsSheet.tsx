@@ -17,7 +17,9 @@ import {
 import { useLinkedPullRequestActions } from "./useLinkedPullRequestActions";
 
 export function ThreadPullRequestsSheet(
-  _props: StaticScreenProps<{ readonly environmentId: string; readonly threadId: string }>,
+  props: StaticScreenProps<{ readonly environmentId: string; readonly threadId: string }> & {
+    readonly onCloseInline?: () => void;
+  },
 ) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
@@ -89,7 +91,7 @@ export function ThreadPullRequestsSheet(
     <View collapsable={false} className="flex-1 bg-sheet">
       <SheetHeader
         title={title}
-        onClose={() => navigation.goBack()}
+        onClose={props.onCloseInline ?? (() => navigation.goBack())}
         actions={
           actions.canLink
             ? [

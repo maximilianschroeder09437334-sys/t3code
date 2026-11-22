@@ -29,3 +29,20 @@ it("closes a tab and selects the last remaining tab when active", () => {
   mobileSidePanelStore.close(key, "terminal");
   expect(mobileSidePanelStore.getSnapshot(key)).toEqual({ tabs: [], activeTab: null });
 });
+
+it("closes the active tab to its right-hand neighbor and drops stale side chats", () => {
+  const key = "environment-a:thread-c";
+  mobileSidePanelStore.open(key, "browser");
+  mobileSidePanelStore.open(key, "files");
+  mobileSidePanelStore.open(key, "terminal");
+  mobileSidePanelStore.select(key, "files");
+  mobileSidePanelStore.close(key, "files");
+  expect(mobileSidePanelStore.getSnapshot(key).activeTab).toBe("terminal");
+
+  mobileSidePanelStore.open(key, "side-chat:child-1");
+  mobileSidePanelStore.reconcile(key, new Set(["browser", "terminal"]));
+  expect(mobileSidePanelStore.getSnapshot(key)).toEqual({
+    tabs: ["browser", "terminal"],
+    activeTab: "terminal",
+  });
+});

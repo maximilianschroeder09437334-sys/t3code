@@ -194,6 +194,10 @@ function AuthorizedPreviewStream({
       onRetry={() => {
         processRetried.current = false;
         unauthorized.current = 0;
+        // A fresh access response can be byte-for-byte identical. Changing the
+        // attempt key still tears down the failed WebView transport and starts
+        // a new stream instead of leaving the error screen mounted.
+        setAttempt((current) => current + 1);
         props.onUnauthorized();
       }}
       onStreaming={() => {

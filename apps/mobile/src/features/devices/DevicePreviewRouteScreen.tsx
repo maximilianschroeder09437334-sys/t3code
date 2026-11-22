@@ -80,12 +80,14 @@ export function DevicePreviewScreen({
   onClose,
   onMaximize,
   initialDeviceKey,
+  keepOpenWhenEmpty = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly onClose: () => void;
   readonly onMaximize?: (deviceKey: string | null) => void;
   readonly initialDeviceKey?: string;
+  readonly keepOpenWhenEmpty?: boolean;
 }) {
   const embedded = onMaximize !== undefined;
   const insets = useSafeAreaInsets();
@@ -113,8 +115,9 @@ export function DevicePreviewScreen({
   };
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- closes the focused route through the navigator once the thread has no device previews
   useEffect(() => {
-    if (focused && state.data !== null && previews.length === 0) onClose();
-  }, [focused, state.data, previews.length, onClose]);
+    if (focused && !embedded && !keepOpenWhenEmpty && state.data !== null && previews.length === 0)
+      onClose();
+  }, [focused, embedded, keepOpenWhenEmpty, state.data, previews.length, onClose]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the Accelerometer while focused to toggle controls on a shake
   useEffect(() => {
     if (!focused || !foreground || embedded) return;
