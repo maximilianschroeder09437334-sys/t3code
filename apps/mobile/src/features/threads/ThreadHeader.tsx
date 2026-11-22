@@ -1,5 +1,5 @@
 import { AppBar } from "../../components/ui/AppBar";
-import type { AppBarAction, AppBarMenu } from "../../components/ui/AppBar.types";
+import type { AppBarAction, AppBarMenu, AppBarMenuItem } from "../../components/ui/AppBar.types";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import type { ThreadInspectorMode } from "./thread-inspector-navigation";
 import { useWorkspaceBackNavigation } from "../layout/workspace/useAndroidWorkspaceNavigation";
@@ -7,11 +7,12 @@ import { Modal, Pressable, ScrollView, View } from "react-native";
 import { useState } from "react";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText } from "../../components/ui/AppText";
-import type { ThreadGitControlsProps } from "./ThreadGitControls";
+import { useThreadGitMenuDefinition, type ThreadGitControlsProps } from "./ThreadGitControls";
 import { formatContextUsage, mobileThreadSurfaces } from "./threadHeader.logic";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useSideChats } from "../../state/entities";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
+import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 
 export function ThreadHeader(props: {
   readonly title: string;
@@ -38,6 +39,27 @@ export function ThreadHeader(props: {
   };
   const sideChats = useSideChats(threadRef);
   const openLinkedThread = useOpenLinkedThread();
+  // Reuse the git menu so publish/review keep their scope checks and default-branch confirmation.
+  const gitItems = useThreadGitMenuDefinition(props.gitControls)?.items ?? [];
+  const gitItem = (id: string) =>
+    gitItems.find(
+      (item): item is Extract<AppBarMenuItem, { onPress: () => void }> =>
+        item.id === id && "onPress" in item,
+    );
+  const quickAction = gitItem("git-quick-action");
+  const reviewItem = gitItem("git-review");
+  const mergeBackItem = gitItem("git-merge-back");
+  const runGitItem = (item: ReturnType<typeof gitItem>) =>
+    item && !item.disabled
+      ? () => {
+          dismiss();
+          item.onPress();
+        }
+      : undefined;
+  // Reopen the thread's terminal (the terminal screen can start another one) instead of
+  // spawning a new shell on every tap; this also works for read-only terminal access.
+  const openTerminal = () =>
+    props.gitControls.onOpenTerminal(props.gitControls.terminalSessions[0]?.terminalId ?? null);
   const actions: AppBarAction[] = [
     {
       accessibilityLabel: "Thread details",
@@ -48,7 +70,7 @@ export function ThreadHeader(props: {
       accessibilityLabel: "Open terminal",
       icon: "terminal",
       disabled: !props.gitControls.canOpenTerminal,
-      onPress: props.gitControls.onOpenNewTerminal,
+      onPress: openTerminal,
     },
     {
       accessibilityLabel: "Open a surface",
@@ -102,10 +124,10 @@ export function ThreadHeader(props: {
   const surfaceHandlers = {
     terminal: () => {
       dismiss();
-      props.gitControls.onOpenNewTerminal();
+      openTerminal();
     },
     files: openFiles,
-    diff: openGit,
+    diff: runGitItem(reviewItem) ?? openGit,
     "pull-request": openGit,
     "side-chat": () => {
       const sideChat = sideChats[0];
@@ -164,7 +186,7 @@ export function ThreadHeader(props: {
                 {surfaceRow(
                   props.environmentLabel ?? "Environment",
                   "desktopcomputer",
-                  openFiles,
+                  props.gitControls.canOpenFiles ? openFiles : undefined,
                   "Open folder and files",
                 )}
                 {props.gitControls.projectScripts.map((script) =>
@@ -190,19 +212,25 @@ export function ThreadHeader(props: {
                   openGit,
                 )}
                 {surfaceRow(
-                  "Push repository",
+                  quickAction?.title ?? "Publish repository",
                   "arrow.up",
-                  () => {
-                    dismiss();
-                    void props.gitControls.onRunAction({ action: "push" });
-                  },
-                  "Publish local commits to the remote",
+                  runGitItem(quickAction),
+                  quickAction?.subtitle ?? "Commit, push or open a pull request",
                 )}
                 {surfaceRow(
                   `Changes · +${props.gitControls.gitStatus?.workingTree?.insertions ?? 0} / −${props.gitControls.gitStatus?.workingTree?.deletions ?? 0}`,
                   "arrow.left.arrow.right",
-                  openGit,
+                  runGitItem(reviewItem),
+                  reviewItem?.subtitle,
                 )}
+                {mergeBackItem
+                  ? surfaceRow(
+                      mergeBackItem.title,
+                      PullRequestGlyph.merged,
+                      runGitItem(mergeBackItem),
+                      mergeBackItem.subtitle,
+                    )
+                  : null}
                 {surfaceRow(
                   `Previous agents · ${props.previousAgentCount ?? 0}`,
                   "person.2",

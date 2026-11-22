@@ -1073,7 +1073,7 @@ function ThreadRouteContent(
                   inspectorMode={inspectorMode}
                   onOpenFilesInspector={handleOpenFilesInspector}
                   onOpenGitInspector={handleOpenGitInspector}
-                  previousAgentCount={threadAgents?.subagents.length ?? 0}
+                  previousAgentCount={threadAgents?.settledCount ?? 0}
                   onOpenLineage={() => {
                     if (selectedThread) {
                       navigation.navigate("ThreadAgents", {
