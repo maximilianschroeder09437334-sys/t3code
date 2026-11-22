@@ -1038,10 +1038,9 @@ function followsCurrentConversation(
 }
 
 /**
- * A person's model pick authorizes agent turns on the thread, so it replaces the agent's chosen
- * selection while keeping the rest of the intent. A thread that needs agent provenance but has
- * none (such as an agent's fork of a person's thread) gets a minimal intent from the pick.
- * Agent and system picks leave the intent as is.
+ * A person's model pick authorizes agent turns, so it replaces the intent's selection and is kept
+ * as the person's pick, whose unset effort runs at the model's default. A thread that needs agent
+ * provenance but has none gets a minimal intent from the pick. Agent and system picks change none.
  */
 function userAgentExecutionIntent(
   thread: Pick<
@@ -1053,7 +1052,13 @@ function userAgentExecutionIntent(
 ): Pick<OrchestrationV2AppThread, "agentExecutionIntent"> {
   if (actor !== "user") return {};
   if (thread.agentExecutionIntent !== undefined) {
-    return { agentExecutionIntent: { ...thread.agentExecutionIntent, modelSelection } };
+    return {
+      agentExecutionIntent: {
+        ...thread.agentExecutionIntent,
+        modelSelection,
+        userModelSelection: modelSelection,
+      },
+    };
   }
   // Same test ProviderTurnStartService uses to decide whether a non-user turn needs provenance.
   const needsProvenance =
@@ -1064,6 +1069,7 @@ function userAgentExecutionIntent(
   return {
     agentExecutionIntent: {
       modelSelection,
+      userModelSelection: modelSelection,
       ...(thread.interactionMode === "plan" ? { interactionMode: "plan" as const } : {}),
     },
   };

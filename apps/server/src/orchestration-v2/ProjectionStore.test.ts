@@ -1460,6 +1460,56 @@ it.effect("record reads filter notification sources without dropping matching me
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("record reads keep only the named messages a given actor wrote", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* addRolledBackRecoveryCandidate("created-by-filter");
+    const now = yield* DateTime.now;
+    for (const [id, createdBy] of [
+      ["person", "user"],
+      ["scheduled", "agent"],
+      ["other-person", "user"],
+    ] as const) {
+      yield* store.apply({
+        id: EventId.make(`created-by-filter:${id}`),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: MessageId.make(id),
+          threadId,
+          runId: null,
+          nodeId: null,
+          createdBy,
+          creationSource: createdBy === "user" ? "web" : "mcp",
+          role: "user",
+          text: `Body for ${id}`,
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+    }
+    const read = (filter: ProjectionStore.ProjectionRecordFilter) =>
+      store
+        .getThreadRecords(threadId, ["messages"], filter)
+        .pipe(Effect.map(({ messages }) => messages.map((message) => message.id)));
+    assert.deepEqual(
+      yield* read({
+        messageIds: [MessageId.make("person"), MessageId.make("scheduled")],
+        messageCreatedBy: "user",
+      }),
+      [MessageId.make("person")],
+    );
+    assert.deepEqual(
+      yield* read({ messageIds: [MessageId.make("scheduled")], messageCreatedBy: "user" }),
+      [],
+    );
+    assert.lengthOf(yield* read({ messageIds: [MessageId.make("scheduled")] }), 1);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("shells flag a latest run triggered by a provider background wake", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;

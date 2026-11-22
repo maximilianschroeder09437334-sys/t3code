@@ -101,6 +101,12 @@ const layerWorktreeLocation = (worktreesDir = managedWorktreesDir, nativePaths =
     ServerSettings.layerTest(),
   );
 
+type TestSelection = {
+  readonly instanceId: ReturnType<typeof ProviderInstanceId.make>;
+  readonly model: string;
+  readonly options: ReadonlyArray<{ readonly id: string; readonly value: string | boolean }>;
+};
+
 function startWithMissingWorktree(
   worktreePath: string,
   realPaths: Record<string, string> = {
@@ -109,11 +115,8 @@ function startWithMissingWorktree(
   },
   agentOpus = false,
   intent?: {
-    readonly modelSelection: {
-      readonly instanceId: ReturnType<typeof ProviderInstanceId.make>;
-      readonly model: string;
-      readonly options: ReadonlyArray<{ readonly id: string; readonly value: string }>;
-    };
+    readonly modelSelection: TestSelection;
+    readonly userModelSelection?: TestSelection;
     readonly interactionMode?: "plan";
     readonly planningPurpose?: string;
     readonly restrictedTools?: {
@@ -125,15 +128,16 @@ function startWithMissingWorktree(
   },
   actor: "agent" | "user" = "agent",
   messageCreatedBy?: "agent" | "user" | "system",
-  runSelection: {
-    readonly instanceId: ReturnType<typeof ProviderInstanceId.make>;
-    readonly model: string;
-    readonly options: ReadonlyArray<{ readonly id: string; readonly value: string }>;
-  } = {
+  runSelection: TestSelection = {
     instanceId: ProviderInstanceId.make("claudeAgent"),
     model: "claude-opus-5-5",
     options: [{ id: "effort", value: "medium" }],
   },
+  // Earlier finished runs on the thread, each started by a message from `createdBy`.
+  earlierRuns: ReadonlyArray<{
+    readonly selection: TestSelection;
+    readonly createdBy: "agent" | "user" | "system";
+  }> = [],
 ) {
   const threadId = ThreadId.make("thread_provider_turn_start_projection_failure");
   const runId = RunId.make("run_provider_turn_start_projection_failure");
@@ -180,6 +184,15 @@ function startWithMissingWorktree(
         userMessageId: messageId,
         ordinal: 2,
       },
+      ...earlierRuns.map((earlier, index) => ({
+        id: RunId.make(`run_provider_turn_start_earlier_${index}`),
+        modelSelection: earlier.selection,
+        providerInstanceId: earlier.selection.instanceId,
+        status: "completed",
+        providerThreadId,
+        userMessageId: MessageId.make(`message_provider_turn_start_earlier_${index}`),
+        ordinal: 1,
+      })),
     ],
     nodes: [{ id: rootNodeId, checkpointScopeId }],
     attempts: [{ id: attemptId }],
@@ -191,6 +204,12 @@ function startWithMissingWorktree(
         attachments: [],
         ...(messageCreatedBy === undefined ? {} : { createdBy: messageCreatedBy }),
       },
+      ...earlierRuns.map((earlier, index) => ({
+        id: MessageId.make(`message_provider_turn_start_earlier_${index}`),
+        text: "Earlier",
+        attachments: [],
+        createdBy: earlier.createdBy,
+      })),
     ],
     checkpointScopes: [{ id: checkpointScopeId }],
     contextHandoffs: [],
@@ -222,7 +241,23 @@ function startWithMissingWorktree(
                         id: "effort",
                         type: "select",
                         label: "Effort",
-                        options: [{ id: "medium", label: "Medium" }],
+                        options: [{ id: "medium", label: "Medium", isDefault: true }],
+                      },
+                      { id: "fastMode", type: "boolean", label: "Fast Mode" },
+                    ],
+                  },
+                },
+                {
+                  // Advertises effort without a default.
+                  slug: "claude-sonnet-5-5",
+                  name: "Sonnet",
+                  capabilities: {
+                    optionDescriptors: [
+                      {
+                        id: "effort",
+                        type: "select",
+                        label: "Effort",
+                        options: [{ id: "high", label: "High" }],
                       },
                     ],
                   },
@@ -465,8 +500,8 @@ it.each(["system", "agent"] as const)(
   },
 );
 
-it("still applies the agent policy to a person's re-stamped pick", async () => {
-  // Matches the run, so provenance passes, but no reasoning effort is advertised.
+it("blocks an intent without effort that no person picked", async () => {
+  // Matches the run, so provenance passes, but nothing states an effort and no person chose it.
   const userPick = {
     instanceId: ProviderInstanceId.make("claudeAgent"),
     model: "claude-opus-5-5",
@@ -497,6 +532,150 @@ it("still applies the agent policy to a person's re-stamped pick", async () => {
       ]),
     }),
   );
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
+
+const blockedWith = (fixture: ReturnType<typeof startWithMissingWorktree>, message: string) =>
+  expect(fixture.writeIfRunCurrent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "turn-item.updated",
+          payload: expect.objectContaining({
+            title: "Agent model selection blocked",
+            failure: expect.objectContaining({ message: expect.stringContaining(message) }),
+          }),
+        }),
+      ]),
+    }),
+  );
+
+// What the web composer sends after /model: the model, Fast off, and no effort, since the person
+// left effort at the model's default.
+const slashModelPick = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  model: "claude-opus-5-5",
+  options: [{ id: "fastMode", value: false }],
+};
+
+it.each(["agent", "system"] as const)(
+  "starts a scheduled %s turn on a person's /model pick that left effort at the default",
+  async (messageCreatedBy) => {
+    const fixture = startWithMissingWorktree(
+      "/tmp/project",
+      undefined,
+      true,
+      { modelSelection: slashModelPick, userModelSelection: slashModelPick },
+      "agent",
+      messageCreatedBy,
+      slashModelPick,
+    );
+    // Past the policy, the fixture's missing worktree ends the start without settling the run.
+    await expect(fixture.start).resolves.toBeDefined();
+    expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+  },
+);
+
+// Threads switched before the intent recorded the pick hold only the selection, which a person's
+// own turn already ran.
+it("starts an agent turn on an earlier person-stamped pick a person's turn ran", async () => {
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    { modelSelection: slashModelPick },
+    "agent",
+    "agent",
+    slashModelPick,
+    [{ selection: slashModelPick, createdBy: "user" }],
+  );
+  await expect(fixture.start).resolves.toBeDefined();
+  expect(fixture.writeIfRunCurrent).not.toHaveBeenCalled();
+});
+
+it("blocks an effortless selection that only agents' turns ran", async () => {
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    { modelSelection: slashModelPick },
+    "agent",
+    "agent",
+    slashModelPick,
+    [
+      { selection: slashModelPick, createdBy: "agent" },
+      {
+        selection: { ...slashModelPick, options: [{ id: "effort", value: "medium" }] },
+        createdBy: "user",
+      },
+    ],
+  );
+  await expect(fixture.start).rejects.toBeUndefined();
+  blockedWith(fixture, "reasoning effort");
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
+
+it("blocks an agent selection that replaced a person's earlier pick", async () => {
+  // A stale record of the person's pick does not cover what is selected now.
+  const agentSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+    options: [],
+  };
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    {
+      modelSelection: agentSelection,
+      userModelSelection: { ...agentSelection, options: [{ id: "effort", value: "medium" }] },
+    },
+    "agent",
+    "agent",
+    agentSelection,
+  );
+  await expect(fixture.start).rejects.toBeUndefined();
+  blockedWith(fixture, "reasoning effort");
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
+
+it("blocks a person's pick whose model advertises no default effort", async () => {
+  const userPick = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-sonnet-5-5",
+    options: [],
+  };
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    { modelSelection: userPick, userModelSelection: userPick },
+    "agent",
+    "agent",
+    userPick,
+  );
+  await expect(fixture.start).rejects.toBeUndefined();
+  blockedWith(fixture, "reasoning effort");
+  expect(fixture.startRootRun).not.toHaveBeenCalled();
+});
+
+it("blocks a person's pick with an unadvertised effort", async () => {
+  const userPick = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+    options: [{ id: "effort", value: "max" }],
+  };
+  const fixture = startWithMissingWorktree(
+    "/tmp/project",
+    undefined,
+    true,
+    { modelSelection: userPick, userModelSelection: userPick },
+    "agent",
+    "agent",
+    userPick,
+  );
+  await expect(fixture.start).rejects.toBeUndefined();
+  blockedWith(fixture, "not advertised");
   expect(fixture.startRootRun).not.toHaveBeenCalled();
 });
 

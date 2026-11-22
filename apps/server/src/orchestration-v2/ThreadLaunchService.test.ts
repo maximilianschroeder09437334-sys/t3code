@@ -71,7 +71,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
-import { agentSelectionMatchesRun } from "./AgentModelPolicy.ts";
+import { agentSelectionMatchesRun, intentRunsUserPick } from "./AgentModelPolicy.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
@@ -745,6 +745,7 @@ it.effect("only a person's model pick replaces an agent thread's selection inten
     yield* threads.dispatch(userPick("command:intent-user-2", userSelection));
     assert.deepStrictEqual(yield* intentOf(), {
       modelSelection: userSelection,
+      userModelSelection: userSelection,
       ...intentFields,
     });
 
@@ -765,6 +766,7 @@ it.effect("only a person's model pick replaces an agent thread's selection inten
     assert.deepStrictEqual(projection.thread.modelSelection, agentSelection);
     assert.deepStrictEqual(projection.thread.agentExecutionIntent, {
       modelSelection: agentSelection,
+      userModelSelection: agentSelection,
       ...intentFields,
     });
 
@@ -783,6 +785,7 @@ it.effect("only a person's model pick replaces an agent thread's selection inten
     });
     assert.deepStrictEqual(yield* intentOf(), {
       modelSelection: agentSelection,
+      userModelSelection: agentSelection,
       ...intentFields,
     });
 
@@ -796,7 +799,62 @@ it.effect("only a person's model pick replaces an agent thread's selection inten
     assert.equal(event?.type, "thread.provider-switched");
     assert.deepStrictEqual(
       event?.type === "thread.provider-switched" ? event.payload.agentExecutionIntent : undefined,
-      { modelSelection: userSelection, ...intentFields },
+      { modelSelection: userSelection, userModelSelection: userSelection, ...intentFields },
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+// The web's /model opens the picker; a model picked there is applied with Fast off and no effort
+// when the person leaves effort at the model's default.
+it.effect("records a person's /model pick without effort as their pick", () => {
+  const harness = makeHarness({ adapters: [adapter, claudeAdapter] });
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const threadId = ThreadId.make("thread:intent-slash-model");
+    const agentSelection = {
+      ...claudeModelSelection,
+      model: "claude-sonnet-5-5",
+      options: [{ id: "effort", value: "high" }],
+    };
+    const slashModelPick = {
+      ...claudeModelSelection,
+      model: "claude-opus-5-5",
+      options: [{ id: "fastMode", value: false }],
+    };
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:intent-slash-model-create"),
+      threadId,
+      projectId,
+      title: "Plan v2 watchdog",
+      modelSelection: agentSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "agent",
+      creationSource: "mcp",
+      agentExecutionIntent: { modelSelection: agentSelection },
+    });
+    yield* threads.dispatch(
+      ThreadManagement.withCreationProvenance(
+        {
+          type: "thread.model-selection.set",
+          commandId: CommandId.make("command:intent-slash-model-pick"),
+          threadId,
+          modelSelection: slashModelPick,
+        },
+        { createdBy: "user", creationSource: "web" },
+      ),
+    );
+    const { thread } = yield* threads.getThreadProjection(threadId);
+    assert.deepStrictEqual(thread.agentExecutionIntent, {
+      modelSelection: slashModelPick,
+      userModelSelection: slashModelPick,
+    });
+    assert.isTrue(intentRunsUserPick(thread.agentExecutionIntent!));
+    assert.isTrue(
+      agentSelectionMatchesRun(thread.agentExecutionIntent!.modelSelection, thread.modelSelection),
     );
   }).pipe(Effect.provide(harness.layer));
 });
@@ -882,6 +940,7 @@ it.effect("a person's model pick gives an agent thread without intent its proven
     const picked = yield* threadOf(forkThreadId);
     assert.deepStrictEqual(picked.agentExecutionIntent, {
       modelSelection: userSelection,
+      userModelSelection: userSelection,
       interactionMode: "plan",
     });
     assert.isTrue(
@@ -897,7 +956,7 @@ it.effect("a person's model pick gives an agent thread without intent its proven
     assert.equal(event?.type, "thread.provider-switched");
     assert.deepStrictEqual(
       event?.type === "thread.provider-switched" ? event.payload.agentExecutionIntent : undefined,
-      { modelSelection: userSelection, interactionMode: "plan" },
+      { modelSelection: userSelection, userModelSelection: userSelection, interactionMode: "plan" },
     );
   }).pipe(Effect.provide(harness.layer));
 });

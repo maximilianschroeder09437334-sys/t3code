@@ -1,7 +1,12 @@
 import { assert, it } from "@effect/vitest";
 import type { ServerProvider } from "@t3tools/contracts";
 import { ProviderInstanceId, type ModelSelection } from "@t3tools/contracts";
-import { agentModelPolicy, agentSelectionMatchesRun } from "./AgentModelPolicy.ts";
+import {
+  agentModelPolicy,
+  agentSelectionMatchesRun,
+  intentRunsUserPick,
+  withAdvertisedDefaultEffort,
+} from "./AgentModelPolicy.ts";
 
 const provider = {
   instanceId: "claudeAgent",
@@ -71,4 +76,72 @@ it("matches a run whose selection only adds a switched-off option to the agent's
     agentSelectionMatchesRun(intent, { ...intent, options: [{ id: "effort", value: "high" }] }),
   );
   assert.isFalse(agentSelectionMatchesRun(intent, { ...intent, model: "claude-haiku" }));
+});
+
+it("states the advertised default effort of a pick that leaves effort unset, and nothing else", () => {
+  const withDefault = {
+    instanceId: "claudeAgent",
+    models: [
+      {
+        slug: "claude-opus-5-5",
+        name: "Opus",
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              type: "select",
+              options: [{ id: "low" }, { id: "medium", isDefault: true }],
+            },
+            { id: "fastMode", type: "boolean" },
+          ],
+        },
+      },
+    ],
+  } as unknown as ServerProvider;
+  const pick: ModelSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+    options: [{ id: "fastMode", value: false }],
+  };
+  const stated = withAdvertisedDefaultEffort(pick, withDefault);
+  assert.deepStrictEqual(stated.options, [
+    { id: "fastMode", value: false },
+    { id: "effort", value: "medium" },
+  ]);
+  assert.isNull(agentModelPolicy({ selection: stated, provider: withDefault }));
+  // An effort the pick states stays, even an unadvertised one.
+  const explicit = { ...pick, options: [{ id: "effort", value: "max" }] };
+  assert.deepStrictEqual(withAdvertisedDefaultEffort(explicit, withDefault), explicit);
+  // No advertised default, another provider, or no provider: unchanged.
+  assert.deepStrictEqual(withAdvertisedDefaultEffort(pick, provider), pick);
+  assert.deepStrictEqual(
+    withAdvertisedDefaultEffort(
+      { ...pick, instanceId: ProviderInstanceId.make("codex") },
+      withDefault,
+    ),
+    { ...pick, instanceId: ProviderInstanceId.make("codex") },
+  );
+  assert.deepStrictEqual(withAdvertisedDefaultEffort(pick, undefined), pick);
+});
+
+it("counts an intent as a person's pick only while it still holds that pick", () => {
+  const pick: ModelSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+    options: [{ id: "fastMode", value: false }],
+  };
+  assert.isTrue(intentRunsUserPick({ modelSelection: pick, userModelSelection: pick }));
+  assert.isTrue(
+    intentRunsUserPick({
+      modelSelection: { ...pick, options: [] },
+      userModelSelection: pick,
+    }),
+  );
+  assert.isFalse(intentRunsUserPick({ modelSelection: pick }));
+  assert.isFalse(
+    intentRunsUserPick({
+      modelSelection: { ...pick, model: "claude-sonnet-5-5" },
+      userModelSelection: pick,
+    }),
+  );
 });

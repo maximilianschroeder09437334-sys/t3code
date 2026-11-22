@@ -104,6 +104,12 @@ export type OrchestrationV2ThreadHistoryOrigin = typeof OrchestrationV2ThreadHis
 
 export const AgentExecutionIntent = Schema.Struct({
   modelSelection: ModelSelection,
+  /**
+   * The pick a person last made on this thread. While it is still `modelSelection`, agent turns
+   * run on the person's choice, so options the person left unset (such as effort) take the
+   * model's advertised defaults.
+   */
+  userModelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
   planningPurpose: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1000))),
   restrictedTools: Schema.optional(

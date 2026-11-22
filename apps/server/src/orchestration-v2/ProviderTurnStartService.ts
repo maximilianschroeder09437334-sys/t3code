@@ -3,7 +3,12 @@ import {
   HandoffProviderSessionWrite,
 } from "./HandoffProviderStartGuard.ts";
 import * as HandoffAdmission from "./HandoffTransferAdmission.ts";
-import { agentModelPolicy, agentSelectionMatchesRun } from "./AgentModelPolicy.ts";
+import {
+  agentModelPolicy,
+  agentSelectionMatchesRun,
+  intentRunsUserPick,
+  withAdvertisedDefaultEffort,
+} from "./AgentModelPolicy.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -621,16 +626,54 @@ export const layer: Layer.Layer<
       ) {
         const intent = projection.thread.agentExecutionIntent;
         const providers = yield* providerRegistry.getProviders;
-        const modelPolicyError =
-          intent === undefined ||
-          !agentSelectionMatchesRun(intent.modelSelection, run.modelSelection)
-            ? "Agent selection provenance is missing or does not match this run."
-            : agentModelPolicy({
-                selection: intent.modelSelection,
-                provider: providers.find(
-                  (candidate) => candidate.instanceId === intent.modelSelection.instanceId,
-                ),
-              });
+        // Intents stamped before they recorded the person's pick: a person's own turn on this
+        // thread ran the selection, so they picked it.
+        const userRanSelection = Effect.fn("ProviderTurnStartService.userRanSelection")(function* (
+          selection: OrchestrationV2Run["modelSelection"],
+        ) {
+          const messageIds = projection.runs
+            .filter(
+              (candidate) =>
+                candidate.id !== run.id &&
+                agentSelectionMatchesRun(selection, candidate.modelSelection),
+            )
+            .map((candidate) => candidate.userMessageId);
+          if (messageIds.length === 0) return false;
+          const { messages } = yield* projectionStore.getThreadRecords(
+            input.threadId,
+            ["messages"],
+            {
+              messageIds,
+              messageCreatedBy: "user",
+            },
+          );
+          return messages.some(
+            (candidate) => candidate.createdBy === "user" && messageIds.includes(candidate.id),
+          );
+        });
+        let modelPolicyError: string | null =
+          "Agent selection provenance is missing or does not match this run.";
+        if (
+          intent !== undefined &&
+          agentSelectionMatchesRun(intent.modelSelection, run.modelSelection)
+        ) {
+          const provider = providers.find(
+            (candidate) => candidate.instanceId === intent.modelSelection.instanceId,
+          );
+          modelPolicyError = agentModelPolicy({ selection: intent.modelSelection, provider });
+          // A person's pick runs at the effort they left at the model's advertised default.
+          if (
+            modelPolicyError !== null &&
+            (intentRunsUserPick(intent) ||
+              (intent.userModelSelection === undefined &&
+                (yield* userRanSelection(intent.modelSelection))))
+          ) {
+            modelPolicyError = agentModelPolicy({
+              selection: withAdvertisedDefaultEffort(intent.modelSelection, provider),
+              provider,
+            });
+          }
+        }
         if (modelPolicyError !== null) {
           yield* settleStartFailure({
             signal: "agent-model-policy",
