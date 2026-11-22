@@ -4,7 +4,7 @@ import type {
 } from "@t3tools/client-runtime/state/thread-wait";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { useState, type ReactElement, type ReactNode } from "react";
+import { useState, type ReactElement, type ReactNode, type SyntheticEvent } from "react";
 
 import { cn } from "~/lib/utils";
 import { useThreadWait } from "../state/threadWaits";
@@ -30,6 +30,8 @@ export function useOpenWaitTarget() {
     });
   };
 }
+
+const stopPropagation = (event: SyntheticEvent) => event.stopPropagation();
 
 function WaitTargetSuffix({ target }: { target: ResolvedWaitTarget }) {
   if (target.suffix === undefined) return null;
@@ -107,6 +109,12 @@ export function WaitingOnPopover(props: {
         align={props.align ?? "end"}
         padding="compact"
         className="max-w-80"
+        // The popup portals out of the DOM but not out of React, so a click on its text would
+        // bubble to the row holding the trigger and open or rename that thread instead.
+        // Keys still bubble: Escape closes the popover at the document.
+        onClick={stopPropagation}
+        onDoubleClick={stopPropagation}
+        onContextMenu={stopPropagation}
       >
         {targets.length === 0 ? (
           <p className="text-xs text-muted-foreground">Nothing left to wait on</p>

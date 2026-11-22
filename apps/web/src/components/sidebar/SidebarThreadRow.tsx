@@ -2,6 +2,7 @@ import { useAtomMount } from "@effect/atom-react";
 import { asLaunchingThread } from "@t3tools/client-runtime/state/thread-inbox";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
+import type { ResolvedThreadWait } from "@t3tools/client-runtime/state/thread-wait";
 import { WaitingOnPopover } from "../WaitingOnPopover";
 import { useThreadWait } from "../../state/threadWaits";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
@@ -66,6 +67,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type SyntheticEvent,
 } from "react";
 
 import { useRightPanelStore } from "../../rightPanelStore";
@@ -547,6 +549,44 @@ function TopStatusIcon(props: { icon: keyof typeof TOP_STATUS_ICONS; className: 
   return <Icon aria-hidden className={cn("shrink-0", props.className)} />;
 }
 
+const stopRowEvent = (event: SyntheticEvent) => event.stopPropagation();
+// Escape must still bubble: the popover closes on it at the document.
+const stopRowActivationKey = (event: ReactKeyboardEvent) => {
+  if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+};
+
+/** A resolved Waiting status: lists what the thread waits on and never opens or renames its row. */
+function WaitingOnStatusButton(props: {
+  waiter: ScopedThreadRef;
+  wait: ResolvedThreadWait | undefined;
+  className: string;
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <WaitingOnPopover
+      waiter={props.waiter}
+      wait={props.wait}
+      onOpenChange={props.onOpenChange}
+      trigger={
+        <button
+          type="button"
+          aria-label="Show what this thread is waiting on"
+          onClick={stopRowEvent}
+          onDoubleClick={stopRowEvent}
+          onKeyDown={stopRowActivationKey}
+          className={cn(
+            "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+            props.className,
+          )}
+        />
+      }
+    >
+      {props.children}
+    </WaitingOnPopover>
+  );
+}
+
 type SidebarThreadRowProps = {
   thread: SidebarThreadSummary;
   // "folder" is a one-line row inside a boring sidebar project folder;
@@ -813,6 +853,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const isWokeStatus = topStatus?.icon === "woke";
   // Waiting from a resolved wait opens what it waits on, so it stays clickable like Woke.
   const isWaitingOnStatus = status === "waiting" && wait?.waiting === true;
+  const showsSnoozeWakeLabel = variantAction === "unsnooze" && props.snoozeWakeLabelText !== null;
+  // Slim rows show no status, and in folder rows a wake time takes the status slot.
+  const showsWaitingOnButton =
+    isWaitingOnStatus && (variant === "card" || (variant !== "slim" && !showsSnoozeWakeLabel));
+  // The row's hover card would cover the open list. A popover that unmounts sends no close
+  // event, so the flag resets here.
+  const [waitingOnOpen, setWaitingOnOpen] = useState(false);
+  if (waitingOnOpen && !showsWaitingOnButton) setWaitingOnOpen(false);
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
     effectiveEnvMode: thread.worktreePath === null ? "local" : "worktree",
@@ -1230,6 +1278,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   if (variant !== "card") {
     const multiline = variant === "folder-multiline";
     const inFolder = variant === "folder" || multiline;
+    // Like Woke, a resolved Waiting stays in place on hover with the row action beside it.
+    const keepsStatusOnHover = isWoke || showsWaitingOnButton;
     return (
       <li
         data-thread-item={threadKey}
@@ -1241,7 +1291,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           sortable?.isDragging && "relative z-20",
         )}
       >
-        <Tooltip disabled={isRenaming || sortable?.isDragging}>
+        <Tooltip disabled={isRenaming || waitingOnOpen || sortable?.isDragging}>
           <TooltipTrigger
             render={
               <div
@@ -1307,10 +1357,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   <span
                     className={cn(
                       "inline-flex justify-end tabular-nums text-secondary-label transition-opacity",
-                      !isWoke && "group-any-hover/sidebar-row:opacity-0",
+                      !keepsStatusOnHover && "group-any-hover/sidebar-row:opacity-0",
                     )}
                   >
-                    {variantAction === "unsnooze" && props.snoozeWakeLabelText !== null ? (
+                    {showsSnoozeWakeLabel ? (
                       <span className="inline-flex items-center gap-1 text-xs text-info-foreground tabular-nums">
                         {/* The clock tells a wake time from an age at a glance. */}
                         <AlarmClockIcon aria-hidden className="size-3" />
@@ -1333,6 +1383,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                         />
                         <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
                       </Tooltip>
+                    ) : showsWaitingOnButton && topStatus ? (
+                      <WaitingOnStatusButton
+                        waiter={threadRef}
+                        wait={wait}
+                        onOpenChange={setWaitingOnOpen}
+                        className={cn("text-xs", topStatus.className)}
+                      >
+                        <TopStatusIcon icon={topStatus.icon} className="size-3" />
+                        {topStatus.label}
+                      </WaitingOnStatusButton>
                     ) : inFolder && topStatus ? (
                       // Folder rows have no status line, so the status takes the time slot.
                       <span
@@ -1365,7 +1425,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                         onPointerDown={handleActionPointerDown}
                         className={cn(
                           "pointer-events-none absolute inset-y-0 right-0 -mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:opacity-100",
-                          isWoke && "group-any-hover/sidebar-row:static",
+                          keepsStatusOnHover && "group-any-hover/sidebar-row:static",
                         )}
                       >
                         <AlarmClockOffIcon className="mb-px size-3" />
@@ -1382,7 +1442,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                             onPointerDown={handleActionPointerDown}
                             className={cn(
                               "pointer-events-none absolute inset-y-0 right-0 -mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:opacity-100",
-                              isWoke && "group-any-hover/sidebar-row:static",
+                              keepsStatusOnHover && "group-any-hover/sidebar-row:static",
                             )}
                           />
                         }
@@ -1402,7 +1462,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                             onPointerDown={handleActionPointerDown}
                             className={cn(
                               "pointer-events-none absolute inset-y-0 right-0 -mr-2 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:opacity-100",
-                              isWoke && "group-any-hover/sidebar-row:static",
+                              keepsStatusOnHover && "group-any-hover/sidebar-row:static",
                             )}
                           />
                         }
@@ -1438,7 +1498,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         sortable?.isDragging && "relative z-20",
       )}
     >
-      <Tooltip disabled={isRenaming || snoozeMenuOpen || sortable?.isDragging}>
+      <Tooltip disabled={isRenaming || snoozeMenuOpen || waitingOnOpen || sortable?.isDragging}>
         <TooltipTrigger
           render={
             <div
@@ -1522,26 +1582,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           />
                           <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
                         </Tooltip>
-                      ) : isWaitingOnStatus ? (
-                        <WaitingOnPopover
+                      ) : showsWaitingOnButton ? (
+                        <WaitingOnStatusButton
                           waiter={threadRef}
                           wait={wait}
-                          trigger={
-                            <button
-                              type="button"
-                              aria-label="Show what this thread is waiting on"
-                              onClick={(event) => event.stopPropagation()}
-                              onDoubleClick={(event) => event.stopPropagation()}
-                              className={cn(
-                                "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-                                topStatus.className,
-                              )}
-                            />
-                          }
+                          onOpenChange={setWaitingOnOpen}
+                          className={topStatus.className}
                         >
                           <TopStatusIcon icon={topStatus.icon} className="size-4" />
                           {topStatus.label}
-                        </WaitingOnPopover>
+                        </WaitingOnStatusButton>
                       ) : (
                         <span
                           className={cn(
