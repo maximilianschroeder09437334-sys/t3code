@@ -243,6 +243,7 @@ function UsageChartTooltip({
   providers,
   loadingProviders,
   format,
+  showTotal,
 }: {
   readonly tooltipRef: React.Ref<HTMLDivElement>;
   readonly label: string;
@@ -250,6 +251,7 @@ function UsageChartTooltip({
   readonly providers: readonly UsageProviderKind[];
   readonly loadingProviders: ReadonlySet<UsageProviderKind>;
   readonly format: (value: number) => string;
+  readonly showTotal: boolean;
 }) {
   const partial = providers.some((provider) => loadingProviders.has(provider));
   return (
@@ -285,12 +287,16 @@ function UsageChartTooltip({
           </div>
         );
       })}
-      <div className="mt-1 flex items-center justify-between gap-3 border-t border-border pt-1">
-        <span className="text-muted-foreground">Total</span>
-        <span className={cn("tabular-nums", partial ? "text-muted-foreground" : "text-foreground")}>
-          {format(column?.total ?? 0)}
-        </span>
-      </div>
+      {showTotal ? (
+        <div className="mt-1 flex items-center justify-between gap-3 border-t border-border pt-1">
+          <span className="text-muted-foreground">Total</span>
+          <span
+            className={cn("tabular-nums", partial ? "text-muted-foreground" : "text-foreground")}
+          >
+            {format(column?.total ?? 0)}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -302,6 +308,7 @@ function UsageChartPlot({
   providers,
   loadingProviders,
   format,
+  showTotal,
   formatTooltipPeriod,
   children,
 }: {
@@ -311,6 +318,7 @@ function UsageChartPlot({
   readonly providers: readonly UsageProviderKind[];
   readonly loadingProviders: ReadonlySet<UsageProviderKind>;
   readonly format: (value: number) => string;
+  readonly showTotal: boolean;
   readonly formatTooltipPeriod: (period: string) => string;
   readonly children: React.ReactNode;
 }) {
@@ -411,6 +419,7 @@ function UsageChartPlot({
           providers={providers}
           loadingProviders={loadingProviders}
           format={format}
+          showTotal={showTotal}
         />
       )}
     </div>
@@ -451,6 +460,8 @@ export function UsageProviderChart({
     cn("transition-opacity", loading && "opacity-40 delay-150");
   const format =
     metric === "tokens" ? formatTokens : metric === "share" ? formatLimitShare : formatUsd;
+  // Shares of different providers' pools do not add up, so a share chart has no total.
+  const showTotal = metric !== "share";
   const formatPeriod = (period: string) =>
     resolution === "hour" ? formatHourShort(period, timeZone, hour12) : formatDayShort(period);
   const formatTooltipPeriod = (period: string) =>
@@ -482,6 +493,7 @@ export function UsageProviderChart({
           providers={providers}
           loadingProviders={loadingProviders}
           format={format}
+          showTotal={showTotal}
           formatTooltipPeriod={formatTooltipPeriod}
         >
           {scale.ticks.map((tick) => {
@@ -554,7 +566,7 @@ export function UsageProviderChart({
                 {PROVIDER_PRESENTATION[provider].label}
               </th>
             ))}
-            {providers.length > 1 ? <th scope="col">Total</th> : null}
+            {showTotal && providers.length > 1 ? <th scope="col">Total</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -568,7 +580,7 @@ export function UsageProviderChart({
                     {format(column?.bands.find((band) => band.provider === provider)?.value ?? 0)}
                   </td>
                 ))}
-                {providers.length > 1 ? <td>{format(column?.total ?? 0)}</td> : null}
+                {showTotal && providers.length > 1 ? <td>{format(column?.total ?? 0)}</td> : null}
               </tr>
             );
           })}
