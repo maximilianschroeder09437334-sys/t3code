@@ -97,7 +97,7 @@ interface NetworkInformationLike extends EventTarget {
 }
 
 // change also fires for same-network bandwidth and latency estimates; count only type changes.
-const networkPathChanges = Stream.callback<"network-changed">((queue) =>
+const networkPathChanges = Stream.callback<"network-path-changed">((queue) =>
   Effect.acquireRelease(
     Effect.sync(() => {
       const connection =
@@ -110,7 +110,7 @@ const networkPathChanges = Stream.callback<"network-changed">((queue) =>
         const type = connection.type;
         if (type === undefined || type === previous) return;
         previous = type;
-        Queue.offerUnsafe(queue, "network-changed");
+        Queue.offerUnsafe(queue, "network-path-changed");
       };
       connection.addEventListener("change", listener);
       return { connection, listener };
@@ -125,13 +125,16 @@ const networkPathChanges = Stream.callback<"network-changed">((queue) =>
 const layerWakeups = Wakeups.layer({
   changes: Stream.mergeAll(
     [
-      Stream.callback<"application-active">((queue) =>
+      Stream.callback<"application-active" | "application-background">((queue) =>
         Effect.acquireRelease(
           Effect.sync(() => {
             const listener = () => {
-              if (document.visibilityState === "visible") {
-                Queue.offerUnsafe(queue, "application-active");
-              }
+              Queue.offerUnsafe(
+                queue,
+                document.visibilityState === "visible"
+                  ? "application-active"
+                  : "application-background",
+              );
             };
             document.addEventListener("visibilitychange", listener);
             return listener;

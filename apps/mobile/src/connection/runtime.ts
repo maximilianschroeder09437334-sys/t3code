@@ -37,6 +37,8 @@ type ConnectionLayerSource =
 const layerProvidedClientConnection = layerSnapshotLoader.pipe(
   Layer.provideMerge(
     Connection.layerWithOptions({
+      pingInterval: "1 second",
+      pingTimeout: "2 seconds",
       usageLimitSources: true,
       usageLimitsCommand: true,
       providerCatalogsOnDemand: true,
