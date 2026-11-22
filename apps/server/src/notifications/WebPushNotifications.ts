@@ -193,18 +193,26 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
   ) {
     const now = DateTime.toEpochMillis(yield* DateTime.now);
-    yield* sql`UPDATE home_auto_waits SET status = 'cancelled', updated_at = ${now} WHERE waiting_thread_id = ${threadId} AND status = 'active'`;
+    yield* sql`UPDATE home_auto_waits SET status = 'cancelled', updated_at = ${now} WHERE waiting_thread_id = ${threadId} AND status IN ('active', 'cycle')`;
+  });
+  const cancelAutoWaitRecord = Effect.fn("WebPushNotifications.cancelAutoWaitRecord")(function* (
+    threadId: ThreadId,
+    reportRunId: string,
+  ) {
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    yield* sql`UPDATE home_auto_waits SET status = 'cancelled', updated_at = ${now} WHERE waiting_thread_id = ${threadId} AND report_run_id = ${reportRunId} AND status IN ('active', 'cycle')`;
   });
   const autoWaitTargetState = (shell: OrchestrationV2ThreadShell) => {
+    if (shell.archivedAt !== null) return "archived";
+    if (shell.deletedAt != null) return "deleted";
+    if (shell.settledOverride === "settled") return "settled";
     const firstStep = shell.homeFirstNextStep ?? "";
     const handedOff = /^T3:\s+\[[^\]]+\]\(https:\/\/app\.t3\.codes\/threads\/[^)]+\):/iu.test(
       firstStep,
     );
     if (
-      shell.archivedAt !== null ||
-      shell.deletedAt != null ||
-      shell.settledOverride === "settled" ||
       shell.blockedOnThreadWait ||
+      shell.homeAutoWaitActive === true ||
       shell.homeHandedOff === true ||
       firstStep.startsWith("T3: WAIT on ") ||
       handedOff ||
@@ -221,9 +229,10 @@ const make = Effect.gen(function* () {
       readonly waiting_thread_id: string;
       readonly waiting_project_id: string;
       readonly report_run_id: string;
+      readonly target_thread_id: string;
       readonly target_title: string;
     },
-    targetShell: OrchestrationV2ThreadShell,
+    targetShell: OrchestrationV2ThreadShell | null,
   ) {
     const waitingThreadId = ThreadId.make(row.waiting_thread_id);
     const waitingShell = yield* threads.getThreadShell(waitingThreadId);
@@ -237,13 +246,27 @@ const make = Effect.gen(function* () {
       yield* cancelAutoWaits(waitingThreadId);
       return;
     }
-    const status = autoWaitTargetState(targetShell);
+    const waitingStep = parseHomeNextStep(waitingShell.homeFirstNextStep ?? "");
+    if (
+      !row.report_run_id ||
+      waitingShell.latestRunId !== row.report_run_id ||
+      waitingShell.status !== "completed" ||
+      waitingStep?.kind !== "wait" ||
+      waitingStep.threadId !== row.target_thread_id ||
+      waitingStep.environmentId !== (yield* environment.getEnvironmentId)
+    ) {
+      yield* cancelAutoWaitRecord(waitingThreadId, row.report_run_id);
+      return;
+    }
+    const status = targetShell === null ? "deleted" : autoWaitTargetState(targetShell);
     if (status === null) return;
-    const projection = yield* threads.getThreadProjection(targetShell.id);
-    const latestReport = projection.turnItems
+    const projection =
+      targetShell === null ? null : yield* threads.getThreadProjection(targetShell.id);
+    const targetRunId = targetShell?.latestRunId;
+    const latestReport = projection?.turnItems
       .filter(
         (item) =>
-          item.runId === targetShell.latestRunId &&
+          item.runId === targetRunId &&
           item.type === "assistant_message" &&
           !item.streaming &&
           (item.phase === undefined || item.phase === "final_answer"),
@@ -266,7 +289,7 @@ const make = Effect.gen(function* () {
       commandId: CommandId.make(`home-auto-wait:${digest(eventKey).slice(0, 32)}`),
       threadId: waitingThreadId,
       messageId: MessageId.make(`home-auto-wait:${digest(eventKey).slice(0, 32)}`),
-      text: `[Auto-wait] ${targetShell.title} finished (${status}). Its latest report: ${reportSummary}. Continue your work.`,
+      text: `[Auto-wait] ${targetShell?.title ?? row.target_title} finished (${status}). Its latest report: ${reportSummary}. Continue your work.`,
       attachments: [],
       mode: "queue",
       createdBy: "system",
@@ -290,15 +313,24 @@ const make = Effect.gen(function* () {
     ) {
       yield* cancelAutoWaits(threadId);
     }
+    if (shell !== null) {
+      const step = parseHomeNextStep(shell.homeFirstNextStep ?? "");
+      const currentWait =
+        shell.status === "completed" &&
+        !shell.blockedOnThreadWait &&
+        step?.kind === "wait" &&
+        step.environmentId === environmentId;
+      const reportRunId = shell.latestRunId ?? "";
+      yield* sql`UPDATE home_auto_waits SET status = 'cancelled', updated_at = ${now} WHERE waiting_thread_id = ${threadId} AND status IN ('active', 'cycle') AND (${currentWait ? 0 : 1} = 1 OR report_run_id <> ${reportRunId})`;
+    }
     const targetWaiters = yield* sql<{
       readonly waiting_thread_id: string;
       readonly waiting_project_id: string;
       readonly report_run_id: string;
+      readonly target_thread_id: string;
       readonly target_title: string;
-    }>`SELECT waiting_thread_id, waiting_project_id, report_run_id, target_title FROM home_auto_waits WHERE target_thread_id = ${threadId} AND target_environment_id = ${environmentId} AND status = 'active'`;
-    if (shell !== null) {
-      for (const waiter of targetWaiters) yield* fireAutoWait(waiter, shell);
-    }
+    }>`SELECT waiting_thread_id, waiting_project_id, report_run_id, target_thread_id, target_title FROM home_auto_waits WHERE target_thread_id = ${threadId} AND target_environment_id = ${environmentId} AND status = 'active'`;
+    for (const waiter of targetWaiters) yield* fireAutoWait(waiter, shell);
     if (
       shell === null ||
       shell.status !== "completed" ||
@@ -325,15 +357,17 @@ const make = Effect.gen(function* () {
             ) SELECT 1 AS found FROM chain WHERE thread_id = ${threadId} LIMIT 1`).length > 0;
     const targetShell = yield* threads.getThreadShell(targetThreadId);
     yield* sql`INSERT OR IGNORE INTO home_auto_waits (waiting_thread_id, waiting_project_id, report_run_id, target_thread_id, target_environment_id, target_title, status, created_at, updated_at) VALUES (${threadId}, ${shell.projectId}, ${reportRunId}, ${targetThreadId}, ${firstStep.environmentId}, ${firstStep.title}, ${cycle ? "cycle" : "active"}, ${now}, ${now})`;
-    if (cycle || targetShell === null) return;
+    if (cycle) return;
     const inserted = yield* sql<{
       readonly waiting_thread_id: string;
       readonly waiting_project_id: string;
       readonly report_run_id: string;
+      readonly target_thread_id: string;
       readonly target_title: string;
-    }>`SELECT waiting_thread_id, waiting_project_id, report_run_id, target_title FROM home_auto_waits WHERE waiting_thread_id = ${threadId} AND report_run_id = ${reportRunId} AND status = 'active'`;
+    }>`SELECT waiting_thread_id, waiting_project_id, report_run_id, target_thread_id, target_title FROM home_auto_waits WHERE waiting_thread_id = ${threadId} AND report_run_id = ${reportRunId} AND status = 'active'`;
     const row = inserted[0];
-    if (row && autoWaitTargetState(targetShell) !== null) yield* fireAutoWait(row, targetShell);
+    if (row && (targetShell === null || autoWaitTargetState(targetShell) !== null))
+      yield* fireAutoWait(row, targetShell);
   });
   const publishThread: WebPushNotifications["Service"]["publishThread"] = Effect.fn(
     "WebPushNotifications.publishThread",

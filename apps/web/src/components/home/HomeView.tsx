@@ -581,11 +581,7 @@ function HomeRowCard({
           </div>
           <HomeNeedsPanel
             thread={thread}
-            askText={
-              thread.homeFirstNextStep?.startsWith("Maxi:")
-                ? thread.homeFirstNextStep.slice("Maxi:".length).trim()
-                : null
-            }
+            askText={thread.homeAskText}
             onOpen={() => onOpen(thread)}
             expanded={expanded}
             onExpandedChange={onExpandedChange}
@@ -837,7 +833,7 @@ function HomeNeedsPanel({
   onExpandedChange,
 }: {
   thread: EnvironmentThreadShell;
-  askText?: string | null;
+  askText?: string | null | undefined;
   onOpen: () => void;
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;

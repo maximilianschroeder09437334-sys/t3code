@@ -464,9 +464,9 @@ function HomeDashboardRow(props: {
             </View>
             {/* Only rows that need you read the thread's requests; that subscribes to the thread. */}
             {props.section === "needs" ? <HomeDashboardRequest thread={thread} /> : null}
-            {props.section === "needs" && thread.homeFirstNextStep?.startsWith("Maxi:") ? (
+            {props.section === "needs" && thread.homeAskText ? (
               <Text numberOfLines={2} className="text-sm font-medium text-foreground">
-                {thread.homeFirstNextStep.slice("Maxi:".length).trim()}
+                {thread.homeAskText}
               </Text>
             ) : null}
             {props.section === "waiting" && props.waitingOn ? (

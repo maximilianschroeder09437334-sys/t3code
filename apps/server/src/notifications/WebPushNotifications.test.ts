@@ -455,6 +455,202 @@ it.effect("guards wait cycles and keeps the cycle visible as Needs you", () =>
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
+it.effect("cancels a cycle record when the waiting report is replaced", () =>
+  Effect.gen(function* () {
+    yield* Migration;
+    yield* HomeAutoWaitsMigration;
+    const test = fixture();
+    test.thread.status = "completed";
+    test.thread.activityRunStatus = null;
+    test.thread.homeDashboardSection = "waiting";
+    test.thread.homeFirstNextStep =
+      "T3: WAIT on [Cycle target](https://app.t3.codes/threads/push-environment/push-target)";
+    test.shells.set(targetThreadId, {
+      ...test.thread,
+      id: targetThreadId,
+      status: "completed",
+      latestRunId: RunId.make("target-run"),
+      homeDashboardSection: "waiting",
+      activityRunStatus: null,
+      homeFirstNextStep:
+        "T3: WAIT on [Quiet thread](https://app.t3.codes/threads/push-environment/push-thread)",
+    });
+    yield* Effect.gen(function* () {
+      const service = yield* Notifications.WebPushNotifications;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.publishThread(targetThreadId);
+      yield* service.publishThread(threadId);
+      test.thread.latestRunId = RunId.make("replacement-run");
+      test.thread.homeFirstNextStep = null;
+      test.thread.homeDashboardSection = "waiting";
+      yield* service.publishThread(threadId);
+      expect(
+        yield* sql`SELECT status FROM home_auto_waits WHERE waiting_thread_id = ${threadId}`,
+      ).toEqual([{ status: "cancelled" }]);
+    }).pipe(Effect.provide(test.layer));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("cancels an active auto-wait when a newer report no longer waits", () =>
+  Effect.gen(function* () {
+    yield* Migration;
+    yield* HomeAutoWaitsMigration;
+    const test = fixture();
+    test.shells.set(targetThreadId, {
+      ...test.thread,
+      id: targetThreadId,
+      status: "running",
+      homeDashboardSection: "running",
+    });
+    test.thread.status = "completed";
+    test.thread.activityRunStatus = null;
+    test.thread.homeDashboardSection = "waiting";
+    test.thread.homeFirstNextStep =
+      "T3: WAIT on [Target](https://app.t3.codes/threads/push-environment/push-target)";
+    yield* Effect.gen(function* () {
+      const service = yield* Notifications.WebPushNotifications;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.publishThread(threadId);
+      test.thread.latestRunId = RunId.make("replacement-run");
+      test.thread.homeFirstNextStep = null;
+      test.thread.homeDashboardSection = "running";
+      test.thread.status = "running";
+      yield* service.publishThread(threadId);
+      expect(yield* sql`SELECT status FROM home_auto_waits`).toEqual([{ status: "cancelled" }]);
+    }).pipe(Effect.provide(test.layer));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("does not fire an obsolete waiter after the waiting thread starts a newer report", () =>
+  Effect.gen(function* () {
+    yield* Migration;
+    yield* HomeAutoWaitsMigration;
+    const test = fixture();
+    const target = {
+      ...test.thread,
+      id: targetThreadId,
+      title: "Build thread",
+      status: "running",
+      latestRunId: RunId.make("target-run"),
+      homeDashboardSection: "running",
+    };
+    test.shells.set(targetThreadId, target);
+    test.thread.status = "completed";
+    test.thread.activityRunStatus = null;
+    test.thread.homeDashboardSection = "waiting";
+    test.thread.homeFirstNextStep =
+      "T3: WAIT on [Build thread](https://app.t3.codes/threads/push-environment/push-target)";
+    yield* Effect.gen(function* () {
+      const service = yield* Notifications.WebPushNotifications;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.publishThread(threadId);
+      yield* sql`INSERT INTO home_auto_waits (waiting_thread_id, waiting_project_id, report_run_id, target_thread_id, target_environment_id, target_title, status, created_at, updated_at) VALUES (${threadId}, ${test.thread.projectId}, 'unrelated-waiter-run', 'other-target', ${pushEnvironmentId}, 'Other target', 'active', 0, 0)`;
+      test.thread.latestRunId = RunId.make("unrelated-waiter-run");
+      test.thread.homeFirstNextStep =
+        "T3: WAIT on [Other target](https://app.t3.codes/threads/push-environment/other-target)";
+      test.thread.homeDashboardSection = "waiting";
+      test.thread.homeNeedsYou = false;
+      test.shells.set(targetThreadId, {
+        ...target,
+        status: "completed",
+        homeDashboardSection: "done",
+        activityRunStatus: null,
+      });
+      yield* service.publishThread(targetThreadId);
+      expect(test.autoWaitMessages).toHaveLength(0);
+      expect(
+        yield* sql`SELECT report_run_id, status FROM home_auto_waits ORDER BY report_run_id`,
+      ).toEqual([
+        { report_run_id: "push-run", status: "cancelled" },
+        { report_run_id: "unrelated-waiter-run", status: "active" },
+      ]);
+    }).pipe(Effect.provide(test.layer));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("does not wake a waiter while its target is still waiting on another thread", () =>
+  Effect.gen(function* () {
+    yield* Migration;
+    yield* HomeAutoWaitsMigration;
+    const test = fixture();
+    const target = {
+      ...test.thread,
+      id: targetThreadId,
+      title: "Chained wait",
+      status: "completed",
+      latestRunId: RunId.make("target-run"),
+      homeDashboardSection: "needs",
+      activityRunStatus: null,
+      homeNeedsYou: true,
+      homeFirstNextStep: "Maxi: continue the build",
+      homeAutoWaitActive: true,
+    };
+    test.shells.set(targetThreadId, target);
+    test.thread.status = "completed";
+    test.thread.activityRunStatus = null;
+    test.thread.homeDashboardSection = "waiting";
+    test.thread.homeFirstNextStep =
+      "T3: WAIT on [Chained wait](https://app.t3.codes/threads/push-environment/push-target)";
+    yield* Effect.gen(function* () {
+      const service = yield* Notifications.WebPushNotifications;
+      yield* service.publishThread(threadId);
+      yield* service.publishThread(targetThreadId);
+      expect(test.autoWaitMessages).toHaveLength(0);
+    }).pipe(Effect.provide(test.layer));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("wakes a valid waiter when its target is settled, archived, deleted, or missing", () =>
+  Effect.gen(function* () {
+    yield* Migration;
+    yield* HomeAutoWaitsMigration;
+    const test = fixture();
+    test.thread.status = "completed";
+    test.thread.activityRunStatus = null;
+    test.thread.homeDashboardSection = "waiting";
+    test.thread.homeFirstNextStep =
+      "T3: WAIT on [Finished target](https://app.t3.codes/threads/push-environment/push-target)";
+    const target = {
+      ...test.thread,
+      id: targetThreadId,
+      title: "Finished target",
+      status: "completed",
+      latestRunId: RunId.make("target-run"),
+      homeDashboardSection: "done",
+      activityRunStatus: null,
+    };
+    test.shells.set(targetThreadId, target);
+    yield* Effect.gen(function* () {
+      const service = yield* Notifications.WebPushNotifications;
+      const sql = yield* SqlClient.SqlClient;
+      for (const [index, update] of [
+        { settledOverride: "settled" },
+        { archivedAt: DateTime.makeUnsafe(2) },
+        { deletedAt: DateTime.makeUnsafe(3) },
+        null,
+      ].entries()) {
+        test.thread.latestRunId = RunId.make(`terminal-wait-${index}`);
+        if (update === null) test.shells.delete(targetThreadId);
+        else test.shells.set(targetThreadId, { ...target, ...update });
+        yield* service.publishThread(threadId);
+      }
+      expect(test.autoWaitMessages).toHaveLength(4);
+      expect(test.autoWaitMessages.map(({ text }) => text)).toEqual([
+        expect.stringContaining("finished (settled)"),
+        expect.stringContaining("finished (archived)"),
+        expect.stringContaining("finished (deleted)"),
+        expect.stringContaining("finished (deleted)"),
+      ]);
+      expect(yield* sql`SELECT status FROM home_auto_waits ORDER BY report_run_id`).toEqual([
+        { status: "fired" },
+        { status: "fired" },
+        { status: "fired" },
+        { status: "fired" },
+      ]);
+    }).pipe(Effect.provide(test.layer));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
 it.effect("sends a subscribed iPad Home alert as a signed and encrypted push payload", () =>
   Effect.gen(function* () {
     yield* Migration;
