@@ -8,6 +8,7 @@ import {
   formatHomeDuration,
   formatHomeTimeLabel,
   homeComposerProjectRef,
+  homeTimeIsWaiting,
 } from "./Home.logic";
 
 const project = {
@@ -265,5 +266,34 @@ describe("Home display helpers", () => {
       projectId: "project-two",
     });
     expect(homeComposerProjectRef(projects, null)).toBeNull();
+  });
+});
+
+describe("homeTimeIsWaiting", () => {
+  const waiterRuntime = {
+    status: "running",
+    activeRunId: "run-wait" as never,
+    activityStartedAt: "2026-11-21T13:33:00.000Z",
+  } as never;
+
+  it("marks the thread's own Waiting, which takes the shared Waiting icon and colour", () => {
+    const waiter = makeThreadFixture({ runtime: waiterRuntime, blockedOnThreadWait: true });
+    expect(homeTimeIsWaiting(waiter, { waiting: true })).toBe(true);
+    expect(
+      formatHomeTimeLabel(waiter, "2026-11-21T14:00:00.000Z", "UTC", { waiting: true }),
+    ).toMatch(/^waiting /);
+    // An older server without wait fields: the next-step WAIT line still says waiting.
+    const legacy = makeThreadFixture({ homeFirstNextStep: "T3: WAIT on the build" });
+    expect(homeTimeIsWaiting(legacy, undefined)).toBe(true);
+  });
+
+  it("leaves running, done and waiting-on-you times alone", () => {
+    expect(
+      homeTimeIsWaiting(makeThreadFixture({ runtime: waiterRuntime }), { waiting: false }),
+    ).toBe(false);
+    expect(homeTimeIsWaiting(makeThreadFixture({}), undefined)).toBe(false);
+    expect(
+      homeTimeIsWaiting(makeThreadFixture({ hasPendingUserInput: true }), { waiting: true }),
+    ).toBe(false);
   });
 });

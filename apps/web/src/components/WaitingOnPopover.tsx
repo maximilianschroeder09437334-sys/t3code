@@ -4,7 +4,13 @@ import type {
 } from "@t3tools/client-runtime/state/thread-wait";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { useState, type ReactElement, type ReactNode, type SyntheticEvent } from "react";
+import {
+  useState,
+  type ComponentProps,
+  type ReactElement,
+  type ReactNode,
+  type SyntheticEvent,
+} from "react";
 
 import { cn } from "~/lib/utils";
 import { useThreadWait } from "../state/threadWaits";
@@ -12,6 +18,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { WAITING_STATUS_CLASS_NAME, WaitingStatusIcon } from "./WaitingStatusIcon";
 import {
   openWaitTargets,
   waitTargetLabel,
@@ -127,6 +134,8 @@ export function WaitingOnPopover(props: {
   children?: ReactNode;
   side?: "top" | "bottom";
   align?: "start" | "center" | "end";
+  /** Where the list hangs from instead of the trigger, so it stays put if the trigger moves. */
+  anchor?: ComponentProps<typeof PopoverPopup>["anchor"];
   onOpenChange?: (open: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -142,6 +151,7 @@ export function WaitingOnPopover(props: {
       <PopoverPopup
         side={props.side ?? "bottom"}
         align={props.align ?? "end"}
+        anchor={props.anchor}
         padding="compact"
         className="max-w-80"
         // The popup portals out of the DOM but not out of React, so a click on its text would
@@ -192,10 +202,12 @@ export function ThreadWaitingPill(props: { waiter: WaitingOnWaiter }) {
         <Badge
           variant="info"
           size="sm"
+          className={cn("gap-1", WAITING_STATUS_CLASS_NAME)}
           render={<button type="button" aria-label="Show what this thread is waiting on" />}
         />
       }
     >
+      <WaitingStatusIcon className="size-3" />
       Waiting
     </WaitingOnPopover>
   );

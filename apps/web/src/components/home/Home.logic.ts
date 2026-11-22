@@ -152,6 +152,15 @@ function clockLabel(value: string | null | undefined, timeZone?: string): string
   }).format(new Date(value));
 }
 
+/** Whether the card's time says "waiting …" (the thread's own Waiting, not waiting on you). */
+export function homeTimeIsWaiting(
+  thread: EnvironmentThreadShell,
+  wait?: SidebarThreadWait,
+): boolean {
+  if (wait?.waiting === true) return resolveSidebarThreadStatus(thread, wait) === "waiting";
+  return wait === undefined && thread.homeFirstNextStep?.startsWith("T3: WAIT on ") === true;
+}
+
 export function formatHomeTimeLabel(
   thread: EnvironmentThreadShell,
   now: string,

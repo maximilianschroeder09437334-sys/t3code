@@ -305,3 +305,64 @@ describe("folder rows without a resolved Waiting", () => {
     }
   });
 });
+
+describe("card row layout", () => {
+  const rect = (element: Element) => element.getBoundingClientRect();
+  const card = () => page.getByTestId("sidebar-row-card").element() as HTMLElement;
+  const settle = () => page.getByRole("button", { name: "Settle thread" });
+
+  it("keeps the status pill fixed top right while hover shows Settle on the bottom row", async () => {
+    await using _mounted = await mountRow("card", waiterThread, resolvedWait);
+    await expect.element(waitingTrigger()).toBeInTheDocument();
+    const trigger = waitingTrigger().element() as HTMLElement;
+    const before = rect(trigger);
+    // The pill sits at the card's right edge, inside its padding.
+    expect(rect(card()).right - before.right).toBeLessThan(16);
+    expect(before.top - rect(card()).top).toBeLessThan(16);
+    expect(effectiveOpacity(settle().element())).toBe(0);
+
+    await userEvent.hover(page.getByTestId("sidebar-row-card"));
+    await expect.poll(() => effectiveOpacity(settle().element())).toBe(1);
+    const after = rect(trigger);
+    expect(after.left).toBe(before.left);
+    expect(after.top).toBe(before.top);
+    expect(effectiveOpacity(trigger)).toBe(1);
+
+    // Settle fades in below the pill's row, at the card's right side.
+    const settleBox = rect(settle().element());
+    expect(settleBox.top).toBeGreaterThanOrEqual(before.bottom);
+    expect(settleBox.right).toBeLessThanOrEqual(rect(card()).right);
+    expect(settleBox.left).toBeGreaterThan(rect(card()).left + rect(card()).width / 2);
+  });
+
+  it("reaches Settle from the keyboard, which shows it without hover", async () => {
+    await using mounted = await mountRow("card", waiterThread, resolvedWait);
+    const trigger = waitingTrigger();
+    await expect.element(trigger).toBeInTheDocument();
+    (trigger.element() as HTMLElement).focus();
+    await userEvent.tab();
+    await expect.element(settle()).toHaveFocus();
+    await expect.poll(() => effectiveOpacity(settle().element())).toBe(1);
+    expectRowUntouched(mounted.callbacks);
+  });
+
+  it("hangs the Waiting list from the card's right edge, unmoved by hover", async () => {
+    await using _mounted = await mountRow("card", waiterThread, resolvedWait);
+    await userEvent.click(waitingTrigger());
+    await expect.element(waitingList()).toBeVisible();
+    const popup = () =>
+      (waitingList().element() as HTMLElement).closest("[data-slot='popover-popup']")!;
+    const cardBox = rect(card());
+    const triggerBox = rect(waitingTrigger().element());
+    const opened = rect(popup());
+    expect(Math.abs(opened.right - cardBox.right)).toBeLessThanOrEqual(1);
+    expect(opened.top).toBeGreaterThanOrEqual(triggerBox.bottom);
+    expect(opened.top).toBeLessThan(cardBox.bottom);
+
+    await userEvent.hover(page.getByTestId("sidebar-row-card"));
+    await expect.poll(() => effectiveOpacity(settle().element())).toBe(1);
+    const hovered = rect(popup());
+    expect(hovered.left).toBe(opened.left);
+    expect(hovered.top).toBe(opened.top);
+  });
+});

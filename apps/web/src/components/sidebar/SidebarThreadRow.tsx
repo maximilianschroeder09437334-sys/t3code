@@ -4,6 +4,7 @@ import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import type { ResolvedThreadWait } from "@t3tools/client-runtime/state/thread-wait";
 import { WaitingOnPopover } from "../WaitingOnPopover";
+import { WAITING_STATUS_CLASS_NAME, WaitingStatusIcon } from "../WaitingStatusIcon";
 import { useThreadWait } from "../../state/threadWaits";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { requestCustomSnooze } from "../CustomSnoozeDialog";
@@ -46,7 +47,6 @@ import {
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
-  CircleDotDashedIcon,
   ClockIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
@@ -62,6 +62,7 @@ import {
 import {
   memo,
   useRef,
+  type ComponentProps,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -535,7 +536,7 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
 
 const TOP_STATUS_ICONS = {
   working: CircleDashedIcon,
-  waiting: CircleDotDashedIcon,
+  waiting: WaitingStatusIcon,
   input: MessageCircleQuestionIcon,
   request: UserRoundIcon,
   approval: ShieldQuestionIcon,
@@ -561,6 +562,7 @@ function WaitingOnStatusButton(props: {
   wait: ResolvedThreadWait | undefined;
   className: string;
   onOpenChange: (open: boolean) => void;
+  anchor?: ComponentProps<typeof WaitingOnPopover>["anchor"];
   children: ReactNode;
 }) {
   return (
@@ -568,6 +570,7 @@ function WaitingOnStatusButton(props: {
       waiter={props.waiter}
       wait={props.wait}
       onOpenChange={props.onOpenChange}
+      anchor={props.anchor}
       trigger={
         <button
           type="button"
@@ -723,6 +726,27 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       releaseLease?.();
     };
   };
+  const cardRef = useRef<HTMLElement | null>(null);
+  const cardTopRowRef = useRef<HTMLDivElement | null>(null);
+  const cardRowRef = (row: HTMLElement | null) => {
+    cardRef.current = row;
+    return rowRef(row);
+  };
+  // The card's Waiting list hangs right-aligned from the card's edge, just under its top row, so
+  // nothing the row does on hover can move it.
+  const [cardWaitingAnchor] = useState(() => () => {
+    const card = cardRef.current;
+    const topRow = cardTopRowRef.current;
+    if (card === null || topRow === null) return card;
+    return {
+      contextElement: card,
+      getBoundingClientRect: () => {
+        const box = card.getBoundingClientRect();
+        const bottom = topRow.getBoundingClientRect().bottom;
+        return DOMRect.fromRect({ x: box.x, y: box.y, width: box.width, height: bottom - box.y });
+      },
+    };
+  });
   const isRegeneratingTitle = thread.titleRegeneration != null;
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
@@ -805,7 +829,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         ? {
             label: "Waiting",
             icon: "waiting" as const,
-            className: "text-info-foreground",
+            className: WAITING_STATUS_CLASS_NAME,
           }
         : status === "approval"
           ? {
@@ -1216,6 +1240,69 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         <EnvironmentMachineIcon aria-hidden kind={props.environmentMachine} className="size-3.5" />
       </span>
     ) : null;
+  // Cards keep their status fixed top right; their row actions fade in on the bottom row, left of
+  // the provider icon, on hover or keyboard focus.
+  const cardRowActions =
+    variant === "card" &&
+    !sortable?.isDragging &&
+    props.sweepAction === null &&
+    (props.settlementSupported || showSnoozeButton || hasUnsentDraft) ? (
+      <span
+        data-testid="sidebar-card-actions"
+        className={cn(
+          // Mouse clicks leave Settle focused; focus-within would pin the actions after the pointer
+          // leaves. Use focus-visible instead.
+          "pointer-events-none absolute flex h-5 items-stretch opacity-0 transition-opacity has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:static group-any-hover/sidebar-row:opacity-100",
+          snoozeMenuOpen && "pointer-events-auto static opacity-100",
+        )}
+      >
+        {hasUnsentDraft ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label="Discard draft"
+                  onClick={handleDiscardDraftClick}
+                  className="inline-flex cursor-pointer items-center rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
+                />
+              }
+            >
+              <XIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup side="top">Discard draft</TooltipPopup>
+          </Tooltip>
+        ) : null}
+        {showSnoozeButton ? (
+          <SnoozeMenuButton
+            open={snoozeMenuOpen}
+            onOpenChange={setSnoozeMenuOpen}
+            onSnooze={handleSnoozePreset}
+            timestampFormat={props.timestampFormat}
+            environmentId={thread.environmentId}
+          />
+        ) : null}
+        {props.settlementSupported ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label="Settle thread"
+                  onClick={handleSettleClick}
+                  onPointerDown={handleActionPointerDown}
+                  className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
+                />
+              }
+            >
+              <CheckIcon className="size-3.5" />
+              Settle
+            </TooltipTrigger>
+            <TooltipPopup>Settle thread</TooltipPopup>
+          </Tooltip>
+        ) : null}
+      </span>
+    ) : null;
   const diff = latestRunDiff(thread);
   // Only the trailing icons would remain, so the row moves them to the title line instead.
   const metaLineEmpty =
@@ -1253,25 +1340,28 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           <span className="text-diff-deletion-foreground">−{formatDiffCount(diff.deletions)}</span>
         </span>
       ) : null}
-      <span
-        aria-hidden
-        className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
-      >
+      <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+        {cardRowActions}
+        <span aria-hidden className="pointer-events-none inline-flex shrink-0 items-center gap-1">
+          {remoteMachineIcon}
+          <SidebarProviderStack
+            thread={thread}
+            providerEntryByInstanceId={props.providerEntryByInstanceId}
+          />
+        </span>
+      </span>
+    </div>
+  );
+  const titleLineIcons = metaLineEmpty ? (
+    <span className="inline-flex shrink-0 items-center gap-1">
+      {cardRowActions}
+      <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
         {remoteMachineIcon}
         <SidebarProviderStack
           thread={thread}
           providerEntryByInstanceId={props.providerEntryByInstanceId}
         />
       </span>
-    </div>
-  );
-  const titleLineIcons = metaLineEmpty ? (
-    <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
-      {remoteMachineIcon}
-      <SidebarProviderStack
-        thread={thread}
-        providerEntryByInstanceId={props.providerEntryByInstanceId}
-      />
     </span>
   ) : null;
 
@@ -1502,7 +1592,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         <TooltipTrigger
           render={
             <div
-              ref={rowRef}
+              ref={cardRowRef}
               role="button"
               tabIndex={0}
               data-sidebar-row={threadKey}
@@ -1525,7 +1615,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               metaLineEmpty && "h-auto",
             )}
           >
-            <div className="flex h-5 min-w-0 items-center gap-1.5">
+            <div ref={cardTopRowRef} className="flex h-5 min-w-0 items-center gap-1.5">
               {draftIndicator}
               {props.project ? (
                 <ProjectFavicon project={props.project} className="size-4 shrink-0" />
@@ -1547,18 +1637,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : (
                 <span
                   className={cn(
-                    "group/sidebar-status-slot relative ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs",
+                    "relative ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs",
                     props.sweepAction !== null && "hidden",
                     jumpHintLabel && JUMP_HINT_SLOT_CLASS_NAME,
                   )}
                 >
                   <span
                     className={cn(
+                      // The status never hides or moves on hover; row actions use the bottom row.
                       isWokeStatus || isWaitingOnStatus
                         ? "pointer-events-auto"
-                        : "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:right-0 group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-any-hover/sidebar-row:absolute group-any-hover/sidebar-row:right-0 group-any-hover/sidebar-row:opacity-0",
+                        : "pointer-events-none",
                       "flex items-center self-center justify-self-end tabular-nums text-secondary-label",
-                      snoozeMenuOpen && "pointer-events-none absolute right-0 opacity-0",
                     )}
                   >
                     {topStatus ? (
@@ -1587,6 +1677,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           waiter={threadRef}
                           wait={wait}
                           onOpenChange={setWaitingOnOpen}
+                          anchor={cardWaitingAnchor}
                           className={topStatus.className}
                         >
                           <TopStatusIcon icon={topStatus.icon} className="size-4" />
@@ -1625,62 +1716,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       <RelativeTimeLabel timestamp={resolveThreadActivityTimestamp(thread)} />
                     )}
                   </span>
-                  {props.settlementSupported || showSnoozeButton || hasUnsentDraft ? (
-                    <span
-                      className={cn(
-                        // Mouse clicks leave Settle focused; focus-within would pin controls over
-                        // the status label after the pointer leaves. Use focus-visible instead.
-                        "pointer-events-none absolute inset-y-0 right-0 flex items-stretch opacity-0 has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:static group-any-hover/sidebar-row:opacity-100",
-                        snoozeMenuOpen && "pointer-events-auto static opacity-100",
-                      )}
-                    >
-                      {hasUnsentDraft ? (
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <button
-                                type="button"
-                                aria-label="Discard draft"
-                                onClick={handleDiscardDraftClick}
-                                className="inline-flex cursor-pointer items-center rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
-                              />
-                            }
-                          >
-                            <XIcon className="size-3.5" />
-                          </TooltipTrigger>
-                          <TooltipPopup side="top">Discard draft</TooltipPopup>
-                        </Tooltip>
-                      ) : null}
-                      {showSnoozeButton ? (
-                        <SnoozeMenuButton
-                          open={snoozeMenuOpen}
-                          onOpenChange={setSnoozeMenuOpen}
-                          onSnooze={handleSnoozePreset}
-                          timestampFormat={props.timestampFormat}
-                          environmentId={thread.environmentId}
-                        />
-                      ) : null}
-                      {props.settlementSupported ? (
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <button
-                                type="button"
-                                aria-label="Settle thread"
-                                onClick={handleSettleClick}
-                                onPointerDown={handleActionPointerDown}
-                                className="-mr-1 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-1.5 text-xs text-muted-foreground hover:text-foreground"
-                              />
-                            }
-                          >
-                            <CheckIcon className="size-3.5" />
-                            Settle
-                          </TooltipTrigger>
-                          <TooltipPopup>Settle thread</TooltipPopup>
-                        </Tooltip>
-                      ) : null}
-                    </span>
-                  ) : null}
                   {jumpHintLabel ? <JumpHintBadge label={jumpHintLabel} /> : null}
                 </span>
               )}

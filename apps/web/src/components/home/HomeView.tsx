@@ -40,6 +40,7 @@ import { useDelegatedUnderParent, useProjects, useVisibleThreadShells } from "..
 import { useThreadWaits } from "../../state/threadWaits";
 import { HomeWaitingOnLine } from "./HomeWaitingOnLine";
 import { liveWaitTargets } from "../WaitingOn.logic";
+import { WAITING_STATUS_CLASS_NAME, WaitingStatusIcon } from "../WaitingStatusIcon";
 import { openCommandPalette } from "../../commandPaletteBus";
 import { useUiStateStore } from "../../uiStateStore";
 import { Button } from "../ui/button";
@@ -70,6 +71,7 @@ import {
   homeDurationMinutes,
   homeThreadWasStopped,
   homeThreadRef,
+  homeTimeIsWaiting,
   type HomeRow,
   type HomeCounts,
   type HomeSection,
@@ -510,22 +512,27 @@ function HomeRowCard({
   const hasUnsentDraft = useThreadHasUnsentDraft(homeThreadRef(thread));
   const status = resolveSidebarThreadStatus(thread, row.wait);
   const stopped = homeThreadWasStopped(thread);
+  // "waiting 12 min" is the same Waiting as the sidebar and header: their icon and colour.
+  const waiting = homeTimeIsWaiting(thread, row.wait);
   const timeColor =
     status === "failed"
       ? "text-error-foreground"
-      : row.section === "needs"
-        ? "text-warning-foreground"
-        : row.section === "running"
-          ? "text-info-foreground"
-          : stopped ||
-              (row.section === "done" &&
-                thread.lastVisitedAt != null &&
-                Date.parse(thread.lastVisitedAt) >=
-                  Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt))
-            ? "text-muted-foreground"
-            : "text-success";
-  const TimeIcon =
-    row.section === "needs"
+      : waiting
+        ? WAITING_STATUS_CLASS_NAME
+        : row.section === "needs"
+          ? "text-warning-foreground"
+          : row.section === "running"
+            ? "text-info-foreground"
+            : stopped ||
+                (row.section === "done" &&
+                  thread.lastVisitedAt != null &&
+                  Date.parse(thread.lastVisitedAt) >=
+                    Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt))
+              ? "text-muted-foreground"
+              : "text-success";
+  const TimeIcon = waiting
+    ? WaitingStatusIcon
+    : row.section === "needs"
       ? Clock3Icon
       : stopped || status === "failed"
         ? CircleStopIcon
