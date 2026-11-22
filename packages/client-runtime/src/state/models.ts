@@ -164,7 +164,17 @@ export interface EnvironmentThreadShell {
   readonly homeFirstNextStep?: string | null;
   readonly homeNeedsYou?: boolean;
   readonly homeAskText?: string | null;
+  readonly homeDoneText?: string | null;
+  readonly homeHandedOff?: boolean;
   readonly homeDashboardSection?: "needs" | "waiting" | "done" | "running";
+  readonly homeAutoWaitActive?: boolean;
+  readonly homeAutoWaitCycle?: boolean;
+  readonly homeWaitingCount?: number;
+  readonly homeWaitingOn?: {
+    readonly title: string;
+    readonly environmentId: string;
+    readonly threadId: string;
+  } | null;
   readonly latestUserMessageAt: string | null;
   readonly latestUserAuthoredMessageAt?: string | null;
   readonly hasPendingApprovals: boolean;

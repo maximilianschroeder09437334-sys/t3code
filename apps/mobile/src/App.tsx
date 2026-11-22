@@ -37,6 +37,7 @@ import {
   installAgentNotificationNavigation,
   setAgentNotificationPathname,
 } from "./features/agent-awareness/notificationNavigation";
+import { installHomeNotifications } from "./features/agent-awareness/homeNotifications";
 import {
   installAppShortcuts,
   recordAppShortcutNavigationState,
@@ -211,6 +212,7 @@ const appServiceDisposers = [
   installComposerAttachmentUploads(),
   startIncomingShareInbox(),
   installAgentNotificationNavigation(linkToAppPath),
+  installHomeNotifications(appAtomRegistry),
   installAppShortcuts(linkToAppPath),
   installAppUpdateChecks(),
   installShowcaseCapture(rootPathnameFromState),

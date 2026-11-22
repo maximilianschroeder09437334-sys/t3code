@@ -59,3 +59,16 @@ export function parseHomeActionableMaxiStep(report: string): string | null {
   }
   return null;
 }
+
+export function isHomeReportCurrent(input: {
+  readonly reportRunId: string;
+  readonly latestRunId: string | null;
+  readonly reportCompletedAt: number | null;
+  readonly latestUserMessageAt: number | null;
+}): boolean {
+  return (
+    input.reportRunId === input.latestRunId &&
+    input.reportCompletedAt !== null &&
+    (input.latestUserMessageAt === null || input.latestUserMessageAt <= input.reportCompletedAt)
+  );
+}

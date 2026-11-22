@@ -141,7 +141,10 @@ export function startThreadNotifications(
     const needsYou =
       kind === "input" &&
       (reportNeedsYou || status === "approval" || status === "input" || status === "request");
+    const homeDone = kind === "completion" && state.raw.homeDashboardSection === "done";
     if (
+      !reportNeedsYou &&
+      !homeDone &&
       !shouldNotifyThread({
         kind:
           kind === "completion"
@@ -168,7 +171,7 @@ export function startThreadNotifications(
       : state.explicitPing
         ? (state.raw.agentPing?.title ?? "Agent update")
         : kind === "completion"
-          ? "Thread completed"
+          ? thread.title
           : status === "approval"
             ? "Approval needed"
             : status === "limited"
@@ -221,7 +224,9 @@ export function startThreadNotifications(
           ? (state.raw.homeAskText ?? "Needs you")
           : state.explicitPing
             ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
-            : thread.title,
+            : kind === "completion"
+              ? `Done: ${state.raw.homeDoneText ?? "Task finished"}`
+              : thread.title,
         data: {
           hideCopyButton: true,
           leadingIcon:
@@ -261,7 +266,9 @@ export function startThreadNotifications(
           ? (state.raw.homeAskText ?? "Needs you")
           : state.explicitPing
             ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
-            : thread.title,
+            : kind === "completion"
+              ? `Done: ${state.raw.homeDoneText ?? "Task finished"}`
+              : thread.title,
         tag: threadNotificationTag(environmentId, thread.id),
         silent: true,
         // Windows drops clicks after a toast moves into Notification Center.
@@ -332,7 +339,7 @@ export function startThreadNotifications(
       // with an id is keyed by that id alone and announces once.
       const attention =
         rawThread.homeNeedsYou === true
-          ? `home:${rawThread.latestRunId ?? ""}:${rawThread.homeAskText ?? "request"}`
+          ? "home-needs"
           : explicitPing
             ? `ping:${rawThread.agentPing!.id}`
             : !needsAttention
@@ -348,8 +355,11 @@ export function startThreadNotifications(
       const waitingStep = rawThread.homeFirstNextStep?.startsWith("T3: WAIT on ") === true;
       const hasRunningChild = (rawThread.pendingBackgroundTasks?.length ?? 0) > 0;
       const settled =
+        rawThread.homeDashboardSection === "done" &&
         completed &&
         !waitingStep &&
+        rawThread.homeAutoWaitActive !== true &&
+        rawThread.homeHandedOff !== true &&
         !firstStepHandoff &&
         !hasRunningChild &&
         !monitorHoldsWakeCompletion(rawThread);

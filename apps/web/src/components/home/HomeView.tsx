@@ -614,6 +614,9 @@ function HomeRowCard({
                 {row.waitingThread?.homeFirstNextStep?.startsWith("Maxi:") ? (
                   <span className="text-warning-foreground"> → needs you</span>
                 ) : null}
+                {row.thread.homeAutoWaitActive ? (
+                  <span className="ml-1 text-muted-foreground">auto</span>
+                ) : null}
               </span>
             ) : (
               <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
@@ -1059,7 +1062,6 @@ function HomeNeedsPanel({
                     <Button
                       key={value}
                       size="xs"
-                      variant="outline"
                       aria-pressed={answersOnClick ? undefined : selected}
                       variant={selected && !answersOnClick ? "warning-outline" : "outline"}
                       onClick={() => {

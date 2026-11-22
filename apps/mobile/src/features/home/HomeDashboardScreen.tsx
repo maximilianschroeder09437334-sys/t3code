@@ -489,6 +489,9 @@ function HomeDashboardRow(props: {
                 {props.waitingThread?.homeFirstNextStep?.startsWith("Maxi:") ? (
                   <Text className="text-xs text-warning-foreground">→ needs you</Text>
                 ) : null}
+                {thread.homeAutoWaitActive ? (
+                  <Text className="text-2xs text-foreground-muted">auto</Text>
+                ) : null}
               </View>
             ) : null}
           </Pressable>

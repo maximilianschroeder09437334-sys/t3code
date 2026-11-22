@@ -13,6 +13,10 @@ export function setAgentNotificationPathname(pathname: string): void {
   setAndroidThreadOnScreen(deepLinkOnScreen);
 }
 
+export function agentNotificationThreadOnScreen(): string | null {
+  return deepLinkOnScreen;
+}
+
 /**
  * App-lifetime notification routing: foreground presentation suppresses the
  * thread already on screen, and taps (including the cold-start tap) open the

@@ -2302,7 +2302,21 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Server-derived attention state shared by thread lists and notification clients. */
   homeNeedsYou: Schema.optional(Schema.Boolean),
   homeAskText: Schema.optional(Schema.NullOr(Schema.String)),
+  homeDoneText: Schema.optional(Schema.NullOr(Schema.String)),
+  homeHandedOff: Schema.optional(Schema.Boolean),
   homeDashboardSection: Schema.optional(Schema.Literals(["needs", "waiting", "done", "running"])),
+  homeAutoWaitActive: Schema.optional(Schema.Boolean),
+  homeAutoWaitCycle: Schema.optional(Schema.Boolean),
+  homeWaitingCount: Schema.optional(Schema.Number),
+  homeWaitingOn: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        title: Schema.String,
+        environmentId: EnvironmentId,
+        threadId: ThreadId,
+      }),
+    ),
+  ),
   activeRunId: Schema.NullOr(RunId),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activityRunStatus: Schema.optional(

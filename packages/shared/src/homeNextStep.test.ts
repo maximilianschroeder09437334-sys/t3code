@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { parseHomeActionableMaxiStep, parseHomeNextStep } from "./homeNextStep.ts";
+import {
+  isHomeReportCurrent,
+  parseHomeActionableMaxiStep,
+  parseHomeNextStep,
+} from "./homeNextStep.ts";
 
 describe("parseHomeNextStep", () => {
   it("reads only the first Maxi action", () => {
@@ -30,4 +34,31 @@ describe("parseHomeNextStep", () => {
       ),
     ).toBe("test this version meanwhile");
   });
+});
+
+it("stops using a completed report after a newer run or Maxi reply", () => {
+  expect(
+    isHomeReportCurrent({
+      reportRunId: "run-1",
+      latestRunId: "run-2",
+      reportCompletedAt: 10,
+      latestUserMessageAt: null,
+    }),
+  ).toBe(false);
+  expect(
+    isHomeReportCurrent({
+      reportRunId: "run-1",
+      latestRunId: "run-1",
+      reportCompletedAt: 10,
+      latestUserMessageAt: 11,
+    }),
+  ).toBe(false);
+  expect(
+    isHomeReportCurrent({
+      reportRunId: "run-1",
+      latestRunId: "run-1",
+      reportCompletedAt: 10,
+      latestUserMessageAt: null,
+    }),
+  ).toBe(true);
 });

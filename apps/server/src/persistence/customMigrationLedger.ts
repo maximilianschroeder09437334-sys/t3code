@@ -8,9 +8,10 @@ import ThreadNotes from "./Migrations/080_ThreadNotes.ts";
 import HookAutomation from "./Migrations/082_HookAutomation.ts";
 import WebPushNotifications from "./Migrations/083_WebPushNotifications.ts";
 import ActivityLedger from "./Migrations/084_ActivityLedger.ts";
+import HomeAutoWaits from "./Migrations/097_HomeAutoWaits.ts";
 
 // Maxi's own migrations live in a separate ledger so they never occupy an official migration id.
-// Ids 80-83 are the names of the files and of the rows the pre-merge build wrote into the official
+// Ids 80-85 are the names of the files and of the rows the pre-merge build wrote into the official
 // ledger. Custom 81 is recognized only to convert that history: official 80 is the same statement.
 export const customMigrationFiles = [
   [80, "ThreadNotes"],
@@ -18,6 +19,7 @@ export const customMigrationFiles = [
   [82, "HookAutomation"],
   [83, "WebPushNotifications"],
   [84, "ActivityLedger"],
+  [97, "HomeAutoWaits"],
 ] as const;
 
 const runnableCustomMigrations = [
@@ -25,6 +27,7 @@ const runnableCustomMigrations = [
   [82, "HookAutomation", HookAutomation],
   [83, "WebPushNotifications", WebPushNotifications],
   [84, "ActivityLedger", ActivityLedger],
+  [97, "HomeAutoWaits", HomeAutoWaits],
 ] as const;
 
 type Probe =
@@ -224,6 +227,29 @@ const customEffects: Record<number, readonly Probe[]> = {
         col("seen_at", "TEXT"),
         col("seen_sequence", "INTEGER"),
       ],
+    },
+  ],
+  97: [
+    {
+      kind: "table",
+      table: "home_auto_waits",
+      columns: [
+        col("waiting_thread_id", "TEXT", true, "", 1),
+        col("waiting_project_id", "TEXT"),
+        col("report_run_id", "TEXT", true, "", 2),
+        col("target_thread_id", "TEXT"),
+        col("target_environment_id", "TEXT"),
+        col("target_title", "TEXT"),
+        col("status", "TEXT"),
+        col("created_at", "INTEGER"),
+        col("updated_at", "INTEGER"),
+      ],
+    },
+    {
+      kind: "index",
+      table: "home_auto_waits",
+      index: "home_auto_wait_target",
+      columns: ["target_thread_id", "status"],
     },
   ],
 };
@@ -475,7 +501,7 @@ export const validateCustomMigrationState = Effect.fn("customMigrationLedger.val
   }
   const legacy = recorded.filter((row) => row.origin === "legacy");
   const count = legacy.length;
-  const expectedIds = [80, 82, 83, 84];
+  const expectedIds = [80, 82, 83, 84, 97];
   const executed = recorded.filter((row) => row.origin !== "legacy");
   if (
     recorded.some(

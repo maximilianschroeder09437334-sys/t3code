@@ -158,7 +158,10 @@ export function deriveHomeDashboardRows(input: {
       : undefined;
   };
   const waitingTargets = new Map(
-    active.map((thread) => [`${thread.environmentId}\u0001${thread.id}`, parsedWait(thread)]),
+    active.map((thread) => [
+      `${thread.environmentId}\u0001${thread.id}`,
+      sectionFor(thread) === "waiting" ? parsedWait(thread) : undefined,
+    ]),
   );
   const waitingCounts = new Map<string, number>();
   for (const target of waitingTargets.values()) {
@@ -181,7 +184,7 @@ export function deriveHomeDashboardRows(input: {
             )
             .sort((a, b) => activity(b) - activity(a))
             .slice(0, 10);
-    const waitingOn = parsedWait(thread);
+    const waitingOn = thread.homeWaitingOn ?? parsedWait(thread);
     const waitingThread = waitingOn
       ? threadByRef.get(`${waitingOn.environmentId}\u0001${waitingOn.threadId}`)
       : undefined;
@@ -193,7 +196,10 @@ export function deriveHomeDashboardRows(input: {
       predecessors,
       ...(waitingOn ? { waitingOn } : {}),
       ...(waitingThread ? { waitingThread } : {}),
-      waitingCount: waitingCounts.get(`${thread.environmentId}\u0001${thread.id}`) ?? 0,
+      waitingCount:
+        thread.homeWaitingCount ??
+        waitingCounts.get(`${thread.environmentId}\u0001${thread.id}`) ??
+        0,
     };
   });
   const sectionOrder: Record<HomeDashboardSection, number> = {
