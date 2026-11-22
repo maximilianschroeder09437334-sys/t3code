@@ -19,7 +19,6 @@ import {
   HomeIcon,
   LayersIcon,
   LoaderCircleIcon,
-  PinIcon,
   SearchIcon,
   SquarePenIcon,
 } from "lucide-react";
@@ -69,6 +68,7 @@ import {
   homeThreadWasStopped,
   homeThreadRef,
   type HomeRow,
+  type HomeCounts,
   type HomeSection,
 } from "./Home.logic";
 import ChatView from "../ChatView";
@@ -76,11 +76,13 @@ import { useThreadHasUnsentDraft } from "../../composerDraftStore";
 
 const labels: Record<HomeSection, string> = {
   needs: "Needs you",
+  waiting: "Waiting",
   done: "Done since you looked",
   running: "Running",
 };
 const sectionColors: Record<HomeSection, string> = {
   needs: "text-warning-foreground",
+  waiting: "text-muted-foreground",
   done: "text-success",
   running: "text-info-foreground",
 };
@@ -237,7 +239,7 @@ export function HomeView() {
     </Button>
   );
   const otherRowsCount = rows.filter((row) => rowProjectKey(row) === OTHER_PROJECTS_KEY).length;
-  const sections = (["needs", "done", "running"] as const)
+  const sections = (["needs", "waiting", "done", "running"] as const)
     .map((section) => ({ section, items: sectionRows(section) }))
     .filter(({ items }) => items.length > 0);
 
@@ -510,7 +512,11 @@ function HomeRowCard({
         ? "text-warning-foreground"
         : row.section === "running"
           ? "text-info-foreground"
-          : stopped
+          : stopped ||
+              (row.section === "done" &&
+                thread.lastVisitedAt != null &&
+                Date.parse(thread.lastVisitedAt) >=
+                  Date.parse(thread.latestRun?.completedAt ?? thread.updatedAt))
             ? "text-muted-foreground"
             : "text-success";
   const TimeIcon =
@@ -563,12 +569,23 @@ function HomeRowCard({
             {providerIcon}
             <span className="min-w-0 truncate">{title}</span>
             {hasUnsentDraft ? <HomeDraftTag /> : null}
+            {row.waitingCount ? (
+              <span className="shrink-0 rounded-full border border-warning/40 px-2 py-0.5 text-2xs text-warning-foreground">
+                {row.waitingCount}{" "}
+                {row.waitingCount === 1 ? "thread waiting on this" : "threads waiting on this"}
+              </span>
+            ) : null}
             {chainToggle}
             <span className="ml-auto" />
             {time}
           </div>
           <HomeNeedsPanel
             thread={thread}
+            askText={
+              thread.homeFirstNextStep?.startsWith("Maxi:")
+                ? thread.homeFirstNextStep.slice("Maxi:".length).trim()
+                : null
+            }
             onOpen={() => onOpen(thread)}
             expanded={expanded}
             onExpandedChange={onExpandedChange}
@@ -585,7 +602,24 @@ function HomeRowCard({
             {time}
           </div>
           <div className="mt-1 flex min-h-6 items-center gap-3 ps-6">
-            <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{summary}</span>
+            {row.section === "waiting" && row.waitingOn ? (
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                Waiting on{" "}
+                <a
+                  className="text-primary underline underline-offset-2"
+                  href={`/${encodeURIComponent(row.waitingOn.environmentId)}/${encodeURIComponent(row.waitingOn.threadId)}`}
+                >
+                  {row.waitingOn.title}
+                </a>
+                {row.waitingThread?.homeFirstNextStep?.startsWith("Maxi:") ? (
+                  <span className="text-warning-foreground"> → needs you</span>
+                ) : null}
+              </span>
+            ) : (
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                {summary}
+              </span>
+            )}
             <div className="flex shrink-0 items-center gap-1">
               <Button size="xs" variant="ghost" onClick={() => onOpen(thread)}>
                 Open
@@ -794,11 +828,13 @@ function HomeQuestionIndex({
 
 function HomeNeedsPanel({
   thread,
+  askText,
   onOpen,
   expanded,
   onExpandedChange,
 }: {
   thread: EnvironmentThreadShell;
+  askText?: string | null;
   onOpen: () => void;
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
@@ -1023,8 +1059,9 @@ function HomeNeedsPanel({
                     <Button
                       key={value}
                       size="xs"
-                      variant={!answersOnClick && selected ? "secondary" : "outline"}
+                      variant="outline"
                       aria-pressed={answersOnClick ? undefined : selected}
+                      variant={selected && !answersOnClick ? "warning-outline" : "outline"}
                       onClick={() => {
                         if (answersOnClick) {
                           void submitAnswers({ [question.id]: value });
@@ -1047,7 +1084,7 @@ function HomeNeedsPanel({
                     >
                       {label}
                       {recommended ? (
-                        <span className="rounded-sm bg-info/12 px-1 py-px text-2xs font-medium text-info-foreground ring-1 ring-info/40 ring-inset">
+                        <span className="rounded-full border border-info/50 px-1.5 py-px text-2xs font-medium text-info-foreground">
                           Recommended
                         </span>
                       ) : null}
@@ -1128,7 +1165,7 @@ function HomeNeedsPanel({
     <div className="mt-1.5">
       <div className="flex items-center gap-1.5">
         <span className="min-w-0 flex-1 text-base font-semibold leading-6 text-foreground">
-          {thread.pendingSubagentRequest ?? "Waiting for your response"}
+          {askText ?? thread.pendingSubagentRequest ?? "Waiting for your response"}
         </span>
         <HomeSnoozeMenu threadRef={ref} />
         <Button size="xs" variant="ghost" onClick={onOpen}>
@@ -1146,7 +1183,7 @@ export function HomeSidebarLink({
   active,
   onClick,
 }: {
-  counts: { needs: number; done: number; running: number };
+  counts: HomeCounts;
   active: boolean;
   onClick: () => void;
 }) {
@@ -1165,13 +1202,12 @@ export function HomeSidebarLink({
         <span className="block text-sm font-semibold">Home</span>
         <span className="mt-1 block truncate text-xs text-muted-foreground">
           {counts.needs + counts.done + counts.running > 0 ? (
-            <HomeCountSummary counts={counts} doneLabel="done" />
+            <HomeCountSummary counts={{ ...counts, waiting: 0 }} doneLabel="done" />
           ) : (
             "All clear"
           )}
         </span>
       </span>
-      <PinIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
     </button>
   );
 }

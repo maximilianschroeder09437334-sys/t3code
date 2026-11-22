@@ -137,8 +137,10 @@ export function startThreadNotifications(
     kind: ThreadNotificationKind,
   ) => {
     const { thread, status } = state;
+    const reportNeedsYou = state.raw.homeNeedsYou === true;
     const needsYou =
-      kind === "input" && (status === "approval" || status === "input" || status === "request");
+      kind === "input" &&
+      (reportNeedsYou || status === "approval" || status === "input" || status === "request");
     if (
       !shouldNotifyThread({
         kind:
@@ -161,22 +163,24 @@ export function startThreadNotifications(
       return;
     const { notificationMode: mode, inAppNotificationsEnabled } = getClientSettings();
     const active = activeThread();
-    const fallbackTitle = state.explicitPing
-      ? (state.raw.agentPing?.title ?? "Agent update")
-      : kind === "completion"
-        ? "Thread completed"
-        : status === "approval"
-          ? "Approval needed"
-          : status === "limited"
-            ? "Usage limit reached"
-            : status === "failed"
-              ? "Thread failed"
-              : status === "request"
-                ? "Guest request"
-                : "Input needed";
-    // Needs-you items open Home on their row; other notifications still open the thread.
+    const fallbackTitle = reportNeedsYou
+      ? thread.title
+      : state.explicitPing
+        ? (state.raw.agentPing?.title ?? "Agent update")
+        : kind === "completion"
+          ? "Thread completed"
+          : status === "approval"
+            ? "Approval needed"
+            : status === "limited"
+              ? "Usage limit reached"
+              : status === "failed"
+                ? "Thread failed"
+                : status === "request"
+                  ? "Guest request"
+                  : "Input needed";
+    // Report asks open the thread directly; request cards open their Home row.
     const openTarget = () =>
-      void (needsYou
+      void (needsYou && !reportNeedsYou
         ? router.navigate({
             to: "/",
             search: { item: threadKey({ environmentId, threadId: thread.id }) },
@@ -190,8 +194,9 @@ export function startThreadNotifications(
           environmentThreadDetails.pendingRequestsAtom({ environmentId, threadId: thread.id }),
         )
       : null;
-    const title =
-      status === "input"
+    const title = reportNeedsYou
+      ? thread.title
+      : status === "input"
         ? (pendingRequests?.userInputs[0]?.questions[0]?.question ?? fallbackTitle)
         : status === "approval"
           ? (pendingRequests?.approvals[0]?.detail ?? fallbackTitle)
@@ -212,9 +217,11 @@ export function startThreadNotifications(
         onRemove: (): void => forgetToast(toastKey, toastId),
         type: kind === "completion" ? "success" : status === "failed" ? "error" : "warning",
         title,
-        description: state.explicitPing
-          ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
-          : thread.title,
+        description: reportNeedsYou
+          ? (state.raw.homeAskText ?? "Needs you")
+          : state.explicitPing
+            ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
+            : thread.title,
         data: {
           hideCopyButton: true,
           leadingIcon:
@@ -250,9 +257,11 @@ export function startThreadNotifications(
       return;
     try {
       const notification = new Notification(title, {
-        body: state.explicitPing
-          ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
-          : thread.title,
+        body: reportNeedsYou
+          ? (state.raw.homeAskText ?? "Needs you")
+          : state.explicitPing
+            ? `${thread.title}: ${state.raw.agentPing?.message ?? ""}`
+            : thread.title,
         tag: threadNotificationTag(environmentId, thread.id),
         silent: true,
         // Windows drops clicks after a toast moves into Notification Center.
@@ -312,6 +321,7 @@ export function startThreadNotifications(
         rawThread.agentPing.at >
           (rawThread.lastVisitedAt == null ? 0 : DateTime.toEpochMillis(rawThread.lastVisitedAt));
       const needsAttention =
+        rawThread.homeNeedsYou === true ||
         status === "input" ||
         status === "request" ||
         status === "approval" ||
@@ -320,15 +330,29 @@ export function startThreadNotifications(
       const requestId = needsAttention ? resolveBackgroundThreadRequest(thread).requestId : null;
       // Queued messages become the latest run while a request stays pending, so a request
       // with an id is keyed by that id alone and announces once.
-      const attention = explicitPing
-        ? `ping:${rawThread.agentPing!.id}`
-        : !needsAttention
-          ? null
-          : requestId !== null
-            ? `${status}:${requestId}`
-            : `${thread.latestRun?.runId ?? ""}:${status}`;
+      const attention =
+        rawThread.homeNeedsYou === true
+          ? `home:${rawThread.latestRunId ?? ""}:${rawThread.homeAskText ?? "request"}`
+          : explicitPing
+            ? `ping:${rawThread.agentPing!.id}`
+            : !needsAttention
+              ? null
+              : requestId !== null
+                ? `${status}:${requestId}`
+                : `${thread.latestRun?.runId ?? ""}:${status}`;
       const completed = status === "ready" && thread.latestRun?.status === "completed";
-      const settled = completed && !monitorHoldsWakeCompletion(rawThread);
+      const firstStepHandoff =
+        /^T3:\s+\[[^\]]+\]\(https:\/\/app\.t3\.codes\/threads\/[^)]+\):/iu.test(
+          rawThread.homeFirstNextStep ?? "",
+        );
+      const waitingStep = rawThread.homeFirstNextStep?.startsWith("T3: WAIT on ") === true;
+      const hasRunningChild = (rawThread.pendingBackgroundTasks?.length ?? 0) > 0;
+      const settled =
+        completed &&
+        !waitingStep &&
+        !firstStepHandoff &&
+        !hasRunningChild &&
+        !monitorHoldsWakeCompletion(rawThread);
       const parsedCompletedAt = Date.parse(thread.latestRun?.completedAt ?? "");
       const completedAt = Number.isFinite(parsedCompletedAt) ? parsedCompletedAt : null;
       const state = {
@@ -352,7 +376,7 @@ export function startThreadNotifications(
     const now = Date.now();
     for (const [prior, state] of changed) {
       entry.gate.observe(state.thread.id, prior, state, {
-        archived: state.thread.archivedAt !== null,
+        archived: state.thread.archivedAt !== null || state.thread.settledOverride === "settled",
         quiet: state.raw.latestRunStopRequested === true,
         snoozed: isSnoozedForNotification(state.thread, state.completedAt, now),
       });

@@ -1069,6 +1069,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       )}
       dir={textDirection(thread.title)}
     >
+      {thread.homeNeedsYou ? (
+        <span aria-label="Needs you" className="pr-1 text-warning-foreground">
+          ●
+        </span>
+      ) : null}
       {thread.title}
     </span>
   );

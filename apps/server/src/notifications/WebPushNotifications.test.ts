@@ -51,6 +51,9 @@ function fixture() {
     settledOverride: null,
     updatedAt: DateTime.makeUnsafe(0),
     latestRunCompletedAt: null as DateTime.Utc | null,
+    homeNeedsYou: false,
+    homeAskText: null as string | null,
+    homeFirstNextStep: null as string | null,
   };
   const dependencies = Layer.mergeAll(
     Layer.mock(Secrets.ServerSecretStore)({
@@ -72,6 +75,7 @@ function fixture() {
     }),
     Layer.mock(Threads.ThreadManagementService)({
       getAgentAwarenessSnapshot: () => Effect.succeed({ threads: [thread] } as never),
+      getThreadShell: () => Effect.succeed(thread as never),
       streamDomainEvents: Stream.never,
     }),
     Layer.mock(Projects.ProjectService)({
@@ -160,6 +164,32 @@ it.effect("keeps one endpoint owner after reconnecting with a new authenticated 
       yield* service.test(replacementSession, original.id);
       yield* service.deliverDue();
       expect(test.sent).toHaveLength(1);
+    }).pipe(Effect.provide(test.layer));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("pushes one server-derived Needs you entry with the ask and thread target", () =>
+  Effect.gen(function* () {
+    yield* Migration;
+    const test = fixture();
+    yield* Effect.gen(function* () {
+      const service = yield* Notifications.WebPushNotifications;
+      yield* service.prepare();
+      yield* service.subscribe(sessionId, subscription);
+      yield* service.publishThread(threadId);
+      yield* TestClock.adjust("1 second");
+      test.thread.homeNeedsYou = true;
+      test.thread.homeAskText = "Review the new build";
+      test.thread.updatedAt = yield* DateTime.now;
+      yield* service.publishThread(threadId);
+      yield* service.publishThread(threadId);
+      yield* service.deliverDue();
+      expect(test.sent).toHaveLength(1);
+      expect(JSON.parse(test.sent[0]!)).toMatchObject({
+        title: "Quiet thread",
+        body: "Quiet thread: Review the new build",
+        path: "/push-environment/push-thread",
+      });
     }).pipe(Effect.provide(test.layer));
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

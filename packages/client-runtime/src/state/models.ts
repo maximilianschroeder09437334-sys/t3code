@@ -160,6 +160,11 @@ export interface EnvironmentThreadShell {
   readonly latestRun: ThreadRunSummary | null;
   readonly runtime: ThreadRuntimeSummary | null;
   readonly blockedOnThreadWait?: boolean;
+  /** Server-derived first step in the last completed report's Next steps section. */
+  readonly homeFirstNextStep?: string | null;
+  readonly homeNeedsYou?: boolean;
+  readonly homeAskText?: string | null;
+  readonly homeDashboardSection?: "needs" | "waiting" | "done" | "running";
   readonly latestUserMessageAt: string | null;
   readonly latestUserAuthoredMessageAt?: string | null;
   readonly hasPendingApprovals: boolean;

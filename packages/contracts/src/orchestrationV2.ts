@@ -2297,6 +2297,12 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunHumanAuthored: Schema.optional(Schema.Boolean),
   /** The latest run answers a background-work progress wake, like a Monitor line, not a terminal one. Absent from older servers. */
   latestRunBackgroundWake: Schema.optional(Schema.Boolean),
+  /** First ordered next step from the last completed assistant report, for Home across clients. */
+  homeFirstNextStep: Schema.optional(Schema.NullOr(Schema.String)),
+  /** Server-derived attention state shared by thread lists and notification clients. */
+  homeNeedsYou: Schema.optional(Schema.Boolean),
+  homeAskText: Schema.optional(Schema.NullOr(Schema.String)),
+  homeDashboardSection: Schema.optional(Schema.Literals(["needs", "waiting", "done", "running"])),
   activeRunId: Schema.NullOr(RunId),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activityRunStatus: Schema.optional(

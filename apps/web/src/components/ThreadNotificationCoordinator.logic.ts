@@ -97,7 +97,7 @@ export function createThreadNotificationGate<Key>(
       // The first sighting, archived or snoozed threads, and stopped or silent runs never notify completion.
       if (!prior || silenced) skip(key, next.completedAt);
       const fresh = attend(key, prior, next);
-      if (!prior || options.archived) return;
+      if (!prior || options.archived || silenced) return;
       if (fresh) {
         notify(key, "input");
         return;

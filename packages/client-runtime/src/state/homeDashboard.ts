@@ -2,13 +2,15 @@ import { scopedProjectKey, scopeProjectRef } from "../environment/index.ts";
 import type { EnvironmentProject, EnvironmentThreadShell } from "./models.ts";
 import { isShownUnderParent } from "./threadShell.ts";
 import { effectiveSnoozed } from "./threadSettled.ts";
+import { parseHomeNextStep } from "@t3tools/shared/homeNextStep";
 
-export type HomeDashboardSection = "needs" | "done" | "running";
+export type HomeDashboardSection = "needs" | "waiting" | "done" | "running";
 
 export interface HomeDashboardCounts {
   readonly needs: number;
   readonly done: number;
   readonly running: number;
+  readonly waiting: number;
 }
 
 export interface HomeDashboardRowLike {
@@ -20,6 +22,13 @@ export interface HomeDashboardRow extends HomeDashboardRowLike {
   readonly thread: EnvironmentThreadShell;
   readonly projectName: string;
   readonly predecessors: ReadonlyArray<EnvironmentThreadShell>;
+  readonly waitingOn?: {
+    readonly title: string;
+    readonly environmentId: string;
+    readonly threadId: string;
+  };
+  readonly waitingThread?: EnvironmentThreadShell;
+  readonly waitingCount?: number;
 }
 
 type HomeThreadStatus =
@@ -27,6 +36,7 @@ type HomeThreadStatus =
   | "input"
   | "request"
   | "waiting"
+  | "home-waiting"
   | "preparing"
   | "working"
   | "limited"
@@ -37,6 +47,22 @@ function homeThreadStatus(thread: EnvironmentThreadShell): HomeThreadStatus {
   if (thread.hasPendingApprovals || thread.pendingSubagentRequest === "approval") return "approval";
   if (thread.hasPendingUserInput || thread.pendingSubagentRequest === "user_input") return "input";
   if ((thread.pendingGuestMessageCount ?? 0) > 0) return "request";
+  const homeStep = parseHomeNextStep(thread.homeFirstNextStep ?? "");
+  if (
+    homeStep?.kind === "needs" &&
+    !["preparing", "queued", "starting", "running", "waiting"].includes(
+      thread.runtime?.status ?? "",
+    )
+  )
+    return "input";
+  if (homeStep?.kind === "wait") return "home-waiting";
+  if (
+    thread.runtime?.status === "idle" &&
+    thread.pendingBackgroundTasks.some(
+      (task) => task.kind === "subagent" && task.awaited === true && task.childThreadId != null,
+    )
+  )
+    return "home-waiting";
   if (thread.runtime?.status === "running" && thread.blockedOnThreadWait === true) return "waiting";
   if (thread.runtime?.status === "preparing") return "preparing";
   if (
@@ -51,8 +77,10 @@ function homeThreadStatus(thread: EnvironmentThreadShell): HomeThreadStatus {
 }
 
 function sectionFor(thread: EnvironmentThreadShell): HomeDashboardSection {
+  if (thread.homeDashboardSection !== undefined) return thread.homeDashboardSection;
   const status = homeThreadStatus(thread);
   if (status === "approval" || status === "input" || status === "request") return "needs";
+  if (status === "home-waiting") return "waiting";
   return status === "preparing" ||
     status === "working" ||
     status === "waiting" ||
@@ -107,6 +135,37 @@ export function deriveHomeDashboardRows(input: {
     if (previous === undefined || activity(thread) > activity(previous))
       newestByWorkstream.set(key, thread);
   }
+  const threadByRef = new Map(
+    input.threads.map((candidate) => [
+      `${candidate.environmentId}\u0001${candidate.id}`,
+      candidate,
+    ]),
+  );
+  const parsedWait = (thread: EnvironmentThreadShell) => {
+    const parsed = parseHomeNextStep(thread.homeFirstNextStep ?? "");
+    if (parsed?.kind === "wait") return parsed;
+    const child = thread.pendingBackgroundTasks.find(
+      (task) => task.kind === "subagent" && task.awaited === true && task.childThreadId != null,
+    );
+    if (!child || child.kind !== "subagent" || child.childThreadId == null) return undefined;
+    const childThread = threadByRef.get(`${thread.environmentId}\u0001${child.childThreadId}`);
+    return childThread
+      ? {
+          title: childThread.title,
+          environmentId: thread.environmentId,
+          threadId: child.childThreadId,
+        }
+      : undefined;
+  };
+  const waitingTargets = new Map(
+    active.map((thread) => [`${thread.environmentId}\u0001${thread.id}`, parsedWait(thread)]),
+  );
+  const waitingCounts = new Map<string, number>();
+  for (const target of waitingTargets.values()) {
+    if (!target) continue;
+    const key = `${target.environmentId}\u0001${target.threadId}`;
+    waitingCounts.set(key, (waitingCounts.get(key) ?? 0) + 1);
+  }
   const rows = active.map((thread): HomeDashboardRow => {
     const projectKey = scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId));
     const project = projects.get(projectKey);
@@ -122,15 +181,27 @@ export function deriveHomeDashboardRows(input: {
             )
             .sort((a, b) => activity(b) - activity(a))
             .slice(0, 10);
+    const waitingOn = parsedWait(thread);
+    const waitingThread = waitingOn
+      ? threadByRef.get(`${waitingOn.environmentId}\u0001${waitingOn.threadId}`)
+      : undefined;
     return {
       thread,
       section: sectionFor(thread),
       projectName: project?.title ?? "Unknown project",
       projectKey,
       predecessors,
+      ...(waitingOn ? { waitingOn } : {}),
+      ...(waitingThread ? { waitingThread } : {}),
+      waitingCount: waitingCounts.get(`${thread.environmentId}\u0001${thread.id}`) ?? 0,
     };
   });
-  const sectionOrder: Record<HomeDashboardSection, number> = { needs: 0, done: 1, running: 2 };
+  const sectionOrder: Record<HomeDashboardSection, number> = {
+    needs: 0,
+    waiting: 1,
+    done: 2,
+    running: 3,
+  };
   const projectOrder = new Map(
     input.projects.map((project, index) => [
       scopedProjectKey(scopeProjectRef(project.environmentId, project.id)),
@@ -148,7 +219,7 @@ export function deriveHomeDashboardRows(input: {
 export function countHomeDashboardRows(
   rows: ReadonlyArray<HomeDashboardRowLike>,
 ): HomeDashboardCounts {
-  const counts = { needs: 0, done: 0, running: 0 };
+  const counts = { needs: 0, waiting: 0, done: 0, running: 0 };
   for (const row of rows) counts[row.section] += 1;
   return counts;
 }
@@ -158,6 +229,9 @@ export function homeCountSegments(
 ): ReadonlyArray<{ readonly section: HomeDashboardSection; readonly text: string }> {
   return [
     ...(counts.needs > 0 ? [{ section: "needs" as const, text: `${counts.needs} need you` }] : []),
+    ...(counts.waiting > 0
+      ? [{ section: "waiting" as const, text: `${counts.waiting} waiting` }]
+      : []),
     ...(counts.done > 0 ? [{ section: "done" as const, text: `${counts.done} done` }] : []),
     ...(counts.running > 0
       ? [{ section: "running" as const, text: `${counts.running} running` }]

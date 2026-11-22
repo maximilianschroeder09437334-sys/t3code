@@ -87,6 +87,11 @@ import {
   deriveBlockedOnThreadWait,
   derivePendingBackgroundWork,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  firstHomeNextStepText,
+  parseHomeActionableMaxiStep,
+  parseHomeNextStep,
+} from "@t3tools/shared/homeNextStep";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -1749,6 +1754,42 @@ export function threadShellFromProjection(
       projection.turnItems,
       providerSession?.lastError ?? null,
     ) ?? latestUnheldRun(runs);
+  const lastCompletedRun =
+    runs
+      .filter((run) => run.status === "completed")
+      .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null;
+  const parsedHomeNextStep = lastCompletedRun
+    ? (projection.turnItems
+        .filter((item) => item.runId === lastCompletedRun.id)
+        .toSorted((left, right) => right.ordinal - left.ordinal)
+        .flatMap((item) =>
+          item.type === "assistant_message" &&
+          !item.streaming &&
+          (item.phase === undefined || item.phase === "final_answer")
+            ? [parseHomeNextStep(item.text)]
+            : [],
+        )
+        .find((step) => step !== null) ?? null)
+    : null;
+  const lastCompletedReport = lastCompletedRun
+    ? projection.turnItems
+        .filter((item) => item.runId === lastCompletedRun.id)
+        .toSorted((left, right) => right.ordinal - left.ordinal)
+        .find(
+          (item) =>
+            item.type === "assistant_message" &&
+            !item.streaming &&
+            (item.phase === undefined || item.phase === "final_answer"),
+        )
+    : undefined;
+  const homeAskText =
+    lastCompletedReport?.type === "assistant_message"
+      ? parseHomeActionableMaxiStep(lastCompletedReport.text)
+      : null;
+  const rawHomeFirstStep =
+    lastCompletedReport?.type === "assistant_message"
+      ? firstHomeNextStepText(lastCompletedReport.text)
+      : null;
   const activeRun =
     runs
       .filter(isInterruptibleRunForShell)
@@ -1815,6 +1856,24 @@ export function threadShellFromProjection(
     runs,
     pullRequests: projection.thread.pullRequests,
   });
+  const homeNeedsYou =
+    homeAskText !== null ||
+    (pendingRuntimeRequest !== null && pendingRuntimeRequest.kind !== "auth_refresh") ||
+    pendingGuestMessageCount(projection.thread.guestShare) > 0;
+  const blockedOnThreadWait = deriveBlockedOnThreadWait({
+    activeRun,
+    turnItems: projection.turnItems,
+  });
+  const homeWaitingOnChild = pendingBackgroundTasks.some(
+    (task) => task.kind === "subagent" && task.awaited === true && task.childThreadId != null,
+  );
+  const homeDashboardSection = homeNeedsYou
+    ? "needs"
+    : parsedHomeNextStep?.kind === "wait" || blockedOnThreadWait || homeWaitingOnChild
+      ? "waiting"
+      : activityRun !== null
+        ? "running"
+        : "done";
   return {
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
@@ -1865,8 +1924,24 @@ export function threadShellFromProjection(
       ),
     latestRunBackgroundWake:
       latestRun != null && isBackgroundWakeRunForShell(latestRun, projection),
+    homeFirstNextStep:
+      parsedHomeNextStep?.kind === "needs"
+        ? `Maxi: ${parsedHomeNextStep.text}`
+        : parsedHomeNextStep?.kind === "wait"
+          ? `T3: WAIT on [${parsedHomeNextStep.title}](https://app.t3.codes/threads/${encodeURIComponent(parsedHomeNextStep.environmentId)}/${encodeURIComponent(parsedHomeNextStep.threadId)})`
+          : parsedHomeNextStep?.kind === "none"
+            ? "Maxi: nothing needed right now."
+            : rawHomeFirstStep != null &&
+                /^T3:\s+\[[^\]]+\]\(https:\/\/app\.t3\.codes\/threads\/[^)]+\):/iu.test(
+                  rawHomeFirstStep,
+                )
+              ? rawHomeFirstStep
+              : null,
+    homeNeedsYou,
+    homeAskText,
+    homeDashboardSection,
     activeRunId: activeRun?.id ?? null,
-    blockedOnThreadWait: deriveBlockedOnThreadWait({ activeRun, turnItems: projection.turnItems }),
+    blockedOnThreadWait,
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt:
       activityRun === null ? null : orchestrationV2RunWorkStartedAt(activityRun),

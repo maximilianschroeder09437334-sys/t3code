@@ -36,7 +36,7 @@ describe("deriveHomeRows", () => {
       ["done", "done"],
       ["run", "running"],
     ]);
-    expect(countHomeRows(rows)).toEqual({ needs: 1, done: 1, running: 1 });
+    expect(countHomeRows(rows)).toEqual({ needs: 1, waiting: 0, done: 1, running: 1 });
   });
 
   it("excludes archived, subagent, snoozed and settled threads as rows", () => {
@@ -90,7 +90,7 @@ describe("deriveHomeRows", () => {
       delegatedUnderParent: new Set(["environment-test\u0000deleg"]),
     });
     expect(rows.map((row) => row.thread.id).sort()).toEqual(["fork", "top"]);
-    expect(countHomeRows(rows)).toEqual({ needs: 0, done: 2, running: 0 });
+    expect(countHomeRows(rows)).toEqual({ needs: 0, waiting: 0, done: 2, running: 0 });
   });
 
   it("attaches older settled workstream threads to their unsettled successor", () => {
@@ -138,8 +138,10 @@ describe("deriveHomeRows", () => {
 
 describe("Home display helpers", () => {
   it("hides zero count categories", () => {
-    expect(formatHomeCounts({ needs: 0, done: 14, running: 1 })).toBe("14 done · 1 running");
-    expect(formatHomeCounts({ needs: 0, done: 0, running: 0 })).toBe("");
+    expect(formatHomeCounts({ needs: 0, waiting: 0, done: 14, running: 1 })).toBe(
+      "14 done · 1 running",
+    );
+    expect(formatHomeCounts({ needs: 0, waiting: 0, done: 0, running: 0 })).toBe("");
   });
 
   it("formats waiting, running, completed, and stopped timestamps", () => {

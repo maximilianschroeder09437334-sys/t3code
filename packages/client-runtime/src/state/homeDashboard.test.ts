@@ -40,6 +40,8 @@ const thread = (id: string, overrides: Record<string, unknown> = {}) =>
     pendingGuestMessageCount: 0,
     runtime: null,
     blockedOnThreadWait: false,
+    homeFirstNextStep: null,
+    pendingBackgroundTasks: [],
     lineage: {
       rootThreadId: ThreadId.make(id),
       parentThreadId: null,
@@ -51,16 +53,16 @@ const thread = (id: string, overrides: Record<string, unknown> = {}) =>
 
 describe("Home dashboard helpers", () => {
   it("counts each section and naturally leaves empty sections at zero", () => {
-    expect(countHomeDashboardRows(rows)).toEqual({ needs: 1, done: 1, running: 1 });
-    expect(countHomeDashboardRows([])).toEqual({ needs: 0, done: 0, running: 0 });
+    expect(countHomeDashboardRows(rows)).toEqual({ needs: 1, waiting: 0, done: 1, running: 1 });
+    expect(countHomeDashboardRows([])).toEqual({ needs: 0, waiting: 0, done: 0, running: 0 });
   });
 
   it("hides zero counts from the pinned Home row", () => {
-    expect(homeCountSegments({ needs: 0, done: 14, running: 1 })).toEqual([
+    expect(homeCountSegments({ needs: 0, waiting: 0, done: 14, running: 1 })).toEqual([
       { section: "done", text: "14 done" },
       { section: "running", text: "1 running" },
     ]);
-    expect(homeCountSegments({ needs: 0, done: 0, running: 0 })).toEqual([]);
+    expect(homeCountSegments({ needs: 0, waiting: 0, done: 0, running: 0 })).toEqual([]);
   });
 
   it("filters by section and project together", () => {
@@ -91,5 +93,33 @@ describe("Home dashboard helpers", () => {
       ["need", "needs", "Home project"],
       ["running", "running", "Home project"],
     ]);
+  });
+
+  it("groups completed Maxi actions and report waits, and links waiting counts to the target", () => {
+    const needs = thread("needs", { homeFirstNextStep: "Maxi: Review this result" });
+    const waiting = thread("waiting", {
+      homeFirstNextStep:
+        "T3: WAIT on [Review this result](https://app.t3.codes/threads/home-test/needs)",
+    });
+    const rows = deriveHomeDashboardRows({
+      projects: [project],
+      now: "2026-11-21T12:00:00.000Z",
+      threads: [needs, waiting],
+    });
+    expect(rows.map((row) => row.section)).toEqual(["needs", "waiting"]);
+    expect(rows[0]).toMatchObject({ waitingCount: 1 });
+    expect(rows[1]).toMatchObject({
+      waitingOn: { title: "Review this result", environmentId: "home-test", threadId: "needs" },
+      waitingThread: needs,
+    });
+  });
+
+  it("keeps a completed nothing-needed report in Done", () => {
+    const rows = deriveHomeDashboardRows({
+      projects: [project],
+      now: "2026-11-21T12:00:00.000Z",
+      threads: [thread("done", { homeFirstNextStep: "Maxi: nothing needed right now." })],
+    });
+    expect(rows[0]?.section).toBe("done");
   });
 });

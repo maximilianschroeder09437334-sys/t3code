@@ -6,9 +6,11 @@ import {
   WebPushError,
   WebPushSubscription,
   ThreadId,
+  isListedThreadLineage,
   type WebPushInfo,
 } from "@t3tools/contracts";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
+import { classifyHomeNotification } from "@t3tools/shared/homeNotificationRules";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -192,6 +194,7 @@ const make = Effect.gen(function* () {
     if (subscriptions.length === 0) return;
     const thread = (yield* threads.getAgentAwarenessSnapshot(threadId)).threads[0];
     if (thread === undefined) return;
+    const shell = yield* threads.getThreadShell(threadId);
     const project = yield* projects.getById(thread.projectId);
     const state =
       Option.isSome(project) && thread.archivedAt === null
@@ -202,34 +205,65 @@ const make = Effect.gen(function* () {
             thread,
           })
         : null;
+    const targetEnvironmentId = state?.environmentId ?? (yield* environment.getEnvironmentId);
     const previous = yield* sql<{
       readonly identity: string | null;
       readonly phase: string | null;
     }>`SELECT identity, phase FROM web_push_thread_state WHERE thread_id = ${threadId}`;
-    const identity =
-      state === null
-        ? null
-        : `${thread.latestRunId}:${state.phase}:${thread.agentPing?.id ?? ""}:${state.phase.startsWith("waiting_") ? (thread.pendingRuntimeRequest?.id ?? "") : thread.latestRunCompletedAt == null ? "" : DateTime.formatIso(thread.latestRunCompletedAt)}`;
+    const shellNeedsYou = shell?.homeNeedsYou === true;
+    const homeAsk = shell?.homeAskText?.trim() || null;
+    const waitingStep = shell?.homeFirstNextStep?.startsWith("T3: WAIT on ") === true;
     const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const firstStepHandoff =
+      /^T3:\s+\[[^\]]+\]\(https:\/\/app\.t3\.codes\/threads\/[^)]+\):/iu.test(
+        shell?.homeFirstNextStep ?? "",
+      );
+    const homeEvent = classifyHomeNotification({
+      threadId,
+      runId: thread.latestRunId,
+      isChild: thread.lineage.relationshipToParent === "subagent",
+      sideChat: !isListedThreadLineage(thread.lineage),
+      snoozed: shell?.snoozedUntil != null && DateTime.toEpochMillis(shell.snoozedUntil) > now,
+      settled: shell?.settledOverride === "settled",
+      needsYou: shellNeedsYou,
+      askText: homeAsk,
+      turnCompleted: state?.phase === "completed",
+      hasRunningChildren: (shell?.pendingBackgroundTasks?.length ?? 0) > 0,
+      waiting: waitingStep || shell?.blockedOnThreadWait === true,
+      hasAutoWait: false,
+      handedOff: firstStepHandoff,
+      doneText: state?.detail ?? null,
+    });
+    const homeNeedsYou = homeEvent?.kind === "needs";
+    const identity =
+      state === null && !homeNeedsYou
+        ? null
+        : `${thread.latestRunId}:${homeNeedsYou ? `home:${homeAsk ?? "request"}` : (state?.phase ?? "")}:${thread.agentPing?.id ?? ""}:${state?.phase.startsWith("waiting_") ? (thread.pendingRuntimeRequest?.id ?? "") : thread.latestRunCompletedAt == null ? "" : DateTime.formatIso(thread.latestRunCompletedAt)}`;
     if (previous[0]?.identity === identity) return;
     yield* sql.withTransaction(
       Effect.gen(function* () {
         yield* sql`INSERT INTO web_push_thread_state (thread_id, identity, phase, updated_at) VALUES (${threadId}, ${identity}, ${state?.phase ?? null}, ${now}) ON CONFLICT(thread_id) DO UPDATE SET identity = excluded.identity, phase = excluded.phase, updated_at = excluded.updated_at`;
-        if (state === null || previous.length === 0 || identity === null) return;
+        if (previous.length === 0 || identity === null) return;
         const attention =
-          state.phase === "waiting_for_input" || state.phase === "waiting_for_approval";
-        const terminal = state.phase === "completed" || state.phase === "failed";
+          homeNeedsYou ||
+          state?.phase === "waiting_for_input" ||
+          state?.phase === "waiting_for_approval";
+        const terminal =
+          state?.phase === "failed" || (state?.phase === "completed" && homeEvent?.kind === "done");
+        if (waitingStep && terminal) return;
         if (!attention && !terminal) return;
-        if (Date.parse(state.updatedAt) < now - 120_000) return;
+        if (state !== null && Date.parse(state.updatedAt) < now - 120_000) return;
         for (const subscription of subscriptions) {
-          if (Date.parse(state.updatedAt) < subscription.created_at) continue;
+          if (state !== null && Date.parse(state.updatedAt) < subscription.created_at) continue;
           yield* queue(
             subscription.id,
             identity,
             {
-              title: state.headline,
-              body: `${state.threadTitle}${state.detail ? `: ${state.detail}` : ""}`,
-              path: `/${encodeURIComponent(state.environmentId)}/${encodeURIComponent(threadId)}`,
+              title: homeNeedsYou ? thread.title : (state?.headline ?? thread.title),
+              body: homeNeedsYou
+                ? `${thread.title}${homeAsk ? `: ${homeAsk}` : ": Needs you"}`
+                : `${state?.threadTitle ?? thread.title}${state?.detail ? `: ${state.detail}` : ""}`,
+              path: `/${encodeURIComponent(targetEnvironmentId)}/${encodeURIComponent(threadId)}`,
             },
             threadId,
             terminal ? 5_000 : 0,

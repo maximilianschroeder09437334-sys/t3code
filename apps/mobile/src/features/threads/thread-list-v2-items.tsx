@@ -1243,6 +1243,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               : undefined
           }
         >
+          {thread.homeNeedsYou ? (
+            <Text accessibilityLabel="Needs you" className="text-[#ffb900]">
+              ●
+            </Text>
+          ) : null}
           {thread.title}
         </Text>
         {hasUnsentDraft ? <ThreadDraftTag selected={selected} minHeight={titleLineHeight} /> : null}
