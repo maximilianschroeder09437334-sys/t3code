@@ -1279,12 +1279,9 @@ export function resolveThreadStatusPill(input: {
 
   if (
     (thread.runtime?.status === "running" && blockedOnWait) ||
-    backgroundWorkHoldsCompletion(
-      // Subagents are wait targets once the wait is resolved; ended ones must not hold Waiting.
-      wait === undefined
-        ? (thread.pendingBackgroundTasks ?? [])
-        : (thread.pendingBackgroundTasks ?? []).filter((task) => task.kind !== "subagent"),
-    )
+    // A resolved wait lists every live hold as a target (subagents, awaited commands and
+    // monitors, PR checks), so only `wait.waiting` above says Waiting; a dead hold must not.
+    (wait === undefined && backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []))
   ) {
     return {
       label: "Waiting",
