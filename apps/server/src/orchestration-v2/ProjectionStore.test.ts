@@ -59,6 +59,7 @@ import {
   THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
 } from "./threadHistoryPaging.ts";
 import { buildBoundedThreadStreamSnapshot } from "./ThreadStream.ts";
+import { omitIdleSubagentShells } from "./ShellStream.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 
 import { layerReaderDatabase, traceSqlRouting } from "../persistence/testkit/SqliteRouting.ts";
@@ -1769,6 +1770,425 @@ it.effect("SQL shells flag only an active turn blocked solely on T3 thread waits
     yield* updateItem({ ...blockingDelegation, status: "completed", completedAt: at });
     yield* assertBlocked(false);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "SQL shells carry the in-memory wait state and keep waiting subagents through trims",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const at = DateTime.makeUnsafe("2026-11-22T10:00:00.000Z");
+      const id = (name: string) => ThreadId.make(`thread:wait-state:${name}`);
+      let sequence = 0;
+      const nextEvent = () => EventId.make(`event:wait-state:${sequence++}`);
+      const threadPayload = (name: string, parent: string | null) =>
+        ({
+          createdBy: "user",
+          creationSource: parent === null ? "web" : "mcp",
+          id: id(name),
+          projectId: ProjectId.make("project:wait-state"),
+          title: name,
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: parent === null ? null : id(parent),
+            relationshipToParent: parent === null ? null : "subagent",
+            rootThreadId: id(parent ?? name),
+          },
+          forkedFrom: null,
+          createdAt: at,
+          updatedAt: at,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        }) as const;
+      const createThread = (name: string, parent: string | null = null) =>
+        store.apply({
+          id: nextEvent(),
+          type: "thread.created",
+          threadId: id(name),
+          occurredAt: at,
+          payload: threadPayload(name, parent),
+        });
+      type RunStatus = "running" | "completed" | "failed" | "cancelled" | "interrupted";
+      const runOf = (name: string, ordinal: number, status: RunStatus) => ({
+        id: RunId.make(`run:wait-state:${name}:${ordinal}`),
+        threadId: id(name),
+        ordinal,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: MessageId.make(`message:wait-state:${name}:${ordinal}`),
+        rootNodeId: NodeId.make(`node:wait-state:${name}:${ordinal}`),
+        activeAttemptId: null,
+        status,
+        requestedAt: at,
+        startedAt: at,
+        completedAt: status === "running" ? null : at,
+        checkpointId: null,
+        contextHandoffId: null,
+      });
+      const startRun = (name: string, ordinal: number) =>
+        store.apply({
+          id: nextEvent(),
+          type: "run.created",
+          threadId: id(name),
+          occurredAt: at,
+          payload: runOf(name, ordinal, "running"),
+        });
+      const endRun = (name: string, ordinal: number, status: Exclude<RunStatus, "running">) =>
+        store.apply({
+          id: nextEvent(),
+          type: "run.updated",
+          threadId: id(name),
+          occurredAt: at,
+          payload: runOf(name, ordinal, status),
+        });
+      const itemBase = (name: string, ordinal: number, itemName: string, itemOrdinal: number) => ({
+        id: TurnItemId.make(`item:wait-state:${name}:${itemName}`),
+        threadId: id(name),
+        runId: RunId.make(`run:wait-state:${name}:${ordinal}`),
+        nodeId: NodeId.make(`node:wait-state:${name}:${ordinal}`),
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: itemOrdinal,
+        status: "completed" as const,
+        title: null,
+        startedAt: at,
+        completedAt: at,
+        updatedAt: at,
+      });
+      const putItem = (payload: OrchestrationV2TurnItem) =>
+        store.apply({
+          id: nextEvent(),
+          type: "turn-item.updated",
+          threadId: payload.threadId,
+          runId: payload.runId ?? undefined,
+          driver,
+          occurredAt: at,
+          payload,
+        });
+      const report = (name: string, ordinal: number, text: string, itemOrdinal = 10) =>
+        putItem({
+          ...itemBase(name, ordinal, `report-${ordinal}-${itemOrdinal}`, itemOrdinal),
+          type: "assistant_message",
+          messageId: MessageId.make(`message:wait-state:${name}:report-${ordinal}-${itemOrdinal}`),
+          text,
+          streaming: false,
+        });
+      const waitReport = (target: string) =>
+        [
+          "**What happened**",
+          "- Waiting for the target.",
+          "",
+          "**Next steps in order**",
+          `1. T3: WAIT on [Target ${target}](https://app.t3.codes/threads/env-remote/${target})`,
+          "2. Maxi: nothing needed right now.",
+        ].join("\n");
+
+      const waitOf = (
+        shell: { readonly waitingOn?: unknown; readonly waitPhase?: unknown } | null | undefined,
+      ) => (shell == null ? null : { waitingOn: shell.waitingOn, waitPhase: shell.waitPhase });
+      /** The SQL shell (single read and snapshot) agrees with the in-memory shell. */
+      const assertWait = Effect.fnUntraced(function* (
+        name: string,
+        expected: { readonly waitingOn: ReadonlyArray<unknown>; readonly waitPhase: string },
+      ) {
+        const memory = ProjectionStore.threadShellFromProjection(
+          yield* store.getThreadProjection(id(name)),
+        );
+        const single = yield* store.getThreadShell(id(name));
+        const snapshot = yield* store.getShellSnapshot();
+        const listed = [...snapshot.threads, ...snapshot.archivedThreads].find(
+          (thread) => thread.id === id(name),
+        );
+        assert.deepEqual(waitOf(memory), expected, `${name} memory`);
+        assert.deepEqual(waitOf(single), expected, `${name} getThreadShell`);
+        assert.deepEqual(waitOf(listed), expected, `${name} snapshot`);
+      });
+      const trimmedIds = Effect.gen(function* () {
+        const snapshot = yield* store.getShellSnapshot();
+        return new Set(omitIdleSubagentShells(snapshot.threads).map((thread) => thread.id));
+      });
+      const mayBeLive = (name: string) =>
+        store
+          .listActiveShellIndex()
+          .pipe(Effect.map((index) => index.find((entry) => entry.id === id(name))?.mayBeLive));
+
+      yield* createThread("a");
+      yield* createThread("b", "a");
+      yield* createThread("idle", "a");
+
+      // B reports WAIT on a thread in another environment; the idle sibling just finished.
+      yield* startRun("b", 1);
+      yield* assertWait("b", { waitingOn: [], waitPhase: "working" });
+      yield* report("b", 1, "Some commentary first.", 5);
+      yield* report("b", 1, waitReport("thread-c"));
+      yield* endRun("b", 1, "completed");
+      const reportTarget = {
+        source: "report_wait",
+        environmentId: "env-remote",
+        threadId: "thread-c",
+        title: "Target thread-c",
+      };
+      yield* assertWait("b", { waitingOn: [reportTarget], waitPhase: "waiting" });
+      yield* startRun("idle", 1);
+      yield* report("idle", 1, "Done.");
+      yield* endRun("idle", 1, "completed");
+      yield* assertWait("idle", { waitingOn: [], waitPhase: "ended" });
+
+      // The real idle-subagent trim keeps the waiting child and drops the idle one, and the index
+      // that picks a trimmed subscriber's rows marks only the waiting child as possibly live.
+      let kept = yield* trimmedIds;
+      assert.isTrue(kept.has(id("b")));
+      assert.isFalse(kept.has(id("idle")));
+      assert.isTrue(yield* mayBeLive("b"));
+      assert.isFalse(yield* mayBeLive("idle"));
+      yield* assertShellIndexCoversShells();
+
+      // A null-thread target from the waiter's own projection: an executing native subagent.
+      yield* startRun("a", 1);
+      const nativeChild = {
+        ...itemBase("a", 1, "native-child", 2),
+        status: "running" as const,
+        completedAt: null,
+        nativeItemRef: { driver, nativeId: "native-task-1", strength: "weak" as const },
+        title: "Explore the repository",
+        type: "subagent" as const,
+        subagentId: NodeId.make("node:wait-state:native-child"),
+        origin: "provider_native" as const,
+        driver,
+        providerInstanceId,
+        childThreadId: null,
+        prompt: "Explore the repository",
+        result: null,
+      };
+      yield* putItem(nativeChild);
+      yield* assertWait("a", {
+        waitingOn: [
+          {
+            source: "subagent",
+            environmentId: null,
+            threadId: null,
+            title: "Explore the repository",
+            itemId: nativeChild.id,
+            taskId: "native-task-1",
+          },
+        ],
+        waitPhase: "waiting",
+      });
+      yield* assertShellIndexCoversShells();
+      // Completing the item clears it at the source; the run alone is working, then ended.
+      yield* putItem({ ...nativeChild, status: "completed", completedAt: at });
+      yield* assertWait("a", { waitingOn: [], waitPhase: "working" });
+      yield* endRun("a", 1, "completed");
+      yield* assertWait("a", { waitingOn: [], waitPhase: "ended" });
+
+      // An awaited roster child without a thread holds the settled run only while the provider
+      // session that reports it is live.
+      const session = {
+        id: ProviderSessionId.make("session:wait-state:a"),
+        driver,
+        providerInstanceId,
+        status: "ready" as const,
+        cwd: "/workspace",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: at,
+        updatedAt: at,
+        lastError: null,
+      };
+      yield* store.apply({
+        id: nextEvent(),
+        type: "provider-session.attached",
+        threadId: id("a"),
+        driver,
+        providerInstanceId,
+        occurredAt: at,
+        payload: session,
+      });
+      const providerThread = {
+        id: ProviderThreadId.make("provider-thread:wait-state:a"),
+        driver,
+        providerInstanceId,
+        providerSessionId: session.id,
+        appThreadId: id("a"),
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        pendingBackgroundTasks: [
+          {
+            taskId: "roster-task",
+            kind: "subagent" as const,
+            awaited: true as const,
+            description: "Roster child",
+          },
+        ],
+        createdAt: at,
+        updatedAt: at,
+      };
+      yield* store.apply({
+        id: nextEvent(),
+        type: "provider-thread.updated",
+        threadId: id("a"),
+        driver,
+        providerInstanceId,
+        occurredAt: at,
+        payload: providerThread,
+      });
+      const rosterTarget = {
+        source: "awaited_child",
+        environmentId: null,
+        threadId: null,
+        title: "Roster child",
+        taskId: "roster-task",
+      };
+      yield* assertWait("a", { waitingOn: [rosterTarget], waitPhase: "waiting" });
+      for (const status of ["stopped", "error"] as const) {
+        yield* store.apply({
+          id: nextEvent(),
+          type: "provider-session.updated",
+          threadId: id("a"),
+          occurredAt: at,
+          payload: { ...session, status },
+        });
+        yield* assertWait("a", { waitingOn: [], waitPhase: "ended" });
+      }
+      yield* store.apply({
+        id: nextEvent(),
+        type: "provider-session.updated",
+        threadId: id("a"),
+        occurredAt: at,
+        payload: session,
+      });
+      yield* assertWait("a", { waitingOn: [rosterTarget], waitPhase: "waiting" });
+      yield* store.apply({
+        id: nextEvent(),
+        type: "provider-thread.updated",
+        threadId: id("a"),
+        driver,
+        providerInstanceId,
+        occurredAt: at,
+        payload: { ...providerThread, pendingBackgroundTasks: [] },
+      });
+      yield* assertWait("a", { waitingOn: [], waitPhase: "ended" });
+
+      // A released handoff waits on its successor; the index flags it without a run or item.
+      yield* createThread("handed-off");
+      yield* startRun("handed-off", 1);
+      yield* report("handed-off", 1, "Handed off.");
+      yield* endRun("handed-off", 1, "completed");
+      yield* sql`UPDATE orchestration_v2_projection_threads
+      SET payload_json = json_set(payload_json, '$.handoffTransfer', json(${JSON.stringify({
+        requestId: "request:wait-state:handoff",
+        generation: "1",
+        sourceThreadId: id("handed-off"),
+        successorThreadId: id("successor"),
+        runId: "run:wait-state:handed-off:1",
+        state: "released",
+      })}))
+      WHERE thread_id = ${id("handed-off")}`;
+      yield* assertWait("handed-off", {
+        waitingOn: [
+          { source: "handoff", environmentId: null, threadId: id("successor"), title: null },
+        ],
+        waitPhase: "waiting",
+      });
+      assert.isTrue(yield* mayBeLive("handed-off"));
+      yield* assertShellIndexCoversShells();
+
+      // A later terminal run ends B whatever its stale report said, so the trim drops it.
+      for (const [ordinal, status] of [
+        [2, "failed"],
+        [3, "cancelled"],
+        [4, "interrupted"],
+      ] as const) {
+        yield* startRun("b", ordinal);
+        yield* assertWait("b", { waitingOn: [], waitPhase: "working" });
+        yield* endRun("b", ordinal, status);
+        yield* assertWait("b", { waitingOn: [], waitPhase: "ended" });
+        kept = yield* trimmedIds;
+        assert.isFalse(kept.has(id("b")), status);
+        assert.isFalse(yield* mayBeLive("b"), status);
+      }
+      // A new completed WAIT report makes it wait again.
+      yield* startRun("b", 5);
+      yield* report("b", 5, waitReport("thread-c"));
+      yield* endRun("b", 5, "completed");
+      yield* assertWait("b", { waitingOn: [reportTarget], waitPhase: "waiting" });
+      assert.isTrue((yield* trimmedIds).has(id("b")));
+
+      // Archiving ends B; deleting removes it from every shell read.
+      const bThread = (yield* store.getThreadProjection(id("b"))).thread;
+      yield* store.apply({
+        id: nextEvent(),
+        type: "thread.archived",
+        threadId: id("b"),
+        occurredAt: at,
+        payload: { ...bThread, archivedAt: at },
+      });
+      yield* assertWait("b", { waitingOn: [reportTarget], waitPhase: "ended" });
+      assert.isFalse((yield* trimmedIds).has(id("b")));
+      yield* store.apply({
+        id: nextEvent(),
+        type: "thread.deleted",
+        threadId: id("b"),
+        occurredAt: at,
+        payload: { ...bThread, archivedAt: at, deletedAt: at },
+      });
+      const afterDelete = yield* store.getShellSnapshot();
+      assert.isUndefined(
+        [...afterDelete.threads, ...afterDelete.archivedThreads].find(
+          (thread) => thread.id === id("b"),
+        ),
+      );
+      assert.isNull(yield* store.getThreadShell(id("b")));
+      yield* assertShellIndexCoversShells();
+
+      // The wait reads are batched (one statement per shell read) and index-backed.
+      const { statements, tracer } = traceSqlStatements();
+      yield* store.getShellSnapshot().pipe(Effect.withTracer(tracer));
+      yield* store.getThreadShell(id("a")).pipe(Effect.withTracer(tracer));
+      yield* store.listActiveShellIndex().pipe(Effect.withTracer(tracer));
+      const reportReads = statements.filter((statement) =>
+        statement.includes("COALESCE(json_extract(payload_json, '$.phase'), 'final_answer')"),
+      );
+      const sessionReads = statements.filter((statement) =>
+        statement.includes("SELECT thread_id, provider_instance_id, status, updated_at"),
+      );
+      assert.lengthOf(reportReads, 2);
+      assert.lengthOf(sessionReads, 2);
+      const indexRead = statements.find((statement) => statement.includes("AS may_be_live"));
+      assert.isDefined(indexRead);
+      for (const statement of [...reportReads, indexRead!]) {
+        const plan = (yield* sql.unsafe<{ readonly detail: string }>(
+          `EXPLAIN QUERY PLAN ${statement}`,
+          statement === indexRead ? [] : [JSON.stringify(["run:none"])],
+        )).map((row) => row.detail);
+        for (const detail of plan) {
+          assert.notMatch(
+            detail,
+            /^SCAN (report|orchestration_v2_projection_turn_items)(?: |$)/,
+            plan.join("\n"),
+          );
+        }
+      }
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("SQL shells use the latest subagent owner for duplicate provider-thread ids", () =>

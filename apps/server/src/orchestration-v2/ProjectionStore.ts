@@ -88,6 +88,10 @@ import {
   derivePendingBackgroundWork,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import {
+  deriveThreadWaitState,
+  type ThreadWaitState,
+} from "@t3tools/shared/orchestrationV2WaitState";
+import {
   firstHomeNextStepText,
   isHomeReportCurrent,
   parseHomeActionableMaxiStep,
@@ -1920,6 +1924,26 @@ export function threadShellFromProjection(
   const homeWaitingOnChild = pendingBackgroundTasks.some(
     (task) => task.kind === "subagent" && task.awaited === true && task.childThreadId != null,
   );
+  const homeHandedOff =
+    projection.thread.handoffTransfer?.runId === latestRun?.id &&
+    (projection.thread.handoffTransfer?.state === "released" ||
+      projection.thread.handoffTransfer?.state === "started");
+  const waitState = deriveThreadWaitState({
+    activeRun,
+    hasActivityRun: activityRun !== null,
+    latestRunStatus: latestRun?.status ?? "idle",
+    turnItems: projection.turnItems,
+    pendingBackgroundTasks,
+    providerSessionStatus: providerSession?.status ?? null,
+    reportWait: parsedHomeNextStep?.kind === "wait" ? parsedHomeNextStep : null,
+    handoffSuccessorThreadId: homeHandedOff
+      ? (projection.thread.handoffTransfer?.successorThreadId ?? null)
+      : null,
+    needsYou: homeNeedsYou,
+    archivedOrDeleted:
+      projection.thread.archivedAt !== null || projection.thread.deletedAt !== null,
+    settled: projection.thread.settledOverride === "settled",
+  });
   const homeDashboardSection = homeNeedsYou
     ? "needs"
     : (parsedHomeNextStep?.kind === "wait" && activityRun === null) ||
@@ -1995,10 +2019,7 @@ export function threadShellFromProjection(
     homeNeedsYou,
     homeAskText,
     homeDoneText,
-    homeHandedOff:
-      projection.thread.handoffTransfer?.runId === latestRun?.id &&
-      (projection.thread.handoffTransfer?.state === "released" ||
-        projection.thread.handoffTransfer?.state === "started"),
+    homeHandedOff,
     homeDashboardSection,
     homeAutoWaitActive:
       parsedHomeNextStep?.kind === "wait" && !blockedOnThreadWait && activityRun === null,
@@ -2012,6 +2033,8 @@ export function threadShellFromProjection(
         : null,
     activeRunId: activeRun?.id ?? null,
     blockedOnThreadWait,
+    waitingOn: [...waitState.waitingOn],
+    waitPhase: waitState.waitPhase,
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt:
       activityRun === null ? null : orchestrationV2RunWorkStartedAt(activityRun),
@@ -2153,6 +2176,8 @@ type ShellThreadState = {
   readonly latestRunBackgroundWake: boolean;
   readonly activeRunId: RunId | null;
   readonly blockedOnThreadWait: boolean;
+  /** Absent for reads that never build shells. */
+  readonly waitState?: ThreadWaitState;
   readonly activityRunStatus: ShellActivityRunStatus | null;
   readonly activityRunStartedAt: DateTime.Utc | null;
   readonly lastError: string | null;
@@ -2277,6 +2302,104 @@ function visibleItemCountForShell(input: {
   );
 }
 
+type ShellWaitSessionRow = {
+  readonly thread_id: string;
+  readonly provider_instance_id: string;
+  readonly status: string;
+  readonly updated_at: string | null;
+};
+
+type ShellWaitRows = {
+  readonly reportRows: ReadonlyArray<PayloadRow & { readonly run_id: string }>;
+  readonly sessionRows: ReadonlyArray<ShellWaitSessionRow>;
+};
+
+/** What shell reads add for wait state: the latest completed report and provider sessions. */
+type ShellWaitInputs = {
+  /** Final answers of each completed latest run, newest first. */
+  readonly reportTextsByRunId: ReadonlyMap<string, ReadonlyArray<string>>;
+  readonly sessionsByThreadId: ReadonlyMap<string, ReadonlyArray<ShellWaitSessionRow>>;
+};
+
+const PROVIDER_SESSION_STATUSES = new Set<string>([
+  "starting",
+  "ready",
+  "running",
+  "waiting",
+  "stopped",
+  "error",
+]);
+
+function shellWaitStateFromRow(input: {
+  readonly thread: OrchestrationV2ThreadProjection["thread"];
+  readonly latestRunId: RunId | null;
+  readonly latestRunStatus: OrchestrationV2ShellThreadStatus;
+  readonly latestRunCompletedAt: DateTime.Utc | null;
+  readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
+  readonly activeRun: { readonly id: RunId; readonly status: "running" } | null;
+  readonly hasActivityRun: boolean;
+  readonly turnItems: ReadonlyArray<OrchestrationV2TurnItem>;
+  readonly pendingBackgroundTasks: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
+  readonly pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
+  readonly waitInputs: ShellWaitInputs;
+}): ThreadWaitState {
+  // Same currency rule as the in-memory shell's isHomeReportCurrent.
+  const reportIsCurrent =
+    input.latestRunStatus === "completed" &&
+    input.latestRunId !== null &&
+    input.latestRunCompletedAt !== null &&
+    (input.latestUserAuthoredMessageAt === null ||
+      DateTime.toEpochMillis(input.latestUserAuthoredMessageAt) <=
+        DateTime.toEpochMillis(input.latestRunCompletedAt));
+  const reports =
+    reportIsCurrent && input.latestRunId !== null
+      ? (input.waitInputs.reportTextsByRunId.get(input.latestRunId) ?? [])
+      : [];
+  const report = reports[0] ?? null;
+  // Like the in-memory shell: the first final answer (newest first) that parses.
+  let parsed: ReturnType<typeof parseHomeNextStep> = null;
+  for (const text of reports) {
+    parsed = parseHomeNextStep(text);
+    if (parsed !== null) break;
+  }
+  const session =
+    (input.waitInputs.sessionsByThreadId.get(input.thread.id) ?? [])
+      .filter((row) => row.provider_instance_id === input.thread.providerInstanceId)
+      .toSorted((left, right) =>
+        (right.updated_at ?? "").localeCompare(left.updated_at ?? ""),
+      )[0] ?? null;
+  const handoff = input.thread.handoffTransfer;
+  return deriveThreadWaitState({
+    activeRun: input.activeRun,
+    hasActivityRun: input.hasActivityRun,
+    latestRunStatus: input.latestRunStatus,
+    turnItems: input.turnItems,
+    pendingBackgroundTasks: input.pendingBackgroundTasks ?? [],
+    providerSessionStatus:
+      session !== null && PROVIDER_SESSION_STATUSES.has(session.status)
+        ? (session.status as OrchestrationV2ProviderSessionStatus)
+        : null,
+    reportWait: parsed?.kind === "wait" ? parsed : null,
+    handoffSuccessorThreadId:
+      handoff !== undefined &&
+      handoff.runId === input.latestRunId &&
+      (handoff.state === "released" || handoff.state === "started")
+        ? handoff.successorThreadId
+        : null,
+    // Same sources as the in-memory shell's homeNeedsYou.
+    needsYou:
+      (report !== null && parseHomeActionableMaxiStep(report) !== null) ||
+      (input.pendingRuntimeRequest !== null &&
+        input.pendingRuntimeRequest.kind !== "auth_refresh") ||
+      pendingGuestMessageCount(input.thread.guestShare) > 0,
+    archivedOrDeleted: input.thread.archivedAt !== null || input.thread.deletedAt !== null,
+    settled: input.thread.settledOverride === "settled",
+  });
+}
+
+type OrchestrationV2ProviderSessionStatus =
+  OrchestrationV2ThreadProjection["providerSessions"][number]["status"];
+
 function shellFromState(input: {
   readonly state: ShellThreadState;
   readonly visibleItemCount: number;
@@ -2324,6 +2447,12 @@ function shellFromState(input: {
     latestRunBackgroundWake: input.state.latestRunBackgroundWake,
     activeRunId: input.state.activeRunId,
     blockedOnThreadWait: input.state.blockedOnThreadWait,
+    ...(input.state.waitState === undefined
+      ? {}
+      : {
+          waitingOn: [...input.state.waitState.waitingOn],
+          waitPhase: input.state.waitState.waitPhase,
+        }),
     activityRunStatus: input.state.activityRunStatus,
     activityRunStartedAt: input.state.activityRunStartedAt,
     status: input.state.latestRunStatus,
@@ -8445,6 +8574,63 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       }
     `;
 
+    /** One batched read per shell read: reports only for completed latest runs. */
+    const selectShellWaitRows = Effect.fnUntraced(function* (rows: ReadonlyArray<ShellThreadRow>) {
+      const runIds = rows.flatMap((row) =>
+        row.latest_run_status === "completed" && row.latest_run_id !== null
+          ? [row.latest_run_id]
+          : [],
+      );
+      const threadIds = rows.map((row) => row.thread_id);
+      const reportRows =
+        runIds.length === 0
+          ? []
+          : yield* sql<PayloadRow & { readonly run_id: string }>`
+              SELECT run_id, payload_json
+              FROM orchestration_v2_projection_turn_items
+              WHERE run_id IN (SELECT value FROM json_each(${encodeIdList(runIds)}))
+                AND type = 'assistant_message'
+                AND json_extract(payload_json, '$.streaming') IS NOT 1
+                AND COALESCE(json_extract(payload_json, '$.phase'), 'final_answer') = 'final_answer'
+              ORDER BY run_id, ordinal DESC
+            `;
+      const sessionRows =
+        threadIds.length === 0
+          ? []
+          : yield* sql<ShellWaitSessionRow>`
+              SELECT thread_id, provider_instance_id, status, updated_at
+              FROM orchestration_v2_projection_provider_sessions
+              WHERE thread_id IN (SELECT value FROM json_each(${encodeIdList(threadIds)}))
+            `;
+      return { reportRows, sessionRows } satisfies ShellWaitRows;
+    });
+
+    const shellWaitInputsFromRows = Effect.fnUntraced(function* (rows: ShellWaitRows) {
+      const reportTextsByRunId = new Map<string, Array<string>>();
+      // Rows arrive newest first per run, so each list starts with the run's report.
+      for (const row of rows.reportRows) {
+        const item = yield* decodeTurnItemPayload(row.payload_json).pipe(
+          Effect.orElseSucceed(() => null),
+        );
+        if (
+          item?.type === "assistant_message" &&
+          !item.streaming &&
+          (item.phase === undefined || item.phase === "final_answer")
+        ) {
+          const texts = reportTextsByRunId.get(row.run_id) ?? [];
+          texts.push(item.text);
+          reportTextsByRunId.set(row.run_id, texts);
+        }
+      }
+      const sessionsByThreadId = new Map<string, Array<ShellWaitSessionRow>>();
+      for (const row of rows.sessionRows) {
+        const existing = sessionsByThreadId.get(row.thread_id) ?? [];
+        existing.push(row);
+        sessionsByThreadId.set(row.thread_id, existing);
+      }
+      return { reportTextsByRunId, sessionsByThreadId } satisfies ShellWaitInputs;
+    });
+
     const runMapsByThreadId = (input: {
       readonly runRows: ReadonlyArray<ShellRunRow>;
       readonly itemCountRows: ReadonlyArray<ShellRunItemCountRow>;
@@ -8769,6 +8955,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ThreadId,
           ReadonlyArray<OrchestrationV2TurnItem>
         >;
+        /** Wait inputs that only shell reads load; without them the shell has no wait fields. */
+        readonly waitInputs?: ShellWaitInputs;
       }) {
         const {
           row,
@@ -8777,6 +8965,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           shellItemCountsByThreadId,
           providerThreadsByThreadId,
           pendingTurnItemsByThreadId,
+          waitInputs,
         } = input;
         const thread = yield* decodeThreadPayload(row.payload_json);
         const latestUserAuthoredMessageAt =
@@ -8887,8 +9076,34 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             pullRequests: thread.pullRequests,
           }),
         ];
+        const activeRunForWait =
+          row.active_run_id === null || row.active_run_status !== "running"
+            ? null
+            : { id: RunId.make(row.active_run_id), status: "running" as const };
+        const hasActivityRun =
+          row.activity_run_status === "preparing" ||
+          row.activity_run_status === "starting" ||
+          row.activity_run_status === "running" ||
+          row.activity_run_status === "waiting";
+        const waitState =
+          waitInputs === undefined
+            ? undefined
+            : shellWaitStateFromRow({
+                thread,
+                latestRunId,
+                latestRunStatus,
+                latestRunCompletedAt,
+                latestUserAuthoredMessageAt,
+                activeRun: activeRunForWait,
+                hasActivityRun,
+                turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
+                pendingBackgroundTasks,
+                pendingRuntimeRequest,
+                waitInputs,
+              });
         return {
           thread,
+          ...(waitState === undefined ? {} : { waitState }),
           latestRunId,
           latestRunStatus,
           latestRunRequestedAt,
@@ -8986,6 +9201,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         providerThreadRows,
         pendingTurnItemRows,
         homeAutoWaitRows,
+        waitRows,
       ] = yield* Effect.all([
         readForThreadIds(selectShellRunRows, forkSourceIds),
         readForThreadIds(selectShellRunItemCounts, forkSourceIds),
@@ -9012,6 +9228,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           readonly target_thread_id: string;
           readonly status: string;
         }>`SELECT waiting_thread_id, target_thread_id, status FROM home_auto_waits WHERE status IN ('active', 'cycle')`,
+        // Only the snapshot's own threads get wait fields; fork sources never become shells.
+        selectShellWaitRows(targetThreadRows),
       ]);
       return {
         targetThreadIds,
@@ -9023,6 +9241,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         providerThreadRows,
         pendingTurnItemRows,
         homeAutoWaitRows,
+        waitRows,
       };
     });
 
@@ -9036,6 +9255,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       providerThreadRows,
       pendingTurnItemRows,
       homeAutoWaitRows,
+      waitRows,
     }: Effect.Success<ReturnType<typeof readShellSnapshotRows>>) {
       const { runsByThreadId, itemCountsByThreadId } = runMapsByThreadId({
         runRows,
@@ -9044,6 +9264,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       const shellItemCountsByThreadId = shellItemCountMap(shellItemCountRows);
       const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
         yield* pendingBackgroundDataByThreadId({ providerThreadRows, pendingTurnItemRows });
+      const waitInputs = yield* shellWaitInputsFromRows(waitRows);
       const states = yield* Effect.forEach(threadRows, (row) =>
         shellThreadStateFromRow({
           row,
@@ -9052,6 +9273,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           shellItemCountsByThreadId,
           providerThreadsByThreadId,
           pendingTurnItemsByThreadId,
+          ...(targetThreadIds.has(ThreadId.make(row.thread_id)) ? { waitInputs } : {}),
         }),
       );
       const statesByThreadId = new Map(states.map((state) => [state.thread.id, state]));
@@ -9320,6 +9542,26 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT 1 FROM json_each(t.payload_json, '$.pullRequests') link
               WHERE json_type(link.value, '$.watch') IS NOT NULL
             )
+            -- waitPhase "waiting" from the shell's own report: its latest run completed with a
+            -- WAIT line. LIKE is case-insensitive like the parser; the payload holds the text.
+            OR EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_turn_items report
+              WHERE report.run_id = (
+                  SELECT latest.run_id FROM orchestration_v2_projection_runs latest
+                  WHERE latest.thread_id = t.thread_id
+                    AND NOT ${isSilentShellRun("latest")}
+                  ORDER BY latest.ordinal DESC, latest.run_id DESC
+                  LIMIT 1
+                )
+                AND report.type = 'assistant_message'
+                AND report.payload_json LIKE '%WAIT on%'
+                AND EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_runs completed
+                  WHERE completed.run_id = report.run_id AND completed.status = 'completed'
+                )
+            )
+            -- waitPhase "waiting" from a handoff successor.
+            OR json_extract(t.payload_json, '$.handoffTransfer.state') IN ('released', 'started')
           ) AS may_be_live,
           -- One list for the whole read, found through the child_thread_id index. A lookup per
           -- thread would parse the payload of every subagent row.
@@ -9540,6 +9782,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               shellItemCountRows,
               providerThreadRows,
               pendingTurnItemRows,
+              waitRows,
             ] = yield* Effect.all([
               forkSourceIds.length === 0
                 ? Effect.succeed([] as ReadonlyArray<ShellRunRow>)
@@ -9557,6 +9800,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     : [],
                 ),
               ),
+              selectShellWaitRows([rowsByThreadId.get(threadId)!]),
             ]);
             const { runsByThreadId, itemCountsByThreadId } = runMapsByThreadId({
               runRows,
@@ -9565,6 +9809,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const shellItemCountsByThreadId = shellItemCountMap(shellItemCountRows);
             const { providerThreadsByThreadId, pendingTurnItemsByThreadId } =
               yield* pendingBackgroundDataByThreadId({ providerThreadRows, pendingTurnItemRows });
+            const waitInputs = yield* shellWaitInputsFromRows(waitRows);
 
             const states = yield* Effect.forEach([...rowsByThreadId.values()], (row) =>
               shellThreadStateFromRow({
@@ -9574,6 +9819,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 shellItemCountsByThreadId,
                 providerThreadsByThreadId,
                 pendingTurnItemsByThreadId,
+                ...(row.thread_id === threadId ? { waitInputs } : {}),
               }),
             );
             const statesByThreadId = new Map(states.map((state) => [state.thread.id, state]));

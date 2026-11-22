@@ -43,14 +43,14 @@ export type WaitStateTurnItem = {
   readonly id: TurnItemId | string;
   readonly type: OrchestrationV2TurnItem["type"];
   readonly status: OrchestrationV2TurnItem["status"];
-  readonly runId?: OrchestrationV2Run["id"] | string | null;
-  readonly title?: string | null;
-  readonly toolName?: string | null;
+  readonly runId?: OrchestrationV2Run["id"] | string | null | undefined;
+  readonly title?: string | null | undefined;
+  readonly toolName?: string | null | undefined;
   readonly input?: unknown;
-  readonly origin?: "provider_native" | "app_owned";
-  readonly childThreadId?: ThreadId | null;
-  readonly prompt?: string;
-  readonly nativeItemRef?: { readonly nativeId: string | null } | null;
+  readonly origin?: "provider_native" | "app_owned" | undefined;
+  readonly childThreadId?: ThreadId | null | undefined;
+  readonly prompt?: string | undefined;
+  readonly nativeItemRef?: { readonly nativeId: string | null } | null | undefined;
 };
 
 export interface ThreadWaitStateInput {
