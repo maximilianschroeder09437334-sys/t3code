@@ -1,3 +1,4 @@
+import { ThreadScreenOverlay } from "./ThreadScreenHost";
 import { AppBar } from "../../components/ui/AppBar";
 import type { AppBarAction, AppBarMenu, AppBarMenuItem } from "../../components/ui/AppBar.types";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
@@ -340,7 +341,11 @@ export function ThreadHeader(props: {
       )}
       {sheet === "surfaces" && isAndroid && surfaceTabs.activeTab ? (
         <View className="flex-1">
-          <InlineSidePanelNavigator identity={`${surfaceKey}:${surfaceTabs.activeTab}`}>
+          <InlineSidePanelNavigator
+            identity={`${surfaceKey}:${surfaceTabs.activeTab}`}
+            environmentId={String(props.gitControls.environmentId)}
+            threadId={String(props.gitControls.threadId)}
+          >
             {props.renderSidePanelSurface?.(
               surfaceTabs.activeTab,
               sideChats[0] ? String(sideChats[0].id) : undefined,
@@ -513,20 +518,7 @@ export function ThreadHeader(props: {
         hideBottomBorder
       />
       {isAndroid ? (
-        <View
-          pointerEvents={sheet === null ? "none" : "auto"}
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            top: 0,
-            bottom: 0,
-            zIndex: 20,
-            display: sheet === null ? "none" : "flex",
-          }}
-        >
-          {panelContent}
-        </View>
+        <ThreadScreenOverlay>{sheet === null ? null : panelContent}</ThreadScreenOverlay>
       ) : (
         <Modal
           visible={sheet !== null}

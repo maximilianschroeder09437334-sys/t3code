@@ -1,48 +1,22 @@
 import {
   NavigationContainer,
   NavigationIndependentTree,
-  type StaticScreenProps,
+  type StaticParamList,
   useNavigation,
 } from "@react-navigation/native";
 import {
   createNativeStackNavigator,
   type NativeStackNavigationProp,
 } from "@react-navigation/native-stack";
-import type { ReactNode } from "react";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { ComponentType, ReactNode } from "react";
+import type { EnvironmentId } from "@t3tools/contracts";
 
-import { ThreadFileScreen } from "../files/ThreadFilesRouteScreen";
+import { mobileRouteScreens, type RootStack } from "../../Stack";
 import { ThreadFileNavigatorPane } from "../files/thread-file-navigator-pane";
-import { PullRequestRouteScreen } from "../pull-requests/PullRequestRouteScreen";
-import type { PullRequestParams } from "../pull-requests/usePullRequestDiff";
-import { ReviewSheet } from "../review/ReviewSheet";
 import { useMobileNavigationTheme } from "../../lib/useMobileNavigationTheme";
-import { GitBranchesSheet } from "./git/GitBranchesSheet";
-import { GitCommitSheet } from "./git/GitCommitSheet";
-import { GitConfirmSheet } from "./git/GitConfirmSheet";
 
 type ThreadRef = { readonly environmentId: string; readonly threadId: string };
-type GitConfirmParams = ThreadRef & {
-  readonly confirmAction?: string;
-  readonly branchName?: string;
-  readonly includesCommit?: string;
-  readonly commitMessage?: string;
-  readonly filePaths?: string;
-};
-export type InlineRoutes = {
-  Root: undefined;
-  ThreadFile: ThreadRef & {
-    readonly path: string[];
-    readonly line?: string;
-    readonly cwd?: string;
-    readonly projectName?: string;
-  };
-  ThreadReview: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId };
-  GitCommit: ThreadRef;
-  GitBranches: ThreadRef;
-  GitConfirm: GitConfirmParams;
-  PullRequest: PullRequestParams;
-};
+type InlineRoutes = StaticParamList<typeof RootStack> & { Root: ThreadRef };
 
 const Stack = createNativeStackNavigator<InlineRoutes>();
 
@@ -50,32 +24,36 @@ const Stack = createNativeStackNavigator<InlineRoutes>();
 export function InlineSidePanelNavigator(props: {
   readonly children: ReactNode;
   readonly identity: string;
+  readonly environmentId: string;
+  readonly threadId: string;
 }) {
   const theme = useMobileNavigationTheme();
   return (
     <NavigationIndependentTree>
-      <NavigationContainer theme={theme} onUnhandledAction={() => {}}>
+      <NavigationContainer theme={theme}>
         <Stack.Navigator
           key={props.identity}
           initialRouteName="Root"
           screenOptions={{ headerShown: false, animation: "slide_from_right" }}
         >
-          <Stack.Screen name="Root">{() => props.children}</Stack.Screen>
-          <Stack.Screen name="ThreadFile" component={ThreadFileScreen} />
-          <Stack.Screen name="ThreadReview" component={ReviewSheet} />
-          <Stack.Screen name="GitCommit" component={GitCommitSheet} />
-          <Stack.Screen name="GitBranches" component={GitBranchesSheet} />
-          <Stack.Screen name="GitConfirm" component={GitConfirmSheet} />
-          <Stack.Screen name="PullRequest" component={PullRequestRouteScreen} />
+          <Stack.Screen
+            name="Root"
+            initialParams={{ environmentId: props.environmentId, threadId: props.threadId }}
+          >
+            {() => props.children}
+          </Stack.Screen>
+          {Object.entries(mobileRouteScreens()).map(([name, config]) => (
+            <Stack.Screen
+              key={name}
+              name={name as keyof InlineRoutes}
+              component={config.screen as ComponentType<object>}
+            />
+          ))}
         </Stack.Navigator>
       </NavigationContainer>
     </NavigationIndependentTree>
   );
 }
-
-export type InlineSidePanelScreenProps<Name extends keyof InlineRoutes> = StaticScreenProps<
-  InlineRoutes[Name]
->;
 
 export function InlineThreadFilesPane(props: {
   readonly cwd: string;

@@ -767,6 +767,12 @@ const RootStackConfig = createWorkspaceStackNavigator({
   },
 });
 
+// Read lazily: thread surfaces are also registered by this stack. Reuse the actual
+// app routes so composer and detail destinations cannot drift from the outer host.
+export function mobileRouteScreens() {
+  return RootStackConfig.config.screens;
+}
+
 function GuardedScreenLayout(props: {
   readonly children: ReactNode;
   readonly route: { readonly name: string; readonly params?: object | undefined };

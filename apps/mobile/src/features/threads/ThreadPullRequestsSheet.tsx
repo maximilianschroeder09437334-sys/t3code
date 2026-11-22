@@ -33,7 +33,7 @@ export function ThreadPullRequestsSheet(
     [lines],
   );
   const openPullRequest = useOpenPullRequest({
-    replace: true,
+    replace: props.onCloseInline === undefined,
     context: selectedThread ?? undefined,
   });
   const actions = useLinkedPullRequestActions({
