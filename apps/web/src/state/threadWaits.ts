@@ -29,6 +29,7 @@ function sameTarget(a: ResolvedWaitTarget, b: ResolvedWaitTarget): boolean {
     a.itemId === b.itemId &&
     a.taskId === b.taskId &&
     a.source === b.source &&
+    a.kind === b.kind &&
     a.state === b.state &&
     a.suffix === b.suffix &&
     a.pullRequestUrl === b.pullRequestUrl

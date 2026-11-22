@@ -18,7 +18,13 @@ import {
   resolveThreadStatusPill,
   resolveWindowTitleThreadStatus,
 } from "./Sidebar.logic";
-import { liveWaitTargets, openWaitTargets, waitTargetRoute } from "./WaitingOn.logic";
+import {
+  liveWaitTargets,
+  openWaitTargets,
+  waitTargetLabel,
+  waitTargetRoute,
+  waitTargetText,
+} from "./WaitingOn.logic";
 
 const env = EnvironmentId.make("environment-test");
 const remote = EnvironmentId.make("environment-remote");
@@ -383,5 +389,34 @@ describe("Waiting for awaited work, PR checks and lineage children (WP A1, A2)",
     expect(liveWaitTargets(row?.wait).map((target) => target.threadId)).toEqual([
       ThreadId.make("c"),
     ]);
+  });
+});
+
+describe("waitTargetLabel", () => {
+  it("names the kind before the title on every Waiting on line", () => {
+    const cases = [
+      [{ kind: "subagent", title: "Fix tests" }, "subagent Fix tests"],
+      [{ kind: "thread", title: "Review" }, "thread Review"],
+      [{ kind: "pull_request", title: "PR #12 checks" }, "PR #12 checks"],
+      [{ kind: "command", title: "vp test" }, "command vp test"],
+      [{ kind: "monitor", title: "Watch logs" }, "monitor Watch logs"],
+      [{ kind: "background_task", title: "Sync" }, "background task Sync"],
+      // Placeholder titles say nothing the kind word does not.
+      [{ kind: "command", title: "background command" }, "command"],
+      [{ kind: "background_task", title: "background task" }, "background task"],
+      [{ kind: "subagent", title: "a subagent" }, "subagent"],
+      [{ kind: "thread", title: "starting delegate" }, "thread"],
+    ] as const;
+    for (const [target, text] of cases) {
+      expect(waitTargetText(target), text).toBe(text);
+    }
+    expect(waitTargetLabel({ kind: "pull_request", title: "PR #12 checks" })).toEqual({
+      kind: null,
+      title: "PR #12 checks",
+    });
+    expect(waitTargetLabel({ kind: "command", title: "background command" })).toEqual({
+      kind: "command",
+      title: null,
+    });
   });
 });

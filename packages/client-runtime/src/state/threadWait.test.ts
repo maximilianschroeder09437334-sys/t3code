@@ -86,6 +86,7 @@ describe("resolveThreadWaits", () => {
           threadId: ThreadId.make("b"),
           waiterThreadId: ThreadId.make("a"),
           source: "thread_wait",
+          kind: "thread",
           state,
           ...(suffix === undefined ? {} : { suffix }),
         },
@@ -269,6 +270,7 @@ describe("resolveThreadWaits", () => {
       itemId,
       taskId: "native-1",
       source: "subagent",
+      kind: "subagent",
       state: "live",
     });
     const delegate = waiting("a", [on(null, { source: "delegate_wait", itemId })]);
@@ -461,7 +463,11 @@ describe("resolveThreadWaits implicit lineage and sender edges (WP A2, A3)", () 
       ...overrides,
     });
   /** A subagent child whose run is open. */
-  const busyChild = (id: string, parent: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+  const busyChild = (
+    id: string,
+    parent: string,
+    overrides: Partial<OrchestrationV2ThreadShell> = {},
+  ) =>
     raw(id, {
       lineage: subagentOf(parent),
       waitPhase: "working",
@@ -472,8 +478,11 @@ describe("resolveThreadWaits implicit lineage and sender edges (WP A2, A3)", () 
       activityRunStatus: "running",
       ...overrides,
     });
-  const childDone = (id: string, parent: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
-    done(id, { lineage: subagentOf(parent), ...overrides });
+  const childDone = (
+    id: string,
+    parent: string,
+    overrides: Partial<OrchestrationV2ThreadShell> = {},
+  ) => done(id, { lineage: subagentOf(parent), ...overrides });
 
   it("a completed unsettled parent waits on its working lineage child, then clears when it ends", () => {
     const parent = done("p");
@@ -487,6 +496,7 @@ describe("resolveThreadWaits implicit lineage and sender edges (WP A2, A3)", () 
           threadId: ThreadId.make("c"),
           waiterThreadId: ThreadId.make("p"),
           source: "awaited_child",
+          kind: "subagent",
           state: "live",
         },
       ],
@@ -659,7 +669,9 @@ describe("resolveThreadWaits implicit lineage and sender edges (WP A2, A3)", () 
     const threads: Array<OrchestrationV2ThreadShell> = [done("root")];
     let edges = 0;
     for (let index = 0; index < 5000; index++) {
-      threads.push(index === 4999 ? busyChild(`w${index}`, "root") : childDone(`w${index}`, "root"));
+      threads.push(
+        index === 4999 ? busyChild(`w${index}`, "root") : childDone(`w${index}`, "root"),
+      );
       edges++;
     }
     threads.push(done("chain0"));
@@ -704,7 +716,11 @@ describe("resolveThreadWaits pull request watch targets (WP A1)", () => {
           title: "PR #42 checks",
           taskId: "pull-request-watch:github.com/owner/repo#42",
         }),
-        on(null, { source: "awaited_child", title: "PR #9 checks", taskId: "pull-request-watch:github.com/owner/repo#9" }),
+        on(null, {
+          source: "awaited_child",
+          title: "PR #9 checks",
+          taskId: "pull-request-watch:github.com/owner/repo#9",
+        }),
       ],
     });
     const wait = waitOf(resolve([[env1, [waiter]]]), "a");
@@ -716,5 +732,53 @@ describe("resolveThreadWaits pull request watch targets (WP A1)", () => {
     });
     // No matching link: no URL, so Open falls back to the waiter.
     expect(wait?.targets[1]).not.toHaveProperty("pullRequestUrl");
+  });
+});
+
+describe("resolveThreadWaits target kinds", () => {
+  it("names each target's kind from its source, thread and the waiter's roster", () => {
+    const waiter = raw("a", {
+      waitPhase: "waiting",
+      pendingBackgroundTasks: [
+        { taskId: "cmd-1", kind: "command", awaited: true, description: "vp test" },
+        { taskId: "mon-1", kind: "monitor", awaited: true },
+        { taskId: "task-1", kind: "background_task", awaited: true },
+        { taskId: "native-1", kind: "subagent" },
+      ],
+      waitingOn: [
+        on("t", { title: "Review" }),
+        on("c", { source: "subagent", title: "Build" }),
+        on("g", { source: "awaited_child", title: "Explore" }),
+        on(null, { source: "awaited_child", title: "vp test", taskId: "cmd-1" }),
+        on(null, { source: "awaited_child", title: "monitor", taskId: "mon-1" }),
+        on(null, { source: "awaited_child", title: "background task", taskId: "task-1" }),
+        on(null, { source: "awaited_child", title: "Native", taskId: "native-1" }),
+        on(null, { source: "awaited_child", title: "Gone", taskId: "unrostered" }),
+        on(null, {
+          source: "awaited_child",
+          title: "PR #12 checks",
+          taskId: "pull-request-watch:github.com/owner/repo#12",
+        }),
+        on(null, { source: "delegate_wait", title: "Delegate" }),
+      ],
+    });
+    const wait = waitOf(
+      resolve([
+        [env1, [waiter, phase("t", "working"), phase("c", "working"), phase("g", "working")]],
+      ]),
+      "a",
+    );
+    expect(wait?.targets.map((target) => [target.title, target.kind])).toEqual([
+      ["Review", "thread"],
+      ["Build", "subagent"],
+      ["Explore", "subagent"],
+      ["vp test", "command"],
+      ["monitor", "monitor"],
+      ["background task", "background_task"],
+      ["Native", "subagent"],
+      ["Gone", "background_task"],
+      ["PR #12 checks", "pull_request"],
+      ["Delegate", "thread"],
+    ]);
   });
 });

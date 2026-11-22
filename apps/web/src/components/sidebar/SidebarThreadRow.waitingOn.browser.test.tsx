@@ -29,6 +29,7 @@ const resolvedWait: ResolvedThreadWait = {
     {
       waiterThreadId: waiterId,
       source: "thread_wait",
+      kind: "thread",
       title: "Build",
       environmentId: env,
       threadId: ThreadId.make("build"),
@@ -37,6 +38,7 @@ const resolvedWait: ResolvedThreadWait = {
     {
       waiterThreadId: waiterId,
       source: "delegate_wait",
+      kind: "thread",
       title: "Review",
       environmentId: env,
       threadId: ThreadId.make("review"),
@@ -189,7 +191,10 @@ describe.each(["card", "folder", "folder-multiline"] as const)(
 
       await userEvent.click(waitingTrigger());
       await expect.element(waitingList()).toBeVisible();
-      expect(listLines()).toEqual(["Waiting on: BuildOpen", "Waiting on: Review· needs youOpen"]);
+      expect(listLines()).toEqual([
+        "Waiting on thread BuildOpen",
+        "Waiting on thread Review· needs youOpen",
+      ]);
       expectRowUntouched(mounted.callbacks);
 
       // Clicks inside the portaled list must not reach the row through React either.
@@ -198,7 +203,7 @@ describe.each(["card", "folder", "folder-multiline"] as const)(
       await expect.element(waitingList()).toBeVisible();
       expectRowUntouched(mounted.callbacks);
 
-      await userEvent.click(page.getByRole("button", { name: "Open Review" }));
+      await userEvent.click(page.getByRole("button", { name: "Open thread Review" }));
       expect(navigate).toHaveBeenCalledExactlyOnceWith({
         to: "/$environmentId/$threadId",
         params: { environmentId: env, threadId: ThreadId.make("review") },

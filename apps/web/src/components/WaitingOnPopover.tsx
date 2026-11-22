@@ -12,7 +12,13 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { openWaitTargets, waitTargetRoute, type WaitTargetRoute } from "./WaitingOn.logic";
+import {
+  openWaitTargets,
+  waitTargetLabel,
+  waitTargetRoute,
+  waitTargetText,
+  type WaitTargetRoute,
+} from "./WaitingOn.logic";
 
 export interface WaitingOnWaiter {
   readonly environmentId: EnvironmentId;
@@ -43,6 +49,19 @@ export function useOpenWaitTarget() {
 
 const stopPropagation = (event: SyntheticEvent) => event.stopPropagation();
 
+/** "subagent Fix tests", "PR #12 checks", "command": the kind word muted, the title plain. */
+export function WaitTargetName({ target }: { target: ResolvedWaitTarget }) {
+  const { kind, title } = waitTargetLabel(target);
+  return (
+    <>
+      {kind === null ? null : (
+        <span className="text-muted-foreground">{title === null ? kind : `${kind} `}</span>
+      )}
+      {title === null ? null : <span className="text-foreground">{title}</span>}
+    </>
+  );
+}
+
 function WaitTargetSuffix({ target }: { target: ResolvedWaitTarget }) {
   if (target.suffix === undefined) return null;
   return (
@@ -72,7 +91,7 @@ export function WaitTargetOpenButton(props: {
       variant="ghost"
       className={props.className}
       disabled={route === null}
-      aria-label={`Open ${props.target.title}`}
+      aria-label={`Open ${waitTargetText(props.target)}`}
       onClick={(event) => {
         event.stopPropagation();
         if (route === null) return;
@@ -93,7 +112,8 @@ export function WaitTargetOpenButton(props: {
 }
 
 /**
- * The Waiting status as a trigger: clicking it lists "Waiting on: <title>" with Open per line.
+ * The Waiting status as a trigger: clicking it lists "Waiting on <kind> <title>" with Open per
+ * line.
  * Renders the trigger alone when nothing is open to list.
  */
 export function WaitingOnPopover(props: {
@@ -141,8 +161,8 @@ export function WaitingOnPopover(props: {
                 className="flex min-w-0 items-center gap-2"
               >
                 <span className="min-w-0 flex-1 truncate">
-                  <span className="text-muted-foreground">{label}: </span>
-                  <span className="text-foreground">{target.title}</span>
+                  <span className="text-muted-foreground">{label} </span>
+                  <WaitTargetName target={target} />
                 </span>
                 <WaitTargetSuffix target={target} />
                 <WaitTargetOpenButton

@@ -2,10 +2,10 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 import type { ResolvedThreadWait } from "@t3tools/client-runtime/state/thread-wait";
 
 import { liveWaitTargets, openWaitTargets } from "../WaitingOn.logic";
-import { WaitingOnPopover, WaitTargetOpenButton } from "../WaitingOnPopover";
+import { WaitingOnPopover, WaitTargetName, WaitTargetOpenButton } from "../WaitingOnPopover";
 
 /**
- * "Waiting on: <first> [Open] +N"; +N lists every open target. With "Also running", a running
+ * "Waiting on <kind> <first> [Open] +N"; +N lists every open target. With "Also running", a running
  * thread lists the targets it also has going.
  */
 export function HomeWaitingOnLine(props: {
@@ -23,7 +23,7 @@ export function HomeWaitingOnLine(props: {
   return (
     <span className="flex min-w-0 flex-1 items-center gap-1 text-xs text-muted-foreground">
       <span className="min-w-0 truncate">
-        {label}: <span className="text-foreground">{first.title}</span>
+        {label} <WaitTargetName target={first} />
         {first.suffix === undefined ? null : (
           <span className={first.suffix === "needs you" ? "text-warning-foreground" : undefined}>
             {" "}
@@ -45,7 +45,7 @@ export function HomeWaitingOnLine(props: {
               aria-label={
                 label === "Also running"
                   ? `Show all ${targets.length} things this also runs`
-                  : `Show all ${targets.length} threads this is waiting on`
+                  : `Show all ${targets.length} things this is waiting on`
               }
               className="shrink-0 rounded-sm px-1 tabular-nums hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             />

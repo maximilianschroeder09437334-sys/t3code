@@ -30,12 +30,21 @@ export type ThreadWaitShell = Pick<
   | "lineage"
   | "pullRequests"
 > &
-  Partial<Pick<EnvironmentThreadShell, "latestRunSenderThreadId">> & {
+  Partial<Pick<EnvironmentThreadShell, "latestRunSenderThreadId" | "pendingBackgroundTasks">> & {
     /** Read only for whether an activity run is open; a parked runtime hides a waiting run. */
     readonly source?: Partial<Pick<OrchestrationV2ThreadShell, "activityRunStatus">>;
   };
 
 export type ResolvedWaitTargetState = "live" | "unknown" | "ended";
+
+/** What a target is, for "Waiting on <kind> <title>". */
+export type WaitTargetKind =
+  | "subagent"
+  | "thread"
+  | "pull_request"
+  | "command"
+  | "monitor"
+  | "background_task";
 
 export interface ResolvedWaitTarget {
   readonly title: string;
@@ -47,6 +56,7 @@ export interface ResolvedWaitTarget {
   readonly itemId?: TurnItemId;
   readonly taskId?: string;
   readonly source: OrchestrationV2WaitTarget["source"];
+  readonly kind: WaitTargetKind;
   readonly state: ResolvedWaitTargetState;
   readonly suffix?: "needs you" | "starting" | "not connected";
   /** A watched pull request's link, for Open to show it in the pull request view. */
@@ -87,9 +97,7 @@ function legacyTargetState(shell: ThreadWaitShell): ResolvedWaitTargetState {
 
 /** An activity run is open: the server's own report when it sends one, else the runtime. */
 function hasActivityRun(shell: ThreadWaitShell): boolean {
-  return (
-    (shell.source?.activityRunStatus ?? null) !== null || threadRuntimeIsActive(shell.runtime)
-  );
+  return (shell.source?.activityRunStatus ?? null) !== null || threadRuntimeIsActive(shell.runtime);
 }
 
 /** The server's lifecycle precedence (see `waitEndsByLifecycle`), from the shell's own fields. */
@@ -126,7 +134,31 @@ function fallbackTitle(target: OrchestrationV2WaitTarget): string {
   return "a thread";
 }
 
+/**
+ * Thread-backed subagent targets are subagents and other thread targets threads. Work without a
+ * thread takes its kind from the waiter's roster entry with the same task id.
+ */
+function waitTargetKind(
+  target: OrchestrationV2WaitTarget,
+  rosterKindOf: (taskId: string) => WaitTargetKind | undefined,
+): WaitTargetKind {
+  const fromSubagent = target.source === "subagent" || target.source === "awaited_child";
+  if (target.threadId !== null) return fromSubagent ? "subagent" : "thread";
+  if (target.taskId !== undefined && isPullRequestWatchTask({ taskId: target.taskId })) {
+    return "pull_request";
+  }
+  if (!fromSubagent) return "thread";
+  const rostered = target.taskId === undefined ? undefined : rosterKindOf(target.taskId);
+  return rostered ?? (target.source === "subagent" ? "subagent" : "background_task");
+}
+
 type TargetBase = Omit<ResolvedWaitTarget, "state" | "suffix">;
+
+/** Per-waiter maps, each built on first use. */
+interface WaiterLookups {
+  readonly pullRequestUrlOf: (taskId: string) => string | undefined;
+  readonly rosterKindOf: (taskId: string) => WaitTargetKind | undefined;
+}
 
 /** A target whose state is known by itself, or one that depends on another waiting thread. */
 type ClassifiedTarget =
@@ -147,12 +179,9 @@ interface TarjanFrame {
 const edgeKey = (waiter: string, target: string) => `${waiter}\u0001${target}`;
 
 /**
- * Joins each waiting thread's targets with the targets' own phases across every environment,
- * independent of shell order: waiting holds while a path through waiting threads reaches a live
- * target. A subagent child is also an implicit target of the thread that drives it (see
- * `waitDriverOf`), so a parent or sender with nothing of its own left waits on its live child.
- * Linear in shells plus edges, without recursion. Only threads whose shell has `waitPhase` (new
- * servers) get an entry.
+ * Joins waiting threads' targets with the targets' own phases, order independent and without
+ * recursion. A subagent child is an implicit target of its driver (`waitDriverOf`). Only shells
+ * with `waitPhase` (new servers) get an entry.
  */
 export function resolveThreadWaits(input: {
   readonly threads: Iterable<ThreadWaitShell>;
@@ -212,7 +241,7 @@ export function resolveThreadWaits(input: {
   const classify = (
     waiter: ThreadWaitShell,
     target: OrchestrationV2WaitTarget,
-    pullRequestUrlOf: (taskId: string) => string | undefined,
+    lookups: WaiterLookups,
   ): ClassifiedTarget => {
     count();
     const environmentId = target.environmentId ?? waiter.environmentId;
@@ -221,6 +250,7 @@ export function resolveThreadWaits(input: {
       threadId: target.threadId,
       waiterThreadId: waiter.id,
       source: target.source,
+      kind: waitTargetKind(target, lookups.rosterKindOf),
       ...(target.itemId === undefined ? {} : { itemId: target.itemId }),
       ...(target.taskId === undefined ? {} : { taskId: target.taskId }),
     };
@@ -228,7 +258,7 @@ export function resolveThreadWaits(input: {
     if (target.threadId === null) {
       const pullRequestUrl =
         target.taskId !== undefined && isPullRequestWatchTask({ taskId: target.taskId })
-          ? pullRequestUrlOf(target.taskId)
+          ? lookups.pullRequestUrlOf(target.taskId)
           : undefined;
       return {
         kind: "final",
@@ -276,8 +306,20 @@ export function resolveThreadWaits(input: {
       }
       return pullRequestUrls.get(taskId);
     };
+    let rosterKinds: Map<string, WaitTargetKind> | undefined;
+    const rosterKindOf = (taskId: string) => {
+      if (rosterKinds === undefined) {
+        rosterKinds = new Map();
+        for (const task of shell.pendingBackgroundTasks ?? []) {
+          count();
+          rosterKinds.set(task.taskId, task.kind);
+        }
+      }
+      return rosterKinds.get(taskId);
+    };
+    const lookups: WaiterLookups = { pullRequestUrlOf, rosterKindOf };
     const explicit = shell.waitingOn ?? [];
-    const targets = explicit.map((target) => classify(shell, target, pullRequestUrlOf));
+    const targets = explicit.map((target) => classify(shell, target, lookups));
     const implicit = implicitTargets.get(key);
     if (implicit === undefined) return targets;
     const listed = new Set<string>();
@@ -298,7 +340,7 @@ export function resolveThreadWaits(input: {
             threadId: shells.get(childKey)!.id,
             title: null,
           },
-          pullRequestUrlOf,
+          lookups,
         ),
       );
     }
