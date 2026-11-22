@@ -109,6 +109,7 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "editor.openFavorite",
   "usage.cost",
   "usage.tokens",
+  "usage.share",
   "usage.limits",
   "usage.period.day",
   "usage.period.week",

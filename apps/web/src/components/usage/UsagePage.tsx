@@ -10,7 +10,7 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import { CircleAlertIcon, ChevronDownIcon, InfoIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { Fragment, useEffect, useEffectEvent, useRef, useState } from "react";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
@@ -38,7 +38,7 @@ import { primaryServerKeybindingsAtom, serverEnvironment } from "../../state/ser
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { isModelPickerOpen } from "../../modelPickerVisibility";
 import { shortcutLabelForCommand } from "../../keybindings";
-import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
+import { mergeAnsweredUsage, useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   enumerateDays,
@@ -79,11 +79,34 @@ import {
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
-import { UsageProviderChart } from "./UsageProviderChart";
+import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
+import { UsageModelTable } from "./UsageModelTable";
 import { UsageShareBar } from "./UsageShareBar";
 import {
+  LIMIT_MEASURE_LABEL,
+  formatLimitShare,
+  plansFor,
+  type EstimateProvider,
+  type LimitMeasure,
+} from "@t3tools/shared/usageEstimate";
+import {
+  LimitEstimatesScope,
+  shareOf,
+  useLimitEstimates,
+  type LimitEstimates,
+  type LimitEstimatesHandle,
+} from "./usageLimitEstimates";
+import {
+  MEASURE_HEADING,
+  missingShareLabel,
+  modelShareColumns,
+  rateBasisText,
+  shareRowDetail,
+} from "./usageLimitText";
+import {
   costTypeSegments,
+  limitShareSegments,
   modelShare,
   sortModelsByTokens,
   speedCostSegments,
@@ -196,6 +219,10 @@ export function UsagePage() {
   }));
   const metric = preferences.metric;
   const showingLimits = metric === "limits";
+  const showingShare = metric === "share";
+  const chartMetric = metric === "limits" ? "cost" : metric;
+  // Refreshes the Usage view's calibration windows together with the page's own refresh.
+  const limitEstimatesRef = useRef<LimitEstimatesHandle>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [limitsNow, setLimitsNow] = useState(() => Date.now());
   const refreshingRef = useRef(false);
@@ -244,7 +271,7 @@ export function UsagePage() {
     });
   };
   const selectMetric = (nextMetric: UsageMetric) => {
-    if (nextMetric === "limits") setLimitsNow(Date.now());
+    if (nextMetric === "limits" || nextMetric === "share") setLimitsNow(Date.now());
     updatePreferences({ metric: nextMetric });
   };
   const refreshLimits = (automatic = false) =>
@@ -316,7 +343,12 @@ export function UsagePage() {
     }
     refreshingRef.current = true;
     setIsRefreshing(true);
-    void refresh(nextWindow).finally(() => {
+    // The Usage view reads limits and calibration costs together, so neither lags the other.
+    void Promise.all([
+      refresh(nextWindow),
+      showingShare ? refreshLimits() : undefined,
+      showingShare ? limitEstimatesRef.current?.refresh() : undefined,
+    ]).finally(() => {
       refreshingRef.current = false;
       setIsRefreshing(false);
     });
@@ -336,8 +368,9 @@ export function UsagePage() {
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshes provider limits from the server when the connected environment set changes
   useEffect(() => {
-    if (showingLimits && connectedLimitsEnvironments) autoRefreshLimits();
-  }, [showingLimits, connectedLimitsEnvironments]);
+    // The Usage view calibrates against live limits, so it reads them too.
+    if ((showingLimits || showingShare) && connectedLimitsEnvironments) autoRefreshLimits();
+  }, [showingLimits, showingShare, connectedLimitsEnvironments]);
 
   const days = enumerateDays(shownWindow.sinceDay, shownWindow.untilDay);
   const hours =
@@ -502,72 +535,89 @@ export function UsagePage() {
 
   return (
     <AppRouteModal label="Usage">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="@container/usage-header flex min-h-12 shrink-0 items-center gap-1 border-b ps-5 pe-2">
-          {topbarContent}
-          <AppRouteModalClose />
-        </header>
+      <LimitEstimatesScope
+        ref={limitEstimatesRef}
+        nowMs={limitsNow}
+        refreshing={isRefreshing}
+        enabled={showingShare}
+        selectedEnvironmentIds={selectedEnvironmentIds}
+        hiddenProviders={hiddenProviders}
+        measure={preferences.limitMeasure ?? "weekly"}
+        planSettings={preferences.estimatePlans ?? {}}
+        onMeasureChange={(limitMeasure) => updatePreferences({ limitMeasure })}
+        onPlanChange={(provider, planId) =>
+          updatePreferences({
+            estimatePlans: { ...preferences.estimatePlans, [provider]: planId },
+          })
+        }
+      >
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <header className="@container/usage-header flex min-h-12 shrink-0 items-center gap-1 border-b ps-5 pe-2">
+            {topbarContent}
+            <AppRouteModalClose />
+          </header>
 
-        <ScrollArea className="min-h-0 flex-1">
-          <WorkspacePageContainer width="wide">
-            {selectedEnvironments.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                {environments.length === 0
-                  ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
-                  : `Select an environment to see ${showingLimits ? "limits" : "usage"}.`}
-              </p>
-            ) : showingLimits ? (
-              <UsageLimitsSection
-                selectedEnvironmentIds={selectedEnvironmentIds}
-                hiddenProviders={hiddenProviders}
-                now={limitsNow}
-              />
-            ) : shown === null ? (
-              <UsageSkeleton />
-            ) : !canReadDiagnostics ? (
-              <div className="space-y-2 py-12 text-center text-sm text-muted-foreground">
-                {selectedEnvironments.map((environment) => (
-                  <p key={environment.environmentId}>
-                    {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
-                    {environment.error}
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <UsageOverview
-                merged={merged}
-                shownWindow={shownWindow}
-                hour12={hour12}
-                days={days}
-                hours={hours}
-                showingKept={showingKept}
-                metric={metric === "tokens" ? "tokens" : "cost"}
-                selectedEnvironments={selectedEnvironments}
-                hiddenProviders={hiddenProviders}
-                refreshingUsage={refreshingUsage}
-                showChatGptSharing={showChatGptSharing}
-                onSelectModel={selectUsageModel}
-              />
-            )}
-          </WorkspacePageContainer>
-        </ScrollArea>
-      </div>
-      {showingLimits ? null : (
-        <UsageModelDialogHost
-          models={merged.models}
-          environments={selectedEnvironments}
-          metric={metric === "tokens" ? "tokens" : "cost"}
-          chartWindow={{
-            days,
-            hours,
-            resolution: shownHourly ? "hour" : "day",
-            timeZone: shownWindow.timeZone,
-            referenceTime: shownWindow.untilTime,
-            hour12,
-          }}
-          onSetPrice={(model) => setPriceDialog({ model })}
-        />
-      )}
+          <ScrollArea className="min-h-0 flex-1">
+            <WorkspacePageContainer width="wide">
+              {selectedEnvironments.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {environments.length === 0
+                    ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
+                    : `Select an environment to see ${showingLimits ? "limits" : "usage"}.`}
+                </p>
+              ) : showingLimits ? (
+                <UsageLimitsSection
+                  selectedEnvironmentIds={selectedEnvironmentIds}
+                  hiddenProviders={hiddenProviders}
+                  now={limitsNow}
+                />
+              ) : shown === null ? (
+                <UsageSkeleton />
+              ) : !canReadDiagnostics ? (
+                <div className="space-y-2 py-12 text-center text-sm text-muted-foreground">
+                  {selectedEnvironments.map((environment) => (
+                    <p key={environment.environmentId}>
+                      {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
+                      {environment.error}
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <UsageOverview
+                  merged={merged}
+                  shownWindow={shownWindow}
+                  hour12={hour12}
+                  days={days}
+                  hours={hours}
+                  showingKept={showingKept}
+                  metric={chartMetric}
+                  selectedEnvironments={selectedEnvironments}
+                  hiddenProviders={hiddenProviders}
+                  refreshingUsage={refreshingUsage}
+                  showChatGptSharing={showChatGptSharing}
+                  onSelectModel={selectUsageModel}
+                />
+              )}
+            </WorkspacePageContainer>
+          </ScrollArea>
+        </div>
+        {showingLimits ? null : (
+          <UsageModelDialogHost
+            models={merged.models}
+            environments={selectedEnvironments}
+            metric={chartMetric}
+            chartWindow={{
+              days,
+              hours,
+              resolution: shownHourly ? "hour" : "day",
+              timeZone: shownWindow.timeZone,
+              referenceTime: shownWindow.untilTime,
+              hour12,
+            }}
+            onSetPrice={(model) => setPriceDialog({ model })}
+          />
+        )}
+      </LimitEstimatesScope>
       {priceDialog ? (
         <UsagePriceOverrides
           usage={environments}
@@ -602,7 +652,7 @@ function UsageOverview({
   readonly days: readonly string[];
   readonly hours: readonly string[];
   readonly showingKept: boolean;
-  readonly metric: "tokens" | "cost";
+  readonly metric: UsageChartMetric;
   readonly selectedEnvironments: readonly EnvironmentUsageStatus[];
   readonly hiddenProviders: ReadonlySet<UsageProviderKind>;
   readonly refreshingUsage: boolean;
@@ -624,9 +674,21 @@ function UsageOverview({
   const activeProviders = [...PROVIDER_ORDER].filter(
     (provider) => providersWithData.has(provider) || loading.providers.has(provider),
   );
+  const estimates = useLimitEstimates();
+  // Phones show one share column, so it is the selected window's.
+  const shareColumns = modelShareColumns(estimates?.measure ?? "weekly");
+  // Only Claude Code and Codex have estimates; the Usage view leaves other providers out.
+  const shownProviders =
+    estimates === null
+      ? activeProviders
+      : activeProviders.filter((provider) =>
+          estimates.byProvider.has(provider as EstimateProvider),
+        );
   const chartLoadingProviders = new Set(
-    activeProviders.filter((provider) => loadingProviders.has(provider)),
+    shownProviders.filter((provider) => loadingProviders.has(provider)),
   );
+  const share = (provider: UsageProviderKind, costUsd: number, measure?: LimitMeasure) =>
+    estimates === null ? null : shareOf(estimates, provider, costUsd, measure);
   const sourceMessages = usageSourceMessages(
     selectedEnvironments.flatMap(
       (environment) =>
@@ -641,12 +703,41 @@ function UsageOverview({
   const breakdownModels =
     breakdown === "model" && metric === "tokens"
       ? sortModelsByTokens(merged.models)
-      : merged.models;
+      : estimates === null
+        ? merged.models
+        : merged.models.filter((model) => shownProviders.includes(model.provider));
+  const modelValue = (model: MergedUsage["models"][number]) =>
+    metric === "tokens"
+      ? model.totalTokens
+      : estimates !== null
+        ? (share(model.provider, model.costUsd) ?? 0)
+        : model.costUsd;
   const breakdownPeak = breakdownModels.reduce(
-    (peak, model) => Math.max(peak, metric === "tokens" ? model.totalTokens : model.costUsd),
+    (peak, model) => Math.max(peak, modelValue(model)),
     0,
   );
-  const rankedProviders = rankProvidersByMetric(activeProviders, merged.providers, metric);
+  const rankedProviders = rankProvidersByMetric(shownProviders, merged.providers, metric);
+  const topShare = rankedProviders
+    .map((provider) => ({
+      provider,
+      share: share(
+        provider,
+        merged.providers.find((entry) => entry.provider === provider)?.costUsd ?? 0,
+      ),
+    }))
+    .toSorted((left, right) => (right.share ?? -1) - (left.share ?? -1))[0];
+  const typeParts =
+    estimates === null
+      ? []
+      : shownProviders.flatMap((provider) => {
+          const usdPerWindow = estimates.rates.get(provider);
+          if (usdPerWindow === undefined) return [];
+          const usage = mergeAnsweredUsage(
+            selectedEnvironments,
+            (bucket) => bucket.provider === provider,
+          );
+          return [{ provider, usage, usdPerWindow }];
+        });
 
   return (
     <div aria-busy={loadingPartial} className="flex flex-col gap-6">
@@ -664,31 +755,46 @@ function UsageOverview({
                 figureClass(loadingPartial),
               )}
             >
-              {metric === "cost" ? formatUsd(merged.costUsd) : formatTokens(merged.totalTokens)}
+              {estimates !== null
+                ? formatLimitShare(topShare?.share ?? null)
+                : metric === "cost"
+                  ? formatUsd(merged.costUsd)
+                  : formatTokens(merged.totalTokens)}
             </p>
-            <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-              <span>
-                <span className={figureClass(loadingPartial)}>
-                  {formatCount(merged.sessions)} sessions
+            {estimates !== null ? (
+              <p className="inline-flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                <span>
+                  {topShare === undefined
+                    ? "No Claude Code or Codex usage"
+                    : `of the ${PROVIDER_PRESENTATION[topShare.provider].label} ${LIMIT_MEASURE_LABEL[estimates.measure]} limit · estimate`}
                 </span>
-                {metric === "cost" && " · API estimate"}
-              </span>
-              {metric === "cost" && merged.costQuality.unpricedShare > 0 && (
-                <Popover>
-                  <PopoverTrigger
-                    openOnHover
-                    render={<InlineButton tone="muted" />}
-                    aria-label="Unpriced usage details"
-                  >
-                    <InfoIcon className="size-3" aria-hidden />
-                  </PopoverTrigger>
-                  <PopoverPopup side="top" tooltipStyle>
-                    API estimate excludes {formatPercent(merged.costQuality.unpricedShare)} unpriced
-                    records.
-                  </PopoverPopup>
-                </Popover>
-              )}
-            </p>
+                <LimitEstimateDetails estimates={estimates} />
+              </p>
+            ) : (
+              <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <span>
+                  <span className={figureClass(loadingPartial)}>
+                    {formatCount(merged.sessions)} sessions
+                  </span>
+                  {metric === "cost" && " · API estimate"}
+                </span>
+                {metric === "cost" && merged.costQuality.unpricedShare > 0 && (
+                  <Popover>
+                    <PopoverTrigger
+                      openOnHover
+                      render={<InlineButton tone="muted" />}
+                      aria-label="Unpriced usage details"
+                    >
+                      <InfoIcon className="size-3" aria-hidden />
+                    </PopoverTrigger>
+                    <PopoverPopup side="top" tooltipStyle>
+                      API estimate excludes {formatPercent(merged.costQuality.unpricedShare)}{" "}
+                      unpriced records.
+                    </PopoverPopup>
+                  </Popover>
+                )}
+              </p>
+            )}
           </div>
 
           {showChatGptSharing ? (
@@ -700,7 +806,9 @@ function UsageOverview({
 
           {rankedProviders.map((provider) => {
             const totals = merged.providers.find((entry) => entry.provider === provider);
-            const share = metric === "cost" ? (totals?.costShare ?? 0) : (totals?.tokenShare ?? 0);
+            const providerShare =
+              metric === "tokens" ? (totals?.tokenShare ?? 0) : (totals?.costShare ?? 0);
+            const limitShareOfProvider = share(provider, totals?.costUsd ?? 0);
             const providerSessions = totals?.sessions ?? 0;
             const sessionLabel = `${formatCount(providerSessions)} ${
               providerSessions === 1 ? "session" : "sessions"
@@ -740,9 +848,13 @@ function UsageOverview({
                   >
                     {awaitingData
                       ? "-"
-                      : metric === "cost"
-                        ? formatUsd(totals?.costUsd ?? 0)
-                        : formatTokens(totals?.totalTokens ?? 0)}
+                      : estimates !== null
+                        ? limitShareOfProvider === null
+                          ? missingShareLabel(estimates, provider)
+                          : formatLimitShare(limitShareOfProvider)
+                        : metric === "cost"
+                          ? formatUsd(totals?.costUsd ?? 0)
+                          : formatTokens(totals?.totalTokens ?? 0)}
                   </dd>
                 </dl>
                 <p
@@ -752,9 +864,11 @@ function UsageOverview({
                     awaitingData && "invisible",
                   )}
                 >
-                  {metric === "cost"
-                    ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
-                    : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
+                  {estimates !== null
+                    ? shareRowDetail(estimates, provider, totals?.costUsd ?? 0)
+                    : metric === "cost"
+                      ? `${formatPercent(providerShare)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
+                      : `${formatPercent(providerShare)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
                 </p>
               </div>
             );
@@ -762,17 +876,42 @@ function UsageOverview({
         </div>
 
         <div className="flex min-w-0 flex-col gap-3">
-          <h2 className="text-sm font-medium text-foreground">
-            {shownHourly ? "Hourly" : "Daily"} {metric === "tokens" ? "processed tokens" : "cost"}
-          </h2>
+          {estimates === null ? (
+            <h2 className="text-sm font-medium text-foreground">
+              {shownHourly ? "Hourly" : "Daily"} {metric === "tokens" ? "processed tokens" : "cost"}
+            </h2>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+              <h2 className="text-sm font-medium text-foreground">
+                {shownHourly ? "Hourly" : "Daily"} share of {LIMIT_MEASURE_LABEL[estimates.measure]}{" "}
+                limit <span className="font-normal text-muted-foreground">· estimate</span>
+              </h2>
+              <ToggleGroup
+                aria-label="Limit window"
+                variant="segmented"
+                value={[estimates.measure]}
+                onValueChange={(next) => {
+                  const value = next[0];
+                  if (value === "weekly" || value === "session") estimates.onMeasureChange(value);
+                }}
+              >
+                <Toggle value="weekly">Weekly</Toggle>
+                <Toggle value="session">5-hour</Toggle>
+              </ToggleGroup>
+            </div>
+          )}
           <UsageProviderChart
-            providers={activeProviders}
+            providers={shownProviders}
             loadingProviders={chartLoadingProviders}
             days={days}
             daily={merged.daily}
             hours={hours}
             hourly={merged.hourly}
             metric={metric}
+            shareRates={estimates?.rates}
+            shareLabel={
+              estimates === null ? undefined : `${LIMIT_MEASURE_LABEL[estimates.measure]} limit`
+            }
             referenceTime={shownWindow.untilTime}
             resolution={shownHourly ? "hour" : "day"}
             timeZone={shownWindow.timeZone}
@@ -816,7 +955,41 @@ function UsageOverview({
         <section
           className={cn("grid gap-x-12 gap-y-8 lg:grid-cols-2", figureClass(loadingPartial))}
         >
-          {metric === "tokens" ? (
+          {estimates !== null ? (
+            // Each provider has its own pool, so its shares never add to another provider's.
+            typeParts.map((part) => {
+              const pool = (
+                <span className="text-xs text-muted-foreground">
+                  of {PROVIDER_PRESENTATION[part.provider].label}{" "}
+                  {LIMIT_MEASURE_LABEL[estimates.measure]} limit
+                </span>
+              );
+              return (
+                <Fragment key={part.provider}>
+                  <UsageShareBar
+                    label="Usage by type"
+                    aside={pool}
+                    segments={limitShareSegments(
+                      costTypeSegments(part.usage.categoryCost),
+                      part.usdPerWindow,
+                    )}
+                    format={formatLimitShare}
+                  />
+                  {part.usage.speedCost.fast + part.usage.speedCost.ultrafast > 0 ? (
+                    <UsageShareBar
+                      label="Usage by speed"
+                      aside={pool}
+                      segments={limitShareSegments(
+                        speedCostSegments(part.usage.speedCost),
+                        part.usdPerWindow,
+                      )}
+                      format={formatLimitShare}
+                    />
+                  ) : null}
+                </Fragment>
+              );
+            })
+          ) : metric === "tokens" ? (
             <UsageShareBar
               label="Tokens by type"
               segments={tokenTypeSegments(merged)}
@@ -868,79 +1041,48 @@ function UsageOverview({
         </div>
 
         {breakdown === "model" ? (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-right text-xs text-muted-foreground">
-                <th className="py-2 pr-3 pl-2 text-left font-normal">#</th>
-                <th className="w-full py-2 text-left font-normal">Model</th>
-                <th className="py-2 pl-6 font-normal">Cost</th>
-                <th className="hidden py-2 pl-6 font-normal sm:table-cell">Share</th>
-                <th className="py-2 pr-2 pl-6 font-normal">Tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              {breakdownModels.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="py-6 text-center text-muted-foreground">
-                    No activity in this window.
-                  </td>
-                </tr>
-              ) : (
-                breakdownModels.map((model, index) => {
-                  const key = `${model.provider}:${model.model}`;
-                  const value = metric === "tokens" ? model.totalTokens : model.costUsd;
-                  const hasBar = value > 0 && breakdownPeak > 0;
-                  const share = modelShare(model, metric === "tokens" ? "tokens" : "cost");
-                  const rowFigures = figureClass(loadingProviders.has(model.provider));
-                  return (
-                    <tr
-                      key={key}
-                      className="relative border-b border-border/50 text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-muted/50 has-focus-visible:bg-muted/50"
-                    >
-                      <td className="py-2.5 pr-3 pl-2 text-left text-xs">{index + 1}</td>
-                      <td className="py-2.5 text-left whitespace-normal">
-                        <button
-                          type="button"
-                          onClick={() => onSelectModel(key)}
-                          className={cn(
-                            "flex items-center gap-2 text-left text-foreground outline-none after:absolute after:inset-0",
-                            !hasBar && "py-1",
-                          )}
-                        >
-                          <ProviderMark provider={model.provider} className="size-3.5" />
-                          {model.model}
-                        </button>
-                        {hasBar ? (
-                          <div aria-hidden className={cn("mt-1.5 h-0.5 max-w-48", rowFigures)}>
-                            <div
-                              className="h-full rounded-full"
-                              style={{
-                                width: `max(0.5rem, ${(value / breakdownPeak) * 100}%)`,
-                                backgroundColor: PROVIDER_PRESENTATION[model.provider].color,
-                              }}
-                            />
-                          </div>
-                        ) : null}
-                      </td>
-                      <td className={cn("py-2.5 pl-6 text-foreground", rowFigures)}>
-                        {isModelCostUnknown(model) ? (
-                          <span className="text-muted-foreground">Unpriced</span>
-                        ) : (
-                          formatUsd(model.costUsd)
-                        )}
-                      </td>
-                      <td className={cn("hidden py-2.5 pl-6 sm:table-cell", rowFigures)}>
-                        {share === null ? "" : formatPercent(share)}
-                      </td>
-                      <td className={cn("py-2.5 pr-2 pl-6", rowFigures)}>
-                        {formatTokens(model.totalTokens)}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+          <UsageModelTable
+            headings={
+              estimates === null
+                ? { primary: "Cost", secondary: "Share" }
+                : {
+                    primary: MEASURE_HEADING[shareColumns.primary],
+                    secondary: MEASURE_HEADING[shareColumns.secondary],
+                  }
+            }
+            rows={breakdownModels.map((model) => {
+              const value = modelValue(model);
+              const rowShare = modelShare(model, metric === "tokens" ? "tokens" : "cost");
+              const unpriced = isModelCostUnknown(model);
+              return {
+                key: `${model.provider}:${model.model}`,
+                model: model.model,
+                mark: <ProviderMark provider={model.provider} className="size-3.5" />,
+                color: PROVIDER_PRESENTATION[model.provider].color,
+                barFraction: value > 0 && breakdownPeak > 0 ? value / breakdownPeak : null,
+                primary: unpriced ? (
+                  <span className="text-muted-foreground">Unpriced</span>
+                ) : estimates !== null ? (
+                  formatLimitShare(share(model.provider, model.costUsd, shareColumns.primary))
+                ) : (
+                  formatUsd(model.costUsd)
+                ),
+                secondary:
+                  estimates !== null
+                    ? unpriced
+                      ? ""
+                      : formatLimitShare(
+                          share(model.provider, model.costUsd, shareColumns.secondary),
+                        )
+                    : rowShare === null
+                      ? ""
+                      : formatPercent(rowShare),
+                tokens: formatTokens(model.totalTokens),
+                figuresClassName: figureClass(loadingProviders.has(model.provider)),
+              };
+            })}
+            onSelect={onSelectModel}
+          />
         ) : (
           <div
             className="overflow-x-auto outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
@@ -950,25 +1092,28 @@ function UsageOverview({
           >
             <table className="w-full text-sm whitespace-nowrap">
               <colgroup>
-                <col className="w-2/5" />
+                <col className="sm:w-2/5" />
               </colgroup>
               <thead>
                 <tr className="border-b border-border text-left text-xs text-muted-foreground">
                   <th className="py-2 pl-2 font-normal">{shownHourly ? "Hour" : "Day"}</th>
-                  {activeProviders.map((provider) => (
-                    <th key={provider} className="py-2 pl-4 text-right font-normal">
+                  {shownProviders.map((provider) => (
+                    <th key={provider} className="py-2 pl-2 text-right font-normal sm:pl-4">
                       {PROVIDER_PRESENTATION[provider].label}
                     </th>
                   ))}
-                  <th className="py-2 pl-4 text-right font-normal">Total</th>
-                  <th className="py-2 pr-2 pl-4 text-right font-normal">Tokens</th>
+                  {/* Shares of different providers' limits do not add up. */}
+                  {estimates === null ? (
+                    <th className="py-2 pl-2 text-right font-normal sm:pl-4">Total</th>
+                  ) : null}
+                  <th className="hidden py-2 pr-2 pl-4 text-right font-normal sm:table-cell">Tokens</th>
                 </tr>
               </thead>
               <tbody>
                 {breakdownPeriods.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={activeProviders.length + 3}
+                      colSpan={shownProviders.length + (estimates === null ? 3 : 2)}
                       className="py-6 text-center text-muted-foreground"
                     >
                       No activity in this window.
@@ -985,28 +1130,35 @@ function UsageOverview({
                           ? formatHourShort(period.hourStart, shownWindow.timeZone, hour12)
                           : formatDayShort(period.day)}
                       </td>
-                      {activeProviders.map((provider) => (
+                      {shownProviders.map((provider) => {
+                        const periodCost = period.byProvider.get(provider)?.costUsd ?? 0;
+                        return (
+                          <td
+                            key={provider}
+                            className={cn(
+                              "py-2 pl-2 text-right text-muted-foreground tabular-nums sm:pl-4",
+                              figureClass(loadingProviders.has(provider)),
+                            )}
+                          >
+                            {estimates === null
+                              ? formatUsd(periodCost)
+                              : formatLimitShare(share(provider, periodCost))}
+                          </td>
+                        );
+                      })}
+                      {estimates === null ? (
                         <td
-                          key={provider}
                           className={cn(
-                            "py-2 pl-4 text-right text-muted-foreground tabular-nums",
-                            figureClass(loadingProviders.has(provider)),
+                            "py-2 pl-2 text-right text-foreground tabular-nums sm:pl-4",
+                            figureClass(loadingPartial),
                           )}
                         >
-                          {formatUsd(period.byProvider.get(provider)?.costUsd ?? 0)}
+                          {formatUsd(period.costUsd)}
                         </td>
-                      ))}
+                      ) : null}
                       <td
                         className={cn(
-                          "py-2 pl-4 text-right text-foreground tabular-nums",
-                          figureClass(loadingPartial),
-                        )}
-                      >
-                        {formatUsd(period.costUsd)}
-                      </td>
-                      <td
-                        className={cn(
-                          "py-2 pr-2 pl-4 text-right text-muted-foreground tabular-nums",
+                          "hidden py-2 pr-2 pl-4 text-right text-muted-foreground tabular-nums sm:table-cell",
                           figureClass(loadingPartial),
                         )}
                       >
@@ -1021,6 +1173,76 @@ function UsageOverview({
         )}
       </section>
     </div>
+  );
+}
+
+const PLAN_AUTO = "auto";
+
+function LimitEstimateDetails({ estimates }: { readonly estimates: LimitEstimates }) {
+  return (
+    <Popover>
+      <PopoverTrigger
+        render={<InlineButton tone="muted" touchTarget="padded" />}
+        aria-label="How limits are estimated"
+      >
+        <InfoIcon className="size-3" aria-hidden />
+      </PopoverTrigger>
+      {/* Bounded by the viewport so it stays readable and scrollable on a phone. */}
+      <PopoverPopup side="bottom" align="start" width="md">
+        <div className="flex max-h-[min(70vh,32rem)] flex-col gap-4 overflow-y-auto text-xs text-muted-foreground">
+          <p>
+            Estimated from API-priced cost divided by what a full window holds. Models count by
+            their API price.
+          </p>
+          {[...estimates.byProvider.values()].map((estimate) => (
+            <div key={estimate.provider} className="flex flex-col gap-1.5">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <span className="flex items-center gap-2 text-sm text-foreground">
+                  <ProviderMark provider={estimate.provider} className="size-3.5" />
+                  {PROVIDER_PRESENTATION[estimate.provider].label}
+                </span>
+                <Select
+                  value={estimate.planSource === "setting" ? estimate.plan.id : PLAN_AUTO}
+                  onValueChange={(value) =>
+                    estimates.onPlanChange(
+                      estimate.provider,
+                      value === PLAN_AUTO || value === null ? undefined : value,
+                    )
+                  }
+                >
+                  <SelectTrigger
+                    aria-label={`${PROVIDER_PRESENTATION[estimate.provider].label} plan`}
+                    size="compact"
+                    variant="ghost"
+                    className="w-auto min-w-0"
+                  >
+                    <SelectValue>
+                      {estimate.planSource === "setting"
+                        ? estimate.plan.label
+                        : `${estimate.plan.label} · ${estimate.planSource === "detected" ? "detected" : "default"}`}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    <SelectItem value={PLAN_AUTO}>Detect automatically</SelectItem>
+                    {plansFor(estimate.provider as EstimateProvider).map((plan) => (
+                      <SelectItem key={plan.id} value={plan.id}>
+                        {plan.label}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </div>
+              <p>Weekly: {rateBasisText(estimate.rates.weekly, "weekly", estimate)}</p>
+              <p>5-hour: {rateBasisText(estimate.rates.session, "session", estimate)}</p>
+            </div>
+          ))}
+          <p>
+            Calibration compares the live limit reading with the cost T3 sees. Use outside these
+            environments, such as the Claude or ChatGPT apps, makes calibrated figures read low.
+          </p>
+        </div>
+      </PopoverPopup>
+    </Popover>
   );
 }
 

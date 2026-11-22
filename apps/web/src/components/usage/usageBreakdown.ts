@@ -66,6 +66,18 @@ export function tokenTypeSegments(
   ];
 }
 
+/**
+ * Converts one provider's cost segments into shares of that provider's limit window. Pools of
+ * different providers have different sizes, so their shares are never added together.
+ */
+export function limitShareSegments(
+  segments: readonly ShareSegment[],
+  usdPerWindow: number,
+): readonly ShareSegment[] {
+  if (!(usdPerWindow > 0)) return [];
+  return segments.map((segment) => ({ ...segment, value: segment.value / usdPerWindow }));
+}
+
 export function speedCostSegments(cost: SpeedCost): readonly ShareSegment[] {
   return [
     { label: "Standard", value: cost.standard, color: ink(34) },

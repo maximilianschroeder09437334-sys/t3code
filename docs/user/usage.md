@@ -108,6 +108,46 @@ show every model again.
 If the setting is invalid, Usage ignores it and shows every model, and the next save of any other
 setting removes it from `settings.json`.
 
+## Estimate share of subscription limits
+
+**Usage → Usage** shows Claude Code and Codex history as an estimated share of each provider's
+weekly and 5-hour limits instead of dollars or tokens, with the same periods, model breakdown and
+totals. Switch between **Weekly** and **5-hour** above the chart; each provider row and model shows
+the other window too. Press `u` on the Usage page to open it. Other providers have no estimate and
+do not appear in this view.
+
+Providers publish limits only as percentages, so each share is API-priced cost divided by the cost
+that fills a whole window. That figure comes from the first of these that is available:
+
+1. **Calibrated:** this account's open window, comparing its live used percentage with the cost
+   Usage sees from the window's start up to that reading. It needs at least 5% of a weekly or 10%
+   of a 5-hour window, a successful limit check from the last 15 minutes, and complete usage from
+   every environment that may use the same account. It is skipped when the selected environments
+   use more than one account, or when another environment's usage can't be matched to an account.
+   Transcripts don't record their account, so it is also skipped when a provider's history sits in
+   a home T3 can't tie to the account (a disabled or signed-out instance, or a default home kept
+   after the instance moved), and for a window that opened before this browser first saw the
+   account on that instance, such as right after switching accounts.
+2. **Earlier window:** the last calibration of the same account and plan from the past 21 days,
+   kept in this browser.
+3. **Public estimate:** third-party measurements for the plan, from November 2026. Claude Pro
+   ($20) about $165 a week and $13 per 5 hours, Max 5x ($100) about $1,250 and $125, Max 20x /
+   Ultra ($200) about $1,600 and $280. ChatGPT Plus about $55 and $7.50, Pro 100 about $350, Pro 200 about $700 and Pro 500
+   about $1,650 a week. Pro 5-hour figures are derived from the weekly figure.
+
+A window reads **No limit** only when a current, successful check of a plan known to drop that
+window, such as ChatGPT Pro's 5-hour window, lists no such window, and never when the selected
+environments use more than one account. Otherwise a missing window reads
+as an estimate or **Unknown**. Each provider's usage by type and speed is a share of that
+provider's own limit, so shares of different providers are never added together.
+
+Select the info icon under the headline to see which source each window uses and to set your plan.
+The plan is detected from the account's sign-in when possible. A Claude sign-in that only says Max,
+or no plan at all, counts as Max 5x ($100); Codex defaults to Plus. Models count by their API price, because providers publish no per-model weights for
+the shared limits. Usage that Usage cannot see, such as the Claude or ChatGPT apps or other
+machines, also fills the limits, so calibrated figures read low when you use those. These are
+estimates, not provider figures.
+
 ## Track subscription limits
 
 **Usage → Limits** pools every subscription account it can see per provider, so with several Codex

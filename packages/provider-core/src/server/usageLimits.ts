@@ -59,10 +59,13 @@ export function applyUsageLimitsUpdate(input: {
   const merged = new Map(previous?.windows.map((window) => [window.id, window] as const));
   // Codex repeats unchanged limits on token ticks; avoid allocating snapshots for no-ops.
   let changed = false;
+  const resent = new Map<string, ServerProviderUsageWindow>();
   for (const window of update.windows) {
     const existing = merged.get(window.id);
+    // A resent window is read now, so it drops any older observation time.
+    const { observedAt: _observedAt, ...fresh } = window;
     const next: ServerProviderUsageWindow = {
-      ...window,
+      ...fresh,
       usedPercent: clampPercent(window.usedPercent),
       ...(window.resetsAt === undefined && existing?.resetsAt !== undefined
         ? { resetsAt: existing.resetsAt }
@@ -71,14 +74,19 @@ export function applyUsageLimitsUpdate(input: {
         ? { windowDurationMins: existing.windowDurationMins }
         : {}),
     };
-    if (existing === undefined || !usageWindowEquals(existing, next)) {
-      merged.set(window.id, next);
-      changed = true;
-    }
+    resent.set(window.id, next);
+    if (existing === undefined || !usageWindowEquals(existing, next)) changed = true;
   }
   if (!changed && previous !== undefined) {
     return previous;
   }
+  // The snapshot takes the update's time, so a window the update omitted keeps the time it was
+  // actually read; otherwise an old percentage would look as current as the new ones.
+  for (const [id, window] of merged) {
+    if (resent.has(id) || previous === undefined) continue;
+    merged.set(id, { ...window, observedAt: window.observedAt ?? previous.checkedAt });
+  }
+  for (const [id, window] of resent) merged.set(id, window);
   const unavailable =
     previous === undefined ? { reason: "probeFailed" as const } : previous.unavailable;
   return {

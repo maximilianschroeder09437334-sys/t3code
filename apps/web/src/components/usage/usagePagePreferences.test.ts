@@ -32,6 +32,21 @@ describe("Usage page preferences", () => {
     expect(readUsagePagePreferences()).toEqual({ metric: "tokens", windowDays: 30 });
   });
 
+  it("round-trips the Usage view's window and plan choices", () => {
+    saveUsagePagePreferences({
+      metric: "share",
+      windowDays: 1,
+      limitMeasure: "session",
+      estimatePlans: { claude: "claude-ultra" },
+    });
+    expect(readUsagePagePreferences()).toEqual({
+      metric: "share",
+      windowDays: 1,
+      limitMeasure: "session",
+      estimatePlans: { claude: "claude-ultra" },
+    });
+  });
+
   // regression: #10189 an invalid saved usage selection was never replaced
   it.each([
     "not-json",

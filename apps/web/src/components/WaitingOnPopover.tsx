@@ -36,7 +36,7 @@ export interface WaitingOnWaiter {
  * Opens a wait target: its thread, a watched pull request in the pull request view, or the
  * waiter's timeline at the target's item.
  */
-export function useOpenWaitTarget() {
+function useOpenWaitTarget() {
   const navigate = useNavigate();
   return (route: WaitTargetRoute) => {
     if ("pullRequestUrl" in route) {
