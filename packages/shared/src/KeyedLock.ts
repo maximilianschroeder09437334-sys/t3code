@@ -1,11 +1,17 @@
 import * as Effect from "effect/Effect";
 import * as FiberSet from "effect/FiberSet";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 
 export interface KeyedLock<Key> {
   readonly withLock: <A, E, R>(key: Key, effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+  /** Runs `effect` only if `key` has no holder and no waiter; never waits. */
+  readonly tryWithLock: <A, E, R>(
+    key: Key,
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<Option.Option<A>, E, R>;
   readonly activeKeys: Effect.Effect<ReadonlyArray<Key>>;
 }
 
@@ -46,12 +52,35 @@ export const make = Effect.fn("KeyedLock.make")(function* <Key>(): Effect.fn.Ret
       return next;
     });
 
+  // The permit is taken before the entry is published, so no waiter can take it first.
+  const tryAcquire = (key: Key) =>
+    Effect.flatMap(Semaphore.make(1), (candidate) =>
+      Effect.andThen(
+        candidate.take(1),
+        Ref.modify(locks, (current) => {
+          if (current.has(key)) return [Option.none<Semaphore.Semaphore>(), current] as const;
+          const next = new Map(current);
+          next.set(key, { semaphore: candidate, users: 1 });
+          return [Option.some(candidate), next] as const;
+        }),
+      ),
+    );
+
   return {
     withLock: (key, effect) =>
       Effect.acquireUseRelease(
         acquire(key),
         (semaphore) => semaphore.withPermit(effect),
         () => release(key),
+      ),
+    tryWithLock: (key, effect) =>
+      Effect.acquireUseRelease(
+        tryAcquire(key),
+        (reserved) => (Option.isSome(reserved) ? Effect.asSome(effect) : Effect.succeedNone),
+        (reserved) =>
+          Option.isSome(reserved)
+            ? Effect.andThen(reserved.value.release(1), release(key))
+            : Effect.void,
       ),
     activeKeys: Effect.map(Ref.get(locks), (current) => Array.from(current.keys())),
   } satisfies KeyedLock<Key>;
