@@ -69,7 +69,10 @@ describe("applyUsageLimitsUpdate", () => {
     expect(next).not.toBe(published);
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, { ...weekly, observedAt: checkedAt }],
+      windows: [
+        { ...session, usedPercent: 55 },
+        { ...weekly, observedAt: checkedAt },
+      ],
     });
   });
 
@@ -129,7 +132,10 @@ describe("applyUsageLimitsUpdate", () => {
 
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, { ...weekly, observedAt: checkedAt }],
+      windows: [
+        { ...session, usedPercent: 55 },
+        { ...weekly, observedAt: checkedAt },
+      ],
       resetCredits,
       zeroSpendCap: true,
     });

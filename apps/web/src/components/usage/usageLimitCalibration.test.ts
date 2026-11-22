@@ -561,16 +561,16 @@ describe("transcript ownership", () => {
     // First sight is no proof either, and an unrecorded instance never calibrates.
     const unconfirmed: AccountLedger[] = [updateAccountLedger({}, one(), NOW - HOUR), {}];
     for (const accounts of unconfirmed) {
-      expect(run({ environments: one(), daily: settledA(), accounts }).rates.weekly).toMatchObject(
-        { blocked: "accountHistory" },
-      );
+      expect(run({ environments: one(), daily: settledA(), accounts }).rates.weekly).toMatchObject({
+        blocked: "accountHistory",
+      });
     }
     // Seen as A since before the window opened on 2026-11-17, it calibrates and keeps its stamp.
     const steady = updateAccountLedger({}, one(), earlier);
     expect(updateAccountLedger(steady, one(), NOW)).toBe(steady);
-    expect(run({ environments: one(), daily: settledA(), accounts: steady }).rates.weekly.basis).toBe(
-      "calibrated",
-    );
+    expect(
+      run({ environments: one(), daily: settledA(), accounts: steady }).rates.weekly.basis,
+    ).toBe("calibrated");
   });
 
   it("stores the account ledger and survives corrupt or blocked storage", () => {

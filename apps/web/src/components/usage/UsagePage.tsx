@@ -1106,7 +1106,9 @@ function UsageOverview({
                   {estimates === null ? (
                     <th className="py-2 pl-2 text-right font-normal sm:pl-4">Total</th>
                   ) : null}
-                  <th className="hidden py-2 pr-2 pl-4 text-right font-normal sm:table-cell">Tokens</th>
+                  <th className="hidden py-2 pr-2 pl-4 text-right font-normal sm:table-cell">
+                    Tokens
+                  </th>
                 </tr>
               </thead>
               <tbody>

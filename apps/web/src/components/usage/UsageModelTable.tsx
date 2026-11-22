@@ -35,9 +35,7 @@ export function UsageModelTable({
           <th className="hidden w-10 py-2 pr-3 pl-2 text-left font-normal sm:table-cell">#</th>
           <th className="py-2 pl-2 text-left font-normal sm:pl-0">Model</th>
           <th className="w-24 py-2 pl-3 font-normal sm:w-28 sm:pl-6">{headings.primary}</th>
-          <th className="hidden w-28 py-2 pl-6 font-normal sm:table-cell">
-            {headings.secondary}
-          </th>
+          <th className="hidden w-28 py-2 pl-6 font-normal sm:table-cell">{headings.secondary}</th>
           <th className="w-20 py-2 pr-2 pl-3 font-normal sm:w-28 sm:pl-6">Tokens</th>
         </tr>
       </thead>
@@ -87,9 +85,7 @@ export function UsageModelTable({
               <td className={cn("hidden py-2.5 pl-6 sm:table-cell", row.figuresClassName)}>
                 {row.secondary}
               </td>
-              <td className={cn("py-2.5 pr-2 pl-3 sm:pl-6", row.figuresClassName)}>
-                {row.tokens}
-              </td>
+              <td className={cn("py-2.5 pr-2 pl-3 sm:pl-6", row.figuresClassName)}>{row.tokens}</td>
             </tr>
           ))
         )}
