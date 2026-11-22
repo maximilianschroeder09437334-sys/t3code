@@ -318,10 +318,3 @@ export function resolveThreadWaits(input: {
   }
   return result;
 }
-
-/** Readiness from shell states: a snapshot is complete only while its stream is live. */
-export function environmentReadyFromShellStatus(
-  statusOf: (environmentId: EnvironmentId) => string | undefined,
-): (environmentId: EnvironmentId) => boolean {
-  return (environmentId) => statusOf(environmentId) === "live";
-}

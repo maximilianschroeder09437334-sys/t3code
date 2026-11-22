@@ -20,7 +20,7 @@ export interface WaitingOnWaiter {
 }
 
 /** Opens a wait target: its thread, or the waiter's timeline at the target's item. */
-export function useOpenWaitTarget() {
+function useOpenWaitTarget() {
   const navigate = useNavigate();
   return (route: WaitTargetRoute) => {
     void navigate({
