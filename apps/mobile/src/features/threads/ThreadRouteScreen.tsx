@@ -1033,10 +1033,12 @@ function ThreadRouteContent(
                 <ThreadHeader
                   title={selectedThread.title}
                   subtitle={threadSyncLabel ?? headerSubtitle}
+                  environmentLabel={selectedEnvironmentConnection?.environmentLabel}
                   gitControls={threadGitControlProps}
                   hasThreadCwd={selectedThreadCwd !== null}
                   inspectorMode={inspectorMode}
                   onOpenFilesInspector={handleOpenFilesInspector}
+                  onOpenGitInspector={handleOpenGitInspector}
                   onReturnToThread={props.onReturnToThread}
                 />
               )}

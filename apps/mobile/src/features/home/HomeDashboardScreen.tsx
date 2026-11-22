@@ -44,6 +44,7 @@ import { useThreadListNow } from "../threads/use-thread-list-now";
 import { HomeComposer } from "./HomeComposer";
 import { deriveMobileHomeRows } from "./homeDashboardRows";
 import { ThreadSwipeable } from "./thread-swipe-actions";
+import { ProjectFavicon } from "../../components/ProjectFavicon";
 
 const sectionColor: Record<HomeDashboardSection, string> = {
   needs: "text-warning-foreground",
@@ -213,10 +214,15 @@ export function HomeDashboardScreen(props: {
         <ScrollView horizontal showsHorizontalScrollIndicator={false} className="max-h-10">
           <View className="flex-row gap-2">
             {[
-              { key: "all", title: `All ${rows.length}` },
+              {
+                key: "all",
+                title: `All ${rows.length}`,
+                project: null as EnvironmentProject | null,
+              },
               ...projectsWithRows.map((project) => ({
                 key: scopedProjectKey(project.environmentId, project.id),
                 title: project.title,
+                project: project as EnvironmentProject | null,
               })),
             ].map((project) => (
               <Pressable
@@ -224,6 +230,22 @@ export function HomeDashboardScreen(props: {
                 onPress={() => setProjectKey(project.key)}
                 className={`rounded-full border px-3 py-2 ${projectKey === project.key ? "border-foreground" : "border-border"}`}
               >
+                {project.project ? (
+                  <ProjectFavicon
+                    environmentId={project.project.environmentId}
+                    projectTitle={project.project.title}
+                    workspaceRoot={project.project.workspaceRoot}
+                    faviconPath={project.project.faviconPath}
+                    projectIcon={project.project.projectIcon}
+                    size={16}
+                  />
+                ) : (
+                  <SymbolView
+                    name="square.grid.2x2"
+                    size={14}
+                    tintColorClassName="accent-icon-muted"
+                  />
+                )}
                 <Text className="text-xs text-foreground">{project.title}</Text>
               </Pressable>
             ))}
@@ -246,9 +268,32 @@ export function HomeDashboardScreen(props: {
                 const projectRows = groupRows.filter((row) => row.projectKey === key);
                 return (
                   <View key={key} className="gap-2">
-                    <Text className="text-xs text-foreground-secondary">
-                      {projectRows[0]?.projectName}
-                    </Text>
+                    <View className="flex-row items-center gap-1.5">
+                      {(() => {
+                        const project = props.projects.find(
+                          (item) => scopedProjectKey(item.environmentId, item.id) === key,
+                        );
+                        return project ? (
+                          <ProjectFavicon
+                            environmentId={project.environmentId}
+                            projectTitle={project.title}
+                            workspaceRoot={project.workspaceRoot}
+                            faviconPath={project.faviconPath}
+                            projectIcon={project.projectIcon}
+                            size={15}
+                          />
+                        ) : (
+                          <SymbolView
+                            name="folder"
+                            size={14}
+                            tintColorClassName="accent-icon-muted"
+                          />
+                        );
+                      })()}
+                      <Text className="text-xs text-foreground-secondary">
+                        {projectRows[0]?.projectName}
+                      </Text>
+                    </View>
                     {projectRows.map((row) => (
                       <HomeDashboardRow
                         key={row.thread.id}

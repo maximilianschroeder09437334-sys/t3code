@@ -29,6 +29,7 @@ import {
   resolveSelectableModelSelection,
 } from "../../lib/modelOptions";
 import { scopedProjectKey } from "../../lib/scopedEntities";
+import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { appAtomRegistry } from "../../state/atom-registry";
 import {
   composerAttachmentUploadBlockReason,
@@ -238,12 +239,23 @@ export function HomeComposer(props: {
         accessibilityHint="Chooses the project the new thread starts in"
         className="flex-row items-center gap-1.5 self-start rounded-full px-2 py-1.5 active:opacity-65"
       >
-        <SymbolView
-          name="folder"
-          size={13}
-          tintColorClassName="accent-icon-muted"
-          type="monochrome"
-        />
+        {selectedProject ? (
+          <ProjectFavicon
+            environmentId={selectedProject.environmentId}
+            projectTitle={selectedProject.title}
+            workspaceRoot={selectedProject.workspaceRoot}
+            faviconPath={selectedProject.faviconPath}
+            projectIcon={selectedProject.projectIcon}
+            size={18}
+          />
+        ) : (
+          <SymbolView
+            name="folder"
+            size={13}
+            tintColorClassName="accent-icon-muted"
+            type="monochrome"
+          />
+        )}
         <Text className="text-xs font-t3-medium text-foreground" numberOfLines={1}>
           {selectedProject?.title ?? "Choose project"}
         </Text>
