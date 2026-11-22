@@ -14,6 +14,7 @@ import {
   pendingThreadCreationShell,
   resolvePendingThreadCreation,
   selectThreadCreationDetail,
+  threadCreationSettlement,
   withLaunchingThreads,
   type PendingThreadCreation,
 } from "./pending-thread-creation";
@@ -215,5 +216,58 @@ describe("withLaunchingThreads", () => {
       },
     };
     expect(launch([started])[0]).toBe(started);
+  });
+});
+
+describe("threadCreationSettlement", () => {
+  const threadKey = `${creation.environmentId}:${creation.threadId}`;
+  const settle = (
+    input: Partial<Omit<Parameters<typeof threadCreationSettlement>[0], "message">>,
+  ) =>
+    threadCreationSettlement({
+      message: creation,
+      queuedMessagesByThreadKey: {},
+      outcomes: {},
+      shellExists: false,
+      restoredDraftHasContent: false,
+      ...input,
+    });
+
+  it("waits while the creation is queued, even once its shell arrives early", () => {
+    expect(settle({ queuedMessagesByThreadKey: { [threadKey]: [creation] } })).toBeNull();
+    expect(
+      settle({ queuedMessagesByThreadKey: { [threadKey]: [creation] }, shellExists: true }),
+    ).toBeNull();
+  });
+
+  it("settles on the server's acknowledgement or rejection", () => {
+    const delivered = { kind: "delivered", message: creation } as const;
+    const failed = { kind: "failed", message: creation, reason: "Rejected" } as const;
+    expect(
+      settle({
+        queuedMessagesByThreadKey: { [threadKey]: [creation] },
+        outcomes: { [threadKey]: delivered },
+      }),
+    ).toBe(delivered);
+    expect(settle({ outcomes: { [threadKey]: failed } })).toBe(failed);
+  });
+
+  it("ignores an outcome left by an earlier send to the same thread", () => {
+    const earlier = { ...creation, messageId: MessageId.make("message-0") };
+    expect(
+      settle({
+        queuedMessagesByThreadKey: { [threadKey]: [creation] },
+        outcomes: { [threadKey]: { kind: "failed", message: earlier, reason: "Rejected" } },
+      }),
+    ).toBeNull();
+  });
+
+  it("reads an unqueued creation whose shell exists as delivered", () => {
+    expect(settle({ shellExists: true })).toEqual({ kind: "delivered", message: creation });
+  });
+
+  it("waits for a rejection being recorded, and reads anything else unqueued as dropped", () => {
+    expect(settle({ restoredDraftHasContent: true })).toBeNull();
+    expect(settle({})).toEqual({ kind: "dropped" });
   });
 });

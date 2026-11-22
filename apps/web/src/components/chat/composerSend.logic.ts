@@ -118,3 +118,18 @@ export function homeComposerSendOpenTarget(input: {
   if (!input.homeComposerOnly || !input.turnStartSucceeded || !input.stillOnScreen) return null;
   return input.submissionIntent === "background" ? null : input.sentDraftThreadRef;
 }
+
+/**
+ * Opens the thread once its shell reaches this client. Home's view holds the sent message, and
+ * the thread route mounts its own view, which would show an empty draft until the shell arrived.
+ * A shell that never arrives, or a user who left Home meanwhile, leaves them where they are.
+ */
+export async function openThreadOnceShellArrives(input: {
+  readonly waitForShell: () => Promise<boolean>;
+  readonly stillOnScreen: () => boolean;
+  readonly open: () => void;
+}): Promise<boolean> {
+  if (!(await input.waitForShell()) || !input.stillOnScreen()) return false;
+  input.open();
+  return true;
+}

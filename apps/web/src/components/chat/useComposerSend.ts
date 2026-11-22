@@ -63,6 +63,7 @@ import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { newMessageId, newThreadId } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { buildThreadRouteParams } from "../../threadRoutes";
+import { waitForThreadShell } from "../../state/entities";
 import {
   beginBackgroundDraftSubmissionByRef,
   clearBackgroundDraftSubmissionByRef,
@@ -102,6 +103,7 @@ import {
   composerDraftContentChanged,
   homeComposerSendOpenTarget,
   loadBalancingSendWarning,
+  openThreadOnceShellArrives,
   multipleModelSendBlock,
   referencedThreadContexts,
 } from "./composerSend.logic";
@@ -1557,10 +1559,14 @@ export function useComposerSend(input: ComposerSendInput) {
       stillOnScreen: currentRouteThreadKeyRef.current === routeThreadKey,
     });
     if (homeOpenTarget) {
-      // The thread route shows the sent draft until its shell arrives, as from the sidebar.
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(homeOpenTarget),
+      void openThreadOnceShellArrives({
+        waitForShell: () => waitForThreadShell(homeOpenTarget),
+        stillOnScreen: () => currentRouteThreadKeyRef.current === routeThreadKey,
+        open: () =>
+          void navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(homeOpenTarget),
+          }),
       });
     }
   };

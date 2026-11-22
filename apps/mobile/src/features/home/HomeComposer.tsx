@@ -10,8 +10,9 @@ import {
   type MessageId,
 } from "@t3tools/contracts";
 import { threadContextsOutsideEnvironment } from "@t3tools/shared/composerContextReferences";
+import { useNavigation } from "@react-navigation/native";
 import { AsyncResult } from "effect/reactivity";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dimensions, Platform, Pressable, View, type ViewInstance } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSharedValue } from "react-native-reanimated";
@@ -48,6 +49,10 @@ import {
   scheduleUnusedComposerAttachmentCleanup,
 } from "../../state/use-composer-drafts";
 import { useRemoteEnvironmentRuntime } from "../../state/use-remote-environment-registry";
+import {
+  discardRestoredThreadCreation,
+  waitForThreadCreation,
+} from "../../state/wait-for-thread-creation";
 import { ComposerPopoverHost } from "../threads/ComposerPopoverHost";
 import { draftThreadShell } from "../threads/draft-thread-shell";
 import { useNewTaskFlow } from "../threads/new-task-flow-provider";
@@ -57,7 +62,8 @@ import { ThreadComposer } from "../threads/ThreadComposer";
 /**
  * Home's bottom bar: a project picker above the thread screen's own composer. It edits a
  * new-task draft of the Home flow, so nothing is created until Send, which queues the
- * thread with this message as its first one (as the new-thread screen does) and opens it.
+ * thread with this message as its first one (as the new-thread screen does). Home keeps the
+ * draft until the server has created the thread, then opens it if Home is still on screen.
  */
 export function HomeComposer(props: {
   readonly projects: ReadonlyArray<EnvironmentProject>;
@@ -69,6 +75,15 @@ export function HomeComposer(props: {
   readonly onHeightChange: (height: number) => void;
 }) {
   const flow = useNewTaskFlow();
+  const navigation = useNavigation();
+  const mountedRef = useRef(true);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records whether Home's composer is still mounted, which a send checks before opening the thread it created
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const selectedProject = flow.selectedProject;
   const environmentId = selectedProject?.environmentId ?? null;
   const [creationMetadata, setCreationMetadata] = useState(makeTurnCommandMetadata);
@@ -186,11 +201,11 @@ export function HomeComposer(props: {
         !environmentConnected || uploading ? null : flow.currentCheckoutBranchName,
     });
     if (!message) return null;
-    // Persist locally before clearing the draft; the outbox creates the thread.
+    // Persist locally, then keep the draft (locked) until the outbox's server create settles.
     flow.setSubmitting(true);
     const queued = await settlePromise(() => enqueueThreadOutboxMessage(message));
-    flow.setSubmitting(false);
     if (AsyncResult.isFailure(queued)) {
+      flow.setSubmitting(false);
       const error = squashAtomCommandFailure(queued);
       Dialog.alert(
         "Could not start thread",
@@ -199,6 +214,18 @@ export function HomeComposer(props: {
       return null;
     }
     editorRef.current?.blur();
+    const created = await waitForThreadCreation(message);
+    flow.setSubmitting(false);
+    if (created.kind !== "delivered") {
+      // Those ids belong to the send that did not start; the next send starts a new thread.
+      setCreationMetadata(makeTurnCommandMetadata());
+      if (created.kind === "failed") {
+        discardRestoredThreadCreation(message);
+        Dialog.alert("Could not start thread", created.reason);
+      }
+      return null;
+    }
+    // From here on this runs even after Home closed, so the draft never keeps a sent message.
     abortComposerDraftOperations(draftKey);
     const sentDraft = getComposerDraftSnapshot(draftKey);
     clearComposerDraftContent(draftKey, {
@@ -210,7 +237,10 @@ export function HomeComposer(props: {
     // The next message on Home starts a fresh draft and thread.
     updateNewTaskFlowState(HOME_COMPOSER_FLOW_KEY, { draftKey: null });
     setCreationMetadata(makeTurnCommandMetadata());
-    props.onThreadStarted({ environmentId: message.environmentId, threadId: message.threadId });
+    // Opening it after the user left Home would replace where they went.
+    if (mountedRef.current && navigation.isFocused()) {
+      props.onThreadStarted({ environmentId: message.environmentId, threadId: message.threadId });
+    }
     return message.messageId;
   }
 

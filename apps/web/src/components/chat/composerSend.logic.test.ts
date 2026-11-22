@@ -11,6 +11,7 @@ import {
   homeComposerSendOpenTarget,
   loadBalancingSendWarning,
   multipleModelSendBlock,
+  openThreadOnceShellArrives,
   referencedThreadContexts,
 } from "./composerSend.logic";
 
@@ -197,5 +198,57 @@ describe("homeComposerSendOpenTarget", () => {
   it("leaves ordinary thread and draft composers to their routes", () => {
     expect(homeComposerSendOpenTarget({ ...homeSend, homeComposerOnly: false })).toBeNull();
     expect(homeComposerSendOpenTarget({ ...homeSend, sentDraftThreadRef: null })).toBeNull();
+  });
+});
+
+describe("openThreadOnceShellArrives", () => {
+  function shellGate() {
+    let arrive!: (arrived: boolean) => void;
+    const shell = new Promise<boolean>((resolve) => {
+      arrive = resolve;
+    });
+    return { waitForShell: () => shell, arrive };
+  }
+
+  it("opens the thread only after its shell arrives, not when the send returns", async () => {
+    const { waitForShell, arrive } = shellGate();
+    const opened: string[] = [];
+    const opening = openThreadOnceShellArrives({
+      waitForShell,
+      stillOnScreen: () => true,
+      open: () => opened.push("thread"),
+    });
+    await Promise.resolve();
+    expect(opened).toEqual([]);
+    arrive(true);
+    await expect(opening).resolves.toBe(true);
+    expect(opened).toEqual(["thread"]);
+  });
+
+  it("stays put when the user left Home while the shell was on its way", async () => {
+    const { waitForShell, arrive } = shellGate();
+    let onHome = true;
+    const opened: string[] = [];
+    const opening = openThreadOnceShellArrives({
+      waitForShell,
+      stillOnScreen: () => onHome,
+      open: () => opened.push("thread"),
+    });
+    onHome = false;
+    arrive(true);
+    await expect(opening).resolves.toBe(false);
+    expect(opened).toEqual([]);
+  });
+
+  it("stays on Home when the shell never reaches this client", async () => {
+    const opened: string[] = [];
+    await expect(
+      openThreadOnceShellArrives({
+        waitForShell: async () => false,
+        stillOnScreen: () => true,
+        open: () => opened.push("thread"),
+      }),
+    ).resolves.toBe(false);
+    expect(opened).toEqual([]);
   });
 });

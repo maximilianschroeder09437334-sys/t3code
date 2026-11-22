@@ -114,6 +114,38 @@ export function clearPendingThreadCreationOutcome(threadKey: string): void {
   appAtomRegistry.set(pendingThreadCreationOutcomesAtom, next);
 }
 
+export type ThreadCreationSettlement = PendingThreadCreationOutcome | { readonly kind: "dropped" };
+
+/**
+ * How the outbox settled the creation it queued for `message`, or null while it is still pending.
+ * "dropped" means it left the outbox unsent: deleted from the list, or its project is gone.
+ */
+export function threadCreationSettlement(input: {
+  readonly message: QueuedThreadMessage;
+  readonly queuedMessagesByThreadKey: Readonly<
+    Record<string, ReadonlyArray<QueuedThreadMessage> | undefined>
+  >;
+  readonly outcomes: Readonly<Record<string, PendingThreadCreationOutcome | undefined>>;
+  readonly shellExists: boolean;
+  readonly restoredDraftHasContent: boolean;
+}): ThreadCreationSettlement | null {
+  const key = scopedThreadKey(input.message.environmentId, input.message.threadId);
+  const outcome = input.outcomes[key];
+  if (outcome?.message.messageId === input.message.messageId) return outcome;
+  if (
+    input.queuedMessagesByThreadKey[key]?.some(
+      (queued) => queued.messageId === input.message.messageId,
+    )
+  ) {
+    return null;
+  }
+  // Delivery records its outcome before unqueueing, but a thread that already ran collects it.
+  if (input.shellExists) return { kind: "delivered", message: input.message };
+  // A rejection restores the draft before unqueueing and records "failed" just after.
+  if (input.restoredDraftHasContent) return null;
+  return { kind: "dropped" };
+}
+
 /** Thread shell and empty detail precede the prompt: worktree setup runs between creation and turn start. */
 function isPendingThreadCreationVisible(input: {
   readonly creationMessageId: string;
