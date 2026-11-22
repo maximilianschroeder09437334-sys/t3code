@@ -152,6 +152,7 @@ function LimitEstimatesValue({
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stamps newly seen accounts once, so their since time stays fixed across renders and visits
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- the merged ledger is read from storage, so it can only be set after the write
     if (accountsKey !== "") persistAccounts();
   }, [accountsKey]);
 

@@ -350,7 +350,7 @@ export function calibrateWindow(input: {
  * When one window was read. A sparse update keeps an omitted window's older time, so the
  * snapshot time alone would pair an old percentage with newer cost.
  */
-export function windowObservedAtMs(
+function windowObservedAtMs(
   window: ServerProviderUsageWindow,
   observation: LimitObservation,
 ): number {

@@ -1,10 +1,8 @@
 // @effect-diagnostics globalDate:off -- Limit readings and usage reads are wall-clock instants.
 /**
- * Decides which live limit reading and which cost history may calibrate a provider's limits.
- * A reading belongs to one account, so cost counts only from environments known to use that
- * account, and only once every such environment has settled on complete data. Transcripts carry
- * no account, so history counts only from homes that can be tied to the account: no extra or
- * signed-out homes, and only since this browser has seen the account on each instance.
+ * Decides which live limit reading and cost history may calibrate a provider's limits: cost only
+ * from settled environments on that account, and only from homes tied to it (no extra or
+ * signed-out homes) since this browser first saw the account on each instance.
  */
 import {
   USAGE_CONTRACT_VERSION,
