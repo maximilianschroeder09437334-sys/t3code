@@ -12,6 +12,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import {
+  displayParentThreadId,
   isListedThreadLineage,
   isLiveSubagentShell,
   isOlderSettledThreadShell,
@@ -179,7 +180,7 @@ function buildActiveShellSnapshot(input: {
 
 type ShellTrimRow = Pick<
   OrchestrationV2ThreadShell,
-  "id" | "projectId" | "lineage" | "settledOverride" | "settledAt"
+  "id" | "projectId" | "lineage" | "ownerThreadId" | "settledOverride" | "settledAt"
 > & { readonly hasRemoteTasks?: boolean };
 
 /**
@@ -207,7 +208,9 @@ function shellTrimFacts(rows: ReadonlyArray<ShellTrimRow>): ShellTrimFacts {
     if (row.hasRemoteTasks === true) remoteTaskParentIds.add(row.id);
     if (row.lineage.relationshipToParent === "subagent") {
       subagentThreadIds.add(row.id);
-      if (row.lineage.parentThreadId) subagentParentIds.add(row.lineage.parentThreadId);
+      // A migrated child keeps its owner as a subagent parent (the owner shows it, plan §7).
+      const parentId = displayParentThreadId(row);
+      if (parentId) subagentParentIds.add(parentId);
     } else if (
       isListedThreadLineage(row.lineage) &&
       row.settledOverride === "settled" &&
@@ -237,12 +240,13 @@ function shellTrimFacts(rows: ReadonlyArray<ShellTrimRow>): ShellTrimFacts {
 }
 
 function hiddenChildAncestorIds(
-  threads: ReadonlyArray<Pick<OrchestrationV2ThreadShell, "lineage">>,
+  threads: ReadonlyArray<Pick<OrchestrationV2ThreadShell, "lineage" | "ownerThreadId">>,
 ) {
   const ancestorIds = new Set<string>();
   for (const thread of threads) {
     if (isListedThreadLineage(thread.lineage)) continue;
     if (thread.lineage.parentThreadId !== null) ancestorIds.add(thread.lineage.parentThreadId);
+    if (thread.ownerThreadId !== undefined) ancestorIds.add(thread.ownerThreadId);
     ancestorIds.add(thread.lineage.rootThreadId);
   }
   return ancestorIds;
@@ -259,12 +263,19 @@ const OPEN_RUN_STATUSES: ReadonlySet<OrchestrationV2ThreadShell["status"]> = new
 /**
  * The thread, other than its parent, whose agent started a subagent's open run. Clients show that
  * sender Waiting on the run (`waitDriverOf` in client-runtime threadWait), so a trim keeps it,
- * even when the sender is a completed subagent with nothing else holding it. Display only.
+ * even when the sender is a completed subagent with nothing else holding it. Display only. A
+ * migrated child's owner, lineage parent and former owners all count as its parent there.
  */
 function openRunSenderId(thread: OrchestrationV2ThreadShell): string | null {
   if (thread.lineage.relationshipToParent !== "subagent") return null;
   const sender = thread.latestRunSenderThreadId ?? null;
-  if (sender === null || sender === thread.id || sender === thread.lineage.parentThreadId) {
+  if (
+    sender === null ||
+    sender === thread.id ||
+    sender === thread.lineage.parentThreadId ||
+    sender === thread.ownerThreadId ||
+    thread.formerOwnerThreadIds?.includes(sender) === true
+  ) {
     return null;
   }
   const open = (thread.activityRunStatus ?? null) !== null || OPEN_RUN_STATUSES.has(thread.status);

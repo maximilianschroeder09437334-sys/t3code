@@ -152,6 +152,10 @@ export interface EnvironmentThreadShell {
   readonly branch: string | null;
   readonly worktreePath: string | null;
   readonly lineage: OrchestrationV2ThreadShell["lineage"];
+  /** A migrated subagent's owner, which it shows under; absent otherwise and from older servers. */
+  readonly ownerThreadId?: ThreadId;
+  /** A migrated subagent's lineage parent and earlier owners; their sends count as the owner's. */
+  readonly formerOwnerThreadIds?: ReadonlyArray<ThreadId>;
   readonly forkedFrom: OrchestrationV2ThreadShell["forkedFrom"];
   readonly linkOrigin: OrchestrationV2ThreadShell["linkOrigin"] | null;
   /** The thread in a linked environment that delegated this one, if one did. */
@@ -324,6 +328,10 @@ export function presentThreadShell(
     linkedPullRequest: thread.linkedPullRequest ?? null,
     branchPullRequest: thread.branchPullRequest ?? null,
     lineage: thread.lineage,
+    ...(thread.ownerThreadId === undefined ? {} : { ownerThreadId: thread.ownerThreadId }),
+    ...(thread.formerOwnerThreadIds === undefined
+      ? {}
+      : { formerOwnerThreadIds: thread.formerOwnerThreadIds }),
     forkedFrom: thread.forkedFrom,
     linkOrigin: thread.linkOrigin ?? null,
     delegatedFrom: thread.delegatedFrom ?? null,

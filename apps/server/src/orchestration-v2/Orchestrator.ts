@@ -16268,6 +16268,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             payload: { ...item, status: "completed", result, completedAt: now, updatedAt: now },
           });
       }
+      // Display only: senders among these count as the owner's (client Waiting normalisation).
+      const formerOwnerThreadIds = [
+        ...new Set([
+          ...(child.thread.lineage.parentThreadId === null
+            ? []
+            : [child.thread.lineage.parentThreadId]),
+          ...(child.thread.ownership?.formerOwnerThreadIds ?? []),
+          predecessor.id,
+        ]),
+      ].filter((threadId) => threadId !== successor.id);
       yield* metadata({
         ...child.thread,
         ownership: {
@@ -16275,6 +16285,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           transferId: command.transferId,
           anchorTaskId: anchorId,
           at: now,
+          formerOwnerThreadIds,
         },
       });
     }

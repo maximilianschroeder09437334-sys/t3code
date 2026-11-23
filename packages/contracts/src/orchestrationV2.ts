@@ -197,6 +197,17 @@ export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLin
 export const isListedThreadLineage = (lineage: OrchestrationV2AppThreadLineage): boolean =>
   lineage.relationshipToParent !== "subagent" && lineage.sideChat !== true;
 
+/**
+ * The thread a subagent shows under: its owner after a takeover, else its lineage parent. A thread
+ * reads `ownership`, a shell `ownerThreadId`; side chats and forks are never migrated.
+ */
+export const displayParentThreadId = (thread: {
+  readonly lineage: OrchestrationV2AppThreadLineage;
+  readonly ownerThreadId?: ThreadId | undefined;
+  readonly ownership?: { readonly ownerThreadId: ThreadId } | undefined;
+}): ThreadId | null =>
+  thread.ownerThreadId ?? thread.ownership?.ownerThreadId ?? thread.lineage.parentThreadId;
+
 export const OrchestrationV2ContextTransferType = Schema.Literals([
   "fork",
   "provider_handoff",
@@ -547,6 +558,8 @@ export const OrchestrationV2ThreadOwnership = Schema.Struct({
   transferId: TrimmedNonEmptyString,
   anchorTaskId: NodeId,
   at: Schema.DateTimeUtc,
+  /** Display only: the lineage parent and every earlier owner, appended per takeover commit. */
+  formerOwnerThreadIds: Schema.optional(Schema.Array(ThreadId)),
 });
 export type OrchestrationV2ThreadOwnership = typeof OrchestrationV2ThreadOwnership.Type;
 
@@ -2373,6 +2386,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   lineage: OrchestrationV2AppThreadLineage,
   /** The thread that owns this subagent after a takeover, when it differs from the lineage parent. Absent from older servers. */
   ownerThreadId: Schema.optional(ThreadId),
+  /** The lineage parent and earlier owners of a migrated subagent: their sends count as the owner's. Absent from older servers. */
+  formerOwnerThreadIds: Schema.optional(Schema.Array(ThreadId)),
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),

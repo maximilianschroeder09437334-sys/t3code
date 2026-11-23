@@ -15,6 +15,7 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadShell,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -22,8 +23,10 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { classifyHomeNotification } from "@t3tools/shared/homeNotificationRules";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -61,6 +64,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
+import { activeShellRowsForSubscriber } from "./ShellStream.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 
@@ -2078,3 +2082,270 @@ it.effect("6 fresh processes: an attempt that crashed before its commit expires;
     yield* thirdProcessAddsNothing(inProcess, s.predecessor, s.child, runId);
   }).pipe(Effect.scoped),
 );
+
+/**
+ * WP4 display (plan §7, §9 tests 10 and 14), against the real shell builders. "Shown under" is
+ * plan §7's `displayParentThreadId` written out, so this file still loads on cc15112571.
+ */
+const shownUnder = (shell: {
+  readonly lineage: Thread["lineage"];
+  readonly ownerThreadId?: ThreadId | undefined;
+}) => shell.ownerThreadId ?? shell.lineage.parentThreadId;
+
+/** The Home push decision for a shell, with the inputs WebPushNotifications.publishThread passes. */
+const pushEventFor = (shell: OrchestrationV2ThreadShell) =>
+  classifyHomeNotification({
+    threadId: shell.id,
+    runId: shell.latestRunId,
+    isChild: shell.lineage.relationshipToParent === "subagent",
+    sideChat: shell.lineage.sideChat === true,
+    snoozed: false,
+    settled: shell.settledOverride === "settled",
+    needsYou: shell.homeNeedsYou === true,
+    askText: shell.homeAskText?.trim() || null,
+    turnCompleted: shell.status === "completed" && shell.activityRunStatus == null,
+    hasRunningChildren: (shell.pendingBackgroundTasks?.length ?? 0) > 0,
+    waiting:
+      shell.homeFirstNextStep?.startsWith("T3: WAIT on ") === true ||
+      shell.blockedOnThreadWait === true,
+    hasAutoWait: false,
+    handedOff: shell.homeHandedOff === true,
+    doneText: shell.homeDoneText ?? null,
+  });
+
+/** Ends a thread's latest run, or seeds and ends a new one (a wake turn), as the provider would. */
+const endTurn = (threadId: ThreadId, options: { readonly newRun?: string } = {}) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const latest = (yield* orchestrator.getThreadProjection(threadId)).runs.toSorted(
+      (a, b) => b.ordinal - a.ordinal,
+    )[0]!;
+    const run =
+      options.newRun === undefined
+        ? latest
+        : {
+            ...latest,
+            id: RunId.make(options.newRun),
+            ordinal: latest.ordinal + 1,
+            userMessageId: MessageId.make(`${options.newRun}:message`),
+            requestedAt: now,
+            startedAt: now,
+          };
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`end-turn:${run.id}`),
+          type: "run.updated",
+          threadId,
+          runId: run.id,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: { ...run, status: "completed", completedAt: now },
+        },
+      ],
+    });
+    return run.id;
+  });
+
+it.layer(layerTest)("thread takeover display (WP4)", (it) => {
+  it.effect("10: the moved child shows under the successor, which waits on it; P does not", () =>
+    Effect.gen(function* () {
+      const { predecessor, successor, child } = yield* setup("t10");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      // C's own subagent G, created before the move: it follows C under S.
+      const childRun = (yield* orchestrator.getThreadProjection(child)).runs[0]!;
+      yield* orchestrator.dispatch({
+        type: "delegated_task.request",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("t10-grandchild"),
+        parentThreadId: child,
+        parentRunId: childRun.id,
+        parentNodeId: childRun.rootNodeId,
+        task: "Look deeper.",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        completionWake: "always",
+      });
+      const grandchild = (yield* orchestrator.getThreadProjection(child)).subagents.find(
+        (task) => task.childThreadId !== null,
+      )!.childThreadId!;
+
+      yield* takeover(predecessor, successor);
+      // [G] while S's own turn runs it is working, as any parent with a running child is (.23).
+      assert.equal((yield* orchestrator.getThreadShell(successor))?.waitPhase, "working");
+
+      yield* endTurn(successor);
+      const sqlShells = (yield* store.getShellSnapshot({ location: "active" })).threads;
+      const sqlShell = (id: ThreadId) => sqlShells.find((shell) => shell.id === id)!;
+      for (const read of ["in-memory", "sql"] as const) {
+        const shellOf = (id: ThreadId) =>
+          read === "sql"
+            ? Effect.succeed(sqlShell(id))
+            : Effect.map(orchestrator.getThreadShell(id), (shell) => shell!);
+        // [F] C is S's direct subagent in the shell rows both builders send; G stays under C.
+        assert.equal(shownUnder(yield* shellOf(child)), successor, `${read}: C under S`);
+        assert.equal(shownUnder(yield* shellOf(grandchild)), child, `${read}: G under C`);
+        // [F] S waits on its subagent C once its turn ended; [G] P does not show C.
+        const successorShell = yield* shellOf(successor);
+        assert.isTrue(
+          (successorShell.waitingOn ?? []).some(
+            (target) => target.threadId === child && target.source === "awaited_child",
+          ),
+          `${read}: S waits on C`,
+        );
+        assert.equal(successorShell.waitPhase, "waiting", `${read}: S's phase`);
+        assert.isFalse(
+          ((yield* shellOf(predecessor)).waitingOn ?? []).some(
+            (target) => target.threadId === child,
+          ),
+          `${read}: P does not wait on C`,
+        );
+      }
+      // [N] the former owners the client normalises senders over.
+      assert.deepEqual(sqlShell(child).formerOwnerThreadIds, [predecessor]);
+      // [F] a trimmed subscriber snapshot keeps C and its owner S, with C shown under S.
+      const trimmed = activeShellRowsForSubscriber(sqlShells, true).threads;
+      assert.isTrue(trimmed.some((shell) => shell.id === successor));
+      assert.equal(shownUnder(trimmed.find((shell) => shell.id === child)!), successor);
+
+      // [F] the family read for S (idle subagents a trimmed shell leaves out) returns C and G.
+      const family = (yield* store.getShellSnapshot({ location: "active", familyOf: successor }))
+        .threads;
+      assert.includeMembers(
+        family.map((shell) => shell.id),
+        [successor, child, grandchild],
+        "S's family holds the moved child and its subagent",
+      );
+    }),
+  );
+
+  it.effect("14: provider-native and command work stay on the predecessor", () =>
+    Effect.gen(function* () {
+      const { predecessor, successor, predecessorRunId } = yield* setup("t14-native");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const nodeId = NodeId.make(`root:${predecessor}`);
+      const base = {
+        threadId: predecessor,
+        runId: predecessorRunId,
+        nodeId,
+        providerThreadId: ProviderThreadId.make(`provider:${predecessor}`),
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        status: "running",
+        title: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      } as const;
+      const commandItem = TurnItemId.make("t14-native:command");
+      const nativeItem = TurnItemId.make("t14-native:subagent");
+      const nativeTask = NodeId.make("t14-native:task");
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("t14-native:command-item"),
+            type: "turn-item.updated",
+            threadId: predecessor,
+            runId: predecessorRunId,
+            occurredAt: now,
+            payload: {
+              ...base,
+              id: commandItem,
+              ordinal: 900,
+              type: "command_execution",
+              input: "vp run dev",
+            },
+          },
+          {
+            id: EventId.make("t14-native:subagent-item"),
+            type: "turn-item.updated",
+            threadId: predecessor,
+            runId: predecessorRunId,
+            occurredAt: now,
+            payload: {
+              ...base,
+              id: nativeItem,
+              ordinal: 901,
+              type: "subagent",
+              subagentId: nativeTask,
+              origin: "provider_native",
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              childThreadId: null,
+              prompt: "Native review",
+              result: null,
+            },
+          },
+          {
+            id: EventId.make("t14-native:subagent-row"),
+            type: "subagent.updated",
+            threadId: predecessor,
+            runId: predecessorRunId,
+            occurredAt: now,
+            payload: {
+              ...base,
+              id: nativeTask,
+              ordinal: 901,
+              parentNodeId: nodeId,
+              origin: "provider_native",
+              createdBy: "agent",
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              providerThreadId: null,
+              childThreadId: null,
+              nativeTaskRef: null,
+              prompt: "Native review",
+              model: null,
+              result: null,
+            },
+          },
+        ] as never,
+      });
+      yield* takeover(predecessor, successor);
+      // [G] both stay on P, still running, and nothing of them appears on S.
+      const p = yield* orchestrator.getThreadProjection(predecessor);
+      const itemStatus = (id: TurnItemId) => p.turnItems.find((item) => item.id === id)?.status;
+      assert.equal(itemStatus(commandItem), "running");
+      assert.equal(itemStatus(nativeItem), "running");
+      const native = p.subagents.find((task) => task.id === nativeTask);
+      assert.equal(native?.status, "running");
+      assert.isUndefined(native?.transferredTo);
+      const s = yield* orchestrator.getThreadProjection(successor);
+      assert.isFalse(s.turnItems.some((item) => item.id === commandItem || item.id === nativeItem));
+      assert.isFalse(s.subagents.some((task) => task.origin === "provider_native"));
+    }),
+  );
+
+  it.effect("14: the successor is pushed for the migrated completion, not before it", () =>
+    Effect.gen(function* () {
+      const { predecessor, successor, child } = yield* setup("t14-push");
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const shellOf = (id: ThreadId) =>
+        Effect.map(
+          store.getShellSnapshot({ location: "active", threadIds: [id] }),
+          (snapshot) => snapshot.threads[0]!,
+        );
+      yield* takeover(predecessor, successor);
+      yield* endTurn(successor);
+      // [F] no early "done" push for S while its subagent runs (S's turn ended, C still works).
+      assert.isNull(pushEventFor(yield* shellOf(successor)), "no push while C runs");
+      const runId = yield* finishChild(child);
+      // [F] recorded(S, a), class E: S is woken by the migrated completion.
+      assert.isTrue(notifiable(yield* recordedTask(successor, child, runId)), "S is notified");
+      // [G] the wake turn that takes C's result ends with S's usual done push and identity.
+      const wakeRun = yield* endTurn(successor, { newRun: "t14-s-wake" });
+      assert.deepInclude(pushEventFor(yield* shellOf(successor)) ?? {}, {
+        kind: "done",
+        key: `done:${successor}:${wakeRun}`,
+      });
+    }),
+  );
+});

@@ -491,6 +491,7 @@ export interface ActiveShellIndexEntry extends Pick<
   | "id"
   | "projectId"
   | "lineage"
+  | "ownerThreadId"
   | "settledOverride"
   | "settledAt"
   | "pinnedAt"
@@ -2020,6 +2021,7 @@ export function threadShellFromProjection(
       ? {}
       : { activeOrderKey: projection.thread.activeOrderKey }),
     lineage: projection.thread.lineage,
+    ...shellOwnershipFields(projection.thread),
     forkedFrom: projection.thread.forkedFrom,
     activeProviderThreadId: projection.thread.activeProviderThreadId,
     ...(projection.thread.historyOrigin === undefined
@@ -2460,6 +2462,22 @@ function shellWaitStateFromRow(input: {
 type OrchestrationV2ProviderSessionStatus =
   OrchestrationV2ThreadProjection["providerSessions"][number]["status"];
 
+/** A migrated subagent's owner and former owners, for display; absent for every other thread. */
+function shellOwnershipFields(
+  thread: Pick<OrchestrationV2AppThread, "lineage" | "ownership">,
+): Pick<OrchestrationV2ThreadShell, "ownerThreadId" | "formerOwnerThreadIds"> {
+  const ownership = thread.ownership;
+  if (ownership === undefined || ownership.ownerThreadId === thread.lineage.parentThreadId) {
+    return {};
+  }
+  return {
+    ownerThreadId: ownership.ownerThreadId,
+    formerOwnerThreadIds: ownership.formerOwnerThreadIds ?? [
+      ...(thread.lineage.parentThreadId === null ? [] : [thread.lineage.parentThreadId]),
+    ],
+  };
+}
+
 function shellFromState(input: {
   readonly state: ShellThreadState;
   readonly visibleItemCount: number;
@@ -2487,6 +2505,7 @@ function shellFromState(input: {
       ? {}
       : { activeOrderKey: input.state.thread.activeOrderKey }),
     lineage: input.state.thread.lineage,
+    ...shellOwnershipFields(input.state.thread),
     forkedFrom: input.state.thread.forkedFrom,
     activeProviderThreadId: input.state.thread.activeProviderThreadId,
     ...(input.state.thread.historyOrigin === undefined
@@ -8296,6 +8315,37 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       )`;
     };
     /**
+     * Families group by display root: subagents a takeover moved to an owner in `familyOf`'s family,
+     * with their own subagents. Uncorrelated, so SQLite evaluates it once per read; the owner match
+     * uses the root index's expression.
+     */
+    const movedIntoFamily = (familyOf: ThreadId) => sql`
+      WITH RECURSIVE moved(thread_id, depth) AS (
+        SELECT child.thread_id, 0
+        FROM orchestration_v2_projection_threads child
+        WHERE child.deleted_at IS NULL
+          AND CASE WHEN json_valid(child.payload_json)
+            THEN json_extract(child.payload_json, '$.ownership.ownerThreadId') END IN (
+            SELECT owner.thread_id FROM orchestration_v2_projection_threads owner
+            WHERE CASE WHEN json_valid(owner.payload_json)
+              THEN json_extract(owner.payload_json, '$.lineage.rootThreadId') END = (
+                SELECT json_extract(member.payload_json, '$.lineage.rootThreadId')
+                FROM orchestration_v2_projection_threads member
+                WHERE member.thread_id = ${familyOf}
+              )
+          )
+        UNION
+        SELECT grandchild.thread_id, moved.depth + 1
+        FROM moved JOIN orchestration_v2_projection_threads grandchild
+          ON CASE WHEN json_valid(grandchild.payload_json)
+            THEN json_extract(grandchild.payload_json, '$.lineage.parentThreadId') END = moved.thread_id
+        WHERE moved.depth < 16
+          AND json_extract(grandchild.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+      )
+      SELECT thread_id FROM moved
+    `;
+
+    /**
      * The in-memory sender walk from the run whose payload is `run`: hook and usage-limit
      * continuations back to the run a message started, then that message's sender, one
      * primary-key lookup per hop. `t` is the thread row.
@@ -8604,12 +8654,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }${
               familyOf === undefined
                 ? sql``
-                : sql` AND CASE WHEN json_valid(t.payload_json)
+                : sql` AND (CASE WHEN json_valid(t.payload_json)
                     THEN json_extract(t.payload_json, '$.lineage.rootThreadId') END = (
                     SELECT json_extract(member.payload_json, '$.lineage.rootThreadId')
                     FROM orchestration_v2_projection_threads member
                     WHERE member.thread_id = ${familyOf}
-                  )`
+                  ) OR t.thread_id IN (${movedIntoFamily(familyOf)}))`
             }${
               worktreePath === undefined
                 ? sql``
@@ -9668,6 +9718,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly may_be_live: number;
         readonly has_remote_tasks: number;
         readonly open_run_sender_thread_id: string | null;
+        readonly owner_thread_id: string | null;
       }>`
         SELECT
           t.thread_id,
@@ -9676,6 +9727,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           json_extract(t.payload_json, '$.lineage.parentThreadId') AS parent_thread_id,
           json_extract(t.payload_json, '$.lineage.rootThreadId') AS root_thread_id,
           json_extract(t.payload_json, '$.lineage.sideChat') AS side_chat,
+          json_extract(t.payload_json, '$.ownership.ownerThreadId') AS owner_thread_id,
           json_extract(t.payload_json, '$.settledOverride') AS settled_override,
           json_extract(t.payload_json, '$.settledAt') AS settled_at,
           json_extract(t.payload_json, '$.pinnedAt') AS pinned_at,
@@ -9780,6 +9832,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         id: ThreadId.make(row.thread_id),
         projectId: ProjectId.make(row.project_id),
         lineage: shellIndexLineage(row),
+        ...(row.owner_thread_id === null || row.owner_thread_id === row.parent_thread_id
+          ? {}
+          : { ownerThreadId: ThreadId.make(row.owner_thread_id) }),
         settledOverride:
           row.settled_override === "settled" || row.settled_override === "active"
             ? row.settled_override

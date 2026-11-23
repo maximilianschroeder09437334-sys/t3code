@@ -5044,6 +5044,16 @@ describe("OrchestratorMcpService thread list", () => {
     shell("thread:a-snoozed", "project:a", true),
     shell("thread:a-awake", "project:a", false),
     shell("thread:b-snoozed", "project:b", true, true, true),
+    // A subagent a takeover moved from thread:b-p to thread:b-s (plan-b-r6 §7).
+    {
+      ...shell("thread:b-moved-child", "project:b", false),
+      lineage: {
+        rootThreadId: ThreadId.make("thread:b-p"),
+        parentThreadId: ThreadId.make("thread:b-p"),
+        relationshipToParent: "subagent" as const,
+      },
+      ownerThreadId: ThreadId.make("thread:b-s"),
+    },
     {
       ...shell("thread:a-awaiting-command", "project:a", false),
       activityRunStatus: null,
@@ -5182,6 +5192,23 @@ describe("OrchestratorMcpService thread list", () => {
         [["thread:a-snoozed"], 3, 1],
       );
       assert.deepStrictEqual(shellRequests, [[ThreadId.make("thread:a-snoozed")]]);
+    }).pipe(Effect.provide(service)),
+  );
+
+  it.effect("10: names a moved subagent's owner as its parent and keeps its lineage parent", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const listed = yield* mcp.listThreads(client, { projectId: ProjectId.make("project:b") });
+      const moved = listed.threads.find((thread) => thread.threadId === "thread:b-moved-child");
+      // [F] the MCP read nests the moved child under its owner S.
+      assert.equal(moved?.parentThreadId, "thread:b-s");
+      assert.equal(moved?.relationshipToParent, "subagent");
+      // [N] the thread that created it stays readable.
+      assert.equal(moved?.lineageParentThreadId, "thread:b-p");
+      // [G] a thread that never moved has no extra field.
+      const other = listed.threads.find((thread) => thread.threadId === "thread:b-snoozed");
+      assert.isNull(other?.parentThreadId);
+      assert.isFalse(other !== undefined && "lineageParentThreadId" in other);
     }).pipe(Effect.provide(service)),
   );
 

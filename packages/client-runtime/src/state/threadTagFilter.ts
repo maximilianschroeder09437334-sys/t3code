@@ -1,4 +1,5 @@
 import {
+  displayParentThreadId,
   type EnvironmentId,
   isListedThreadLineage,
   type OrchestrationV2ThreadShell,
@@ -10,7 +11,7 @@ import { threadKey } from "./entities.ts";
 
 type FilterableThread = Pick<
   OrchestrationV2ThreadShell,
-  "id" | "lineage" | "tags" | "delegatedFrom"
+  "id" | "lineage" | "ownerThreadId" | "tags" | "delegatedFrom"
 >;
 
 export interface TagFilteredEnvironment {
@@ -25,9 +26,9 @@ export const NO_HIDDEN_THREADS: ReadonlySet<string> = new Set();
 /** The thread a subagent, side chat or delegated task takes its visibility from, if any. */
 export function visibilityParentKey(
   environmentId: EnvironmentId,
-  thread: Pick<FilterableThread, "lineage" | "delegatedFrom">,
+  thread: Pick<FilterableThread, "lineage" | "ownerThreadId" | "delegatedFrom">,
 ): string | null {
-  const parentId = thread.lineage.parentThreadId;
+  const parentId = displayParentThreadId(thread);
   if (!isListedThreadLineage(thread.lineage) && parentId !== null) {
     return threadKey({ environmentId, threadId: parentId });
   }

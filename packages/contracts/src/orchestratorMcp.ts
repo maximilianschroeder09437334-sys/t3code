@@ -430,7 +430,10 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   blockedOnThreadWait: Schema.optional(Schema.Boolean),
   /** Absent from linked environments that predate it. */
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestratorMcpThreadBackgroundTask)),
+  /** A migrated subagent's owner; `lineageParentThreadId` then names the thread that created it. */
   parentThreadId: Schema.NullOr(ThreadId),
+  /** Present only when a takeover moved this subagent away from the thread that created it. */
+  lineageParentThreadId: Schema.optional(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   /** The linked environment's thread that delegated this one; absent otherwise. */
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
@@ -493,7 +496,10 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   lastTitleRegeneration: Schema.optional(Schema.NullOr(LastThreadTitleRegeneration)),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  /** A migrated subagent's owner; `lineageParentThreadId` then names the thread that created it. */
   parentThreadId: Schema.NullOr(ThreadId),
+  /** Present only when a takeover moved this subagent away from the thread that created it. */
+  lineageParentThreadId: Schema.optional(ThreadId),
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   /** The linked environment's thread that delegated this one; absent otherwise. */
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),

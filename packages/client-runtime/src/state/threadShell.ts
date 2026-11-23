@@ -7,6 +7,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import {
+  displayParentThreadId,
   isListedThreadLineage,
   isProviderNativeSubagentThread,
   OrchestrationV2ThreadShell,
@@ -76,7 +77,7 @@ export function resolveListedAncestorThreadRef(
   ref: ScopedThreadRef,
   threads: readonly Pick<
     EnvironmentThreadShell,
-    "id" | "environmentId" | "lineage" | "delegatedFrom" | "archivedAt"
+    "id" | "environmentId" | "lineage" | "ownerThreadId" | "delegatedFrom" | "archivedAt"
   >[],
 ): ScopedThreadRef {
   const findThread = (target: ScopedThreadRef) =>
@@ -89,8 +90,9 @@ export function resolveListedAncestorThreadRef(
   while (thread !== undefined) {
     let parent: ScopedThreadRef;
     if (!isListedThreadLineage(thread.lineage)) {
-      if (thread.lineage.parentThreadId === null) return ref;
-      parent = { environmentId: thread.environmentId, threadId: thread.lineage.parentThreadId };
+      const parentThreadId = displayParentThreadId(thread);
+      if (parentThreadId === null) return ref;
+      parent = { environmentId: thread.environmentId, threadId: parentThreadId };
     } else if (thread.delegatedFrom != null) {
       parent = {
         environmentId: thread.delegatedFrom.environmentId,
@@ -171,12 +173,12 @@ function pendingSubagentRequestsByThread(
       const parent = byId.get(parentId);
       parentId =
         parent?.lineage.relationshipToParent === "subagent" || parent?.lineage.sideChat === true
-          ? parent.lineage.parentThreadId
+          ? displayParentThreadId(parent)
           : null;
     }
   };
   for (const child of threads) {
-    const parentId = child.lineage.parentThreadId;
+    const parentId = displayParentThreadId(child);
     if (child.lineage.sideChat === true) {
       const request = sideChatRequest(child);
       if (parentId !== null && request !== null && requests.get(parentId) !== "approval") {
@@ -503,7 +505,7 @@ export function createEnvironmentThreadShellAtoms(input: {
       };
       for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
         for (const thread of get(environmentThreadsAtom(environmentId))) {
-          const parent = thread.lineage.parentThreadId;
+          const parent = displayParentThreadId(thread);
           if (
             parent !== null &&
             (thread.lineage.relationshipToParent === "subagent" || thread.lineage.sideChat === true)

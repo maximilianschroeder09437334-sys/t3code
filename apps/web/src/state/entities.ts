@@ -18,7 +18,11 @@ import {
   parseThreadKey,
   threadKey,
 } from "@t3tools/client-runtime/state/entities";
-import type { ScopedProjectRef, ScopedThreadRef } from "@t3tools/contracts";
+import {
+  displayParentThreadId,
+  type ScopedProjectRef,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
@@ -390,11 +394,12 @@ export function readDelegatedUnderParent(): ReadonlySet<string> {
 }
 
 function shellParentThreadId(
-  thread: Pick<OrchestrationV2ThreadShell, "forkedFrom" | "lineage">,
+  thread: Pick<OrchestrationV2ThreadShell, "forkedFrom" | "lineage"> &
+    Parameters<typeof displayParentThreadId>[0],
 ): ThreadId | null {
   return thread.forkedFrom?.type === "run"
     ? thread.forkedFrom.threadId
-    : thread.lineage.parentThreadId;
+    : displayParentThreadId(thread);
 }
 
 /** Retains unchanged reachable shells so unrelated streams do not re-render the panel. */
@@ -408,7 +413,9 @@ export function selectThreadRelationshipShells(
     const parentThreadId = shellParentThreadId(projection.thread);
     if (parentThreadId !== null) named.add(parentThreadId);
     for (const subagent of projection.subagents) {
-      if (subagent.childThreadId !== null) named.add(subagent.childThreadId);
+      if (subagent.childThreadId !== null && subagent.transferredTo === undefined) {
+        named.add(subagent.childThreadId);
+      }
       for (const agent of subagent.workflow?.agents ?? []) {
         if (agent.childThreadId !== undefined) named.add(agent.childThreadId);
       }

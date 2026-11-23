@@ -1,4 +1,5 @@
 import {
+  displayParentThreadId,
   isOrchestrationV2WorkActive,
   type OrchestrationV2ThreadShell,
   type ThreadId,
@@ -90,7 +91,7 @@ export function deriveThreadRelationshipGraph(input: {
     const parentThreadId =
       thread.forkedFrom?.type === "run"
         ? thread.forkedFrom.threadId
-        : thread.lineage.parentThreadId;
+        : displayParentThreadId(thread);
     if (parentThreadId === null) continue;
     addEdge({
       sourceThreadId: parentThreadId,
@@ -103,7 +104,8 @@ export function deriveThreadRelationshipGraph(input: {
   if (input.projection !== null) {
     const ownerThreadId = input.projection.thread.id;
     for (const subagent of input.projection.subagents) {
-      if (subagent.childThreadId === null) continue;
+      // A task a takeover moved shows under its new owner, not here.
+      if (subagent.childThreadId === null || subagent.transferredTo !== undefined) continue;
       const child = threadsById.get(subagent.childThreadId);
       addEdge({
         sourceThreadId: ownerThreadId,

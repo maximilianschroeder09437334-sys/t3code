@@ -29,6 +29,7 @@ import {
   resolveLatestMergeBackRun,
 } from "@t3tools/client-runtime/state/thread-workflows";
 import {
+  displayParentThreadId,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   NodeId,
@@ -454,7 +455,9 @@ export function ThreadRelationshipsPanel(props: {
   const parentThreadId =
     currentThread?.forkedFrom?.type === "run"
       ? currentThread.forkedFrom.threadId
-      : currentThread?.lineage.parentThreadId;
+      : currentThread === undefined
+        ? undefined
+        : displayParentThreadId(currentThread);
   const parentShell = parentThreadId
     ? (relationshipShells.find((thread) => thread.id === parentThreadId) ??
       archivedShells?.find((thread) => thread.id === parentThreadId))

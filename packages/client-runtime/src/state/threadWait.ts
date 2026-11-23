@@ -1,10 +1,11 @@
-import type {
-  EnvironmentId,
-  OrchestrationV2ThreadShell,
-  OrchestrationV2WaitPhase,
-  OrchestrationV2WaitTarget,
-  ThreadId,
-  TurnItemId,
+import {
+  displayParentThreadId,
+  type EnvironmentId,
+  type OrchestrationV2ThreadShell,
+  type OrchestrationV2WaitPhase,
+  type OrchestrationV2WaitTarget,
+  type ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import {
   isPullRequestWatchTask,
@@ -30,7 +31,15 @@ export type ThreadWaitShell = Pick<
   | "lineage"
   | "pullRequests"
 > &
-  Partial<Pick<EnvironmentThreadShell, "latestRunSenderThreadId" | "pendingBackgroundTasks">> & {
+  Partial<
+    Pick<
+      EnvironmentThreadShell,
+      | "latestRunSenderThreadId"
+      | "pendingBackgroundTasks"
+      | "ownerThreadId"
+      | "formerOwnerThreadIds"
+    >
+  > & {
     /** Read only for whether an activity run is open; a parked runtime hides a waiting run. */
     readonly source?: Partial<Pick<OrchestrationV2ThreadShell, "activityRunStatus">>;
   };
@@ -112,16 +121,23 @@ function lifecycleEnded(shell: ThreadWaitShell): boolean {
 
 /**
  * The thread a subagent child keeps waiting: the thread whose agent started the child's open run,
- * else its lineage parent. A sender other than the parent drives only that run, so once the run
- * ends nobody waits on the child: the parent does not take back a run it did not start.
+ * else its display parent (a migrated child's owner). A sender other than the parent drives only
+ * that run, so once the run ends nobody waits on the child: the parent does not take back a run it
+ * did not start. The lineage parent and former owners of a migrated child send as its owner.
  */
 function waitDriverOf(shell: ThreadWaitShell): ThreadId | null {
   if (shell.lineage.relationshipToParent !== "subagent") return null;
   // A closed child holds nothing: its own wait ends before anything it waits on.
   if (shell.archivedAt !== null || shell.deletedAt !== null) return null;
   if (shell.settledOverride === "settled") return null;
-  const parent = shell.lineage.parentThreadId;
-  const sender = shell.latestRunSenderThreadId ?? null;
+  const parent = displayParentThreadId(shell);
+  const rawSender = shell.latestRunSenderThreadId ?? null;
+  const sender =
+    rawSender !== null &&
+    (rawSender === shell.lineage.parentThreadId ||
+      shell.formerOwnerThreadIds?.includes(rawSender) === true)
+      ? parent
+      : rawSender;
   if (sender !== null && sender !== shell.id && sender !== parent) {
     return hasActivityRun(shell) ? sender : null;
   }

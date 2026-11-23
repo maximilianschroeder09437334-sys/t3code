@@ -1,6 +1,7 @@
 import { agentModelPolicy } from "../orchestration-v2/AgentModelPolicy.ts";
 import {
   CommandId,
+  displayParentThreadId,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -625,6 +626,18 @@ function directChildTaskIds(
   return [...ids];
 }
 
+/** The display parent (a migrated subagent's owner), plus the lineage parent when it differs. */
+function mcpParentFields(thread: Parameters<typeof displayParentThreadId>[0]): {
+  readonly parentThreadId: ThreadId | null;
+  readonly lineageParentThreadId?: ThreadId;
+} {
+  const parentThreadId = displayParentThreadId(thread);
+  const lineageParentThreadId = thread.lineage.parentThreadId;
+  return lineageParentThreadId === null || lineageParentThreadId === parentThreadId
+    ? { parentThreadId }
+    : { parentThreadId, lineageParentThreadId };
+}
+
 function directAppOwnedChildTasks(
   parent: Pick<OrchestrationV2ThreadProjection, "thread" | "subagents">,
   target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
@@ -967,7 +980,7 @@ function listItemFromShell(
     ...threadSnooze(shell, nowMs),
     pinned: shell.pinnedAt != null,
     ...threadBackgroundWork(shell),
-    parentThreadId: shell.lineage.parentThreadId,
+    ...mcpParentFields(shell),
     relationshipToParent: shell.lineage.relationshipToParent,
     ...(shell.delegatedFrom == null ? {} : { delegatedFrom: shell.delegatedFrom }),
     itemCount: shell.visibleItemCount,
@@ -1019,7 +1032,7 @@ function threadDetail(
           },
     branch: projection.thread.branch,
     worktreePath: projection.thread.worktreePath,
-    parentThreadId: projection.thread.lineage.parentThreadId,
+    ...mcpParentFields(projection.thread),
     relationshipToParent: projection.thread.lineage.relationshipToParent,
     ...(projection.thread.delegatedFrom == null
       ? {}

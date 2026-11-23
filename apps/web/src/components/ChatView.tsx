@@ -78,6 +78,7 @@ import {
   type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
+  displayParentThreadId,
   ProviderInteractionMode,
   resolveIdleCompaction,
   RuntimeMode,
@@ -889,7 +890,7 @@ export default function ChatView(props: ChatViewProps) {
     canResumeThread(serverProjection, resumableRunId, hasHeldQueuedRuns);
   const parentSubagentThreadId =
     activeThread?.lineage.relationshipToParent === "subagent"
-      ? activeThread.lineage.parentThreadId
+      ? displayParentThreadId(activeThread)
       : null;
   const parentSubagentEnvironmentId = activeThread?.environmentId ?? null;
   const parentSubagentThreadRef = (() => {
