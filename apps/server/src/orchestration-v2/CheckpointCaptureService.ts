@@ -125,8 +125,13 @@ export const layer: Layer.Layer<
         capturedAt,
         forceMissing: sideChat,
       });
-      // Omit delegatedCompletion to preserve cohort writes made after capture loaded the run.
-      const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } = run;
+      // Omit delegatedCompletion and delegatedTaskId to preserve cohort writes and a takeover's
+      // rebind made after capture loaded the run.
+      const {
+        delegatedCompletion: _delegatedCompletion,
+        delegatedTaskId: _delegatedTaskId,
+        ...runWithoutDelegatedFields
+      } = run;
       const commandId = CommandId.make(`command:effect:checkpoint.capture:${run.id}`);
       yield* eventSink.commitCommand({
         commandId,
@@ -201,9 +206,9 @@ export const layer: Layer.Layer<
             providerInstanceId: run.providerInstanceId,
             occurredAt: capturedAt,
             payload: settled
-              ? { ...runWithoutDelegatedCompletion, checkpointId: checkpoint.id }
+              ? { ...runWithoutDelegatedFields, checkpointId: checkpoint.id }
               : {
-                  ...runWithoutDelegatedCompletion,
+                  ...runWithoutDelegatedFields,
                   status: "completed",
                   completedAt: capturedAt,
                   checkpointId: checkpoint.id,

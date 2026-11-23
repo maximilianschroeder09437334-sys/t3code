@@ -38,6 +38,10 @@
         "scenarios/*.ts",
         "setup-worktree.ts",
         "sign-macos.ts",
+        // Desktop install gates run these by path from the staged install recipe.
+        "takeover-compat-gate-23.ts",
+        "takeover-rollback-preflight.ts",
+        "waiting-display-compat-gate.ts",
         "prepare-server-compile-cache.cjs",
         "smoke-desktop-app.ts",
         "verify-windows-desktop-artifact.ts",

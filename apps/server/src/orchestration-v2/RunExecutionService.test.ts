@@ -1961,7 +1961,15 @@ it.effect("ends a nested native subagent and its thread when the root run is int
           events: Stream.fromIterable(events),
           startTurn: () => Effect.void,
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
-        run: { id: runId, threadId, ordinal: 1, providerInstanceId } as OrchestrationV2Run,
+        // A turn-start snapshot whose delegated fields a takeover or acknowledgement may since have changed.
+        run: {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+          delegatedTaskId: NodeId.make(`node:${key}:follow-up`),
+          delegatedCompletion: { disposition: "open", nextGeneration: 1, delivery: null },
+        } as OrchestrationV2Run,
         rootNode: { id: NodeId.make(`node:${key}`) } as OrchestrationV2ExecutionNode,
         checkpointScope: {
           id: CheckpointScopeId.make(`checkpoint-scope:${key}`),
@@ -1988,13 +1996,21 @@ it.effect("ends a nested native subagent and its thread when the root run is int
       });
     }).pipe(Effect.provide(layerTest));
 
-    const ended = (yield* Deferred.await(finalized)).flatMap((event) =>
+    const finalEvents = yield* Deferred.await(finalized);
+    const ended = finalEvents.flatMap((event) =>
       event.type === "subagent.updated" || event.type === "node.updated"
         ? [[event.type, event.payload.id, event.payload.status]]
         : [],
     );
     assert.deepInclude(ended, ["subagent.updated", nestedId, "interrupted"]);
     assert.deepInclude(ended, ["node.updated", grandchildRootId, "interrupted"]);
+    // The stored delegated fields win over the snapshot's (ProjectionStore keeps them).
+    const runEnd = finalEvents.find(
+      (event) => event.type === "run.updated" && event.payload.id === runId,
+    );
+    assert.equal(runEnd?.type === "run.updated" ? runEnd.payload.status : undefined, "interrupted");
+    assert.isFalse(runEnd !== undefined && "delegatedTaskId" in runEnd.payload);
+    assert.isFalse(runEnd !== undefined && "delegatedCompletion" in runEnd.payload);
   }),
 );
 

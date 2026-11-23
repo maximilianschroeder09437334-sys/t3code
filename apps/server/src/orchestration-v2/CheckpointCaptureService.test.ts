@@ -42,6 +42,8 @@ const runId = RunId.make("run:checkpoint-capture-delegated");
 const scopeId = CheckpointScopeId.make("scope:checkpoint-capture-delegated");
 const rootNodeId = NodeId.make("node:checkpoint-capture-delegated-root");
 const taskId = NodeId.make("node:checkpoint-capture-task");
+const followupTaskId = NodeId.make("node:checkpoint-capture-followup-task");
+const anchorTaskId = NodeId.make("node:checkpoint-capture-anchor-task");
 const deliveryMessageId = MessageId.make("message:checkpoint-capture-delivery");
 const providerThreadId = ProviderThreadId.make("provider-thread:checkpoint-capture-delegated");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -91,6 +93,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           checkpointId: null,
           contextHandoffId: null,
           delegatedCompletion: staleDelegatedCompletion,
+          delegatedTaskId: followupTaskId,
         };
         const rootNode = {
           id: rootNodeId,
@@ -343,6 +346,10 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
             runUpdated.payload.delegatedCompletion,
             "checkpoint capture must omit delegatedCompletion so ProjectionStore can keep a newer cohort",
           );
+          assert.isUndefined(
+            runUpdated.payload.delegatedTaskId,
+            "checkpoint capture must omit delegatedTaskId so ProjectionStore can keep a takeover rebind",
+          );
 
           yield* projectionStore.apply({
             id: EventId.make("event:checkpoint-capture:newer-cohort"),
@@ -355,6 +362,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
             payload: {
               ...staleRun,
               delegatedCompletion: newerCohort,
+              delegatedTaskId: anchorTaskId,
             },
           });
 
@@ -368,6 +376,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           assert.equal(projectedRun?.status, "completed");
           assert.equal(projectedRun?.checkpointId, runUpdated.payload.checkpointId);
           assert.deepEqual(projectedRun?.delegatedCompletion, newerCohort);
+          assert.equal(projectedRun?.delegatedTaskId, anchorTaskId);
           assert.equal(projectedRun?.delegatedCompletion?.delivery?.messageId, deliveryMessageId);
           assert.deepEqual(projectedRun?.delegatedCompletion?.delivery?.taskIds, [taskId]);
           yield* Ref.set(committed, []);

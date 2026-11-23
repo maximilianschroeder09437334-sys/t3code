@@ -289,17 +289,20 @@ it.effect.each([
           : childState === "bound"
             ? "running"
             : "completed";
+      const keepsBinding = childState === "correlated" || childState === "bound";
+      // An orphaned follow-up lost its steer binding; builds before the projection kept
+      // `delegatedTaskId` lost it to a terminal write from the attempt's start snapshot.
       yield* apply({
         type: "run.updated",
         threadId: childThreadId,
         occurredAt: now,
-        payload: { ...runAtStart, status: "running", delegatedTaskId: taskId },
+        payload: {
+          ...runAtStart,
+          status: "running",
+          ...(keepsBinding ? { delegatedTaskId: taskId } : {}),
+        },
       });
-      assert.equal(
-        (yield* orchestrator.getThreadProjection(childThreadId)).runs[0]?.delegatedTaskId,
-        taskId,
-      );
-      // A terminal write based on the attempt's start snapshot loses a later steer binding.
+      // A terminal write from the attempt's start snapshot keeps any binding it does not carry.
       yield* apply({
         type: "run.updated",
         threadId: childThreadId,
@@ -308,14 +311,11 @@ it.effect.each([
           ...runAtStart,
           status: childRunStatus,
           completedAt: childRunStatus === "completed" ? now : null,
-          ...(childState === "correlated" || childState === "bound"
-            ? { delegatedTaskId: taskId }
-            : {}),
         },
       });
       assert.equal(
         (yield* orchestrator.getThreadProjection(childThreadId)).runs[0]?.delegatedTaskId,
-        childState === "correlated" || childState === "bound" ? taskId : undefined,
+        keepsBinding ? taskId : undefined,
       );
       if (childState === "provider-active" || childState === "roster") {
         yield* apply({

@@ -12,7 +12,7 @@ import { liveShellEnvironmentIdsAtom } from "./shell";
 import { environmentThreadShells } from "./threads";
 
 /** Every thread's resolved wait, built once per shell or readiness change across all environments. */
-export const threadWaitsAtom = Atom.make((get) => {
+const threadWaitsAtom = Atom.make((get) => {
   const live = get(liveShellEnvironmentIdsAtom);
   return resolveThreadWaits({
     threads: get(environmentThreadShells.threadShellsAtom),
@@ -36,7 +36,7 @@ function sameTarget(a: ResolvedWaitTarget, b: ResolvedWaitTarget): boolean {
   );
 }
 
-export function sameThreadWait(
+function sameThreadWait(
   a: ResolvedThreadWait | undefined,
   b: ResolvedThreadWait | undefined,
 ): boolean {

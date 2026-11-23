@@ -14,6 +14,7 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadShell,
   ProjectId,
@@ -434,15 +435,23 @@ const notifiable = (task: Task | undefined) =>
 /**
  * Ends C's current run as the provider would and waits until some thread records its result, so
  * a build that records it on the predecessor fails on the caller's assertion rather than here.
+ * With `snapshot`, the terminal write is built from that earlier copy of the run, as the run
+ * executor builds it from its turn-start snapshot (without `delegatedCompletion`).
  */
-const finishChild = (child: ThreadId, status: "completed" | "failed" = "completed") =>
+const finishChild = (
+  child: ThreadId,
+  status: "completed" | "failed" = "completed",
+  snapshot?: OrchestrationV2Run,
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const sink = yield* EventSink.EventSinkV2;
     const now = yield* DateTime.now;
-    const run = (yield* orchestrator.getThreadProjection(child)).runs.toSorted(
+    const latest = (yield* orchestrator.getThreadProjection(child)).runs.toSorted(
       (a, b) => b.ordinal - a.ordinal,
     )[0]!;
+    const { delegatedCompletion: _delegatedCompletion, ...stale } = snapshot ?? latest;
+    const run = snapshot === undefined ? latest : stale;
     const afterSequence = yield* sink.latestSequence();
     const settled = yield* sink.stream({ afterSequence, eventType: "subagent.updated" }).pipe(
       Stream.filter(
@@ -894,15 +903,21 @@ const awaitStoredEvent = (filter: (event: OrchestrationV2DomainEvent) => boolean
     return TestClock.withLive(Fiber.join(fiber).pipe(Effect.timeoutOption("5 seconds")));
   });
 
-/** Ends C's latest run as the provider would, without waiting for its result. */
-const endChildRun = (child: ThreadId, status: "completed" | "failed" = "completed") =>
+/** Ends C's latest run as the provider would, without waiting for its result (`snapshot`: see finishChild). */
+const endChildRun = (
+  child: ThreadId,
+  status: "completed" | "failed" = "completed",
+  snapshot?: OrchestrationV2Run,
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const sink = yield* EventSink.EventSinkV2;
     const now = yield* DateTime.now;
-    const run = (yield* orchestrator.getThreadProjection(child)).runs.toSorted(
+    const latest = (yield* orchestrator.getThreadProjection(child)).runs.toSorted(
       (a, b) => b.ordinal - a.ordinal,
     )[0]!;
+    const { delegatedCompletion: _delegatedCompletion, ...stale } = snapshot ?? latest;
+    const run = snapshot === undefined ? latest : stale;
     yield* sink.write({
       events: [
         {
@@ -2473,6 +2488,92 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
         key: `done:${successor}:${wakeRun}`,
       });
     }),
+  );
+
+  // The run executor ends C's run from its turn-start snapshot, which predates the takeover's
+  // rebind of that run to S's anchor.
+  it.effect.each(["alone", "with a grandchild"] as const)(
+    "1b: a child running at takeover that ends from its turn-start snapshot reports to S (%s)",
+    (variant) =>
+      Effect.gen(function* () {
+        const name = variant === "alone" ? "t1b" : "t1b-g";
+        const { predecessor, successor, child } = yield* setup(name);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const grandchild = variant === "alone" ? undefined : yield* delegateGrandchild(child, name);
+        const snapshot = (yield* orchestrator.getThreadProjection(child)).runs[0]!;
+        assert.isUndefined(snapshot.delegatedTaskId, "C's first run is unbound before the move");
+        yield* takeover(predecessor, successor);
+        yield* endTurn(successor);
+        const anchorTaskId = (yield* thread(child)).ownership?.anchorTaskId;
+        assert.isDefined(anchorTaskId);
+        if (grandchild !== undefined) {
+          // G finishes after the move and C's live turn takes its result.
+          yield* finishChild(grandchild);
+          const grandchildTask = (yield* orchestrator.getThreadProjection(child)).subagents.find(
+            (task) => task.childThreadId === grandchild,
+          )!;
+          yield* orchestrator.dispatch({
+            type: "delegated_task.completion-delivery.acknowledge",
+            commandId: CommandId.make(`${name}-ack-grandchild`),
+            parentThreadId: child,
+            taskId: grandchildTask.id,
+            observedByRunId: snapshot.id,
+          });
+        }
+        yield* replyOnChild(child, "Result after the move.");
+        const recordedOnS = yield* awaitResultText(successor, child, "Result after the move.");
+        const runId = yield* endChildRun(child, "completed", snapshot);
+        yield* recordedOnS;
+
+        // [F] the run keeps the anchor binding the stale terminal write did not carry.
+        const childRun = (yield* orchestrator.getThreadProjection(child)).runs.find(
+          (run) => run.id === runId,
+        )!;
+        assert.equal(childRun.status, "completed");
+        assert.equal(childRun.delegatedTaskId, anchorTaskId, "C's run stays bound to S's anchor");
+        // [F] S's anchor completes with C's result and is offered to S as a wake.
+        const s = yield* orchestrator.getThreadProjection(successor);
+        const anchor = s.subagents.find((task) => task.id === anchorTaskId);
+        assert.equal(anchor?.status, "completed");
+        assert.equal(anchor?.result, "Result after the move.");
+        assert.equal(anchor?.resultRunId, runId);
+        assert.isTrue(notifiable(anchor), "S is offered C's result");
+        assert.isTrue(
+          s.contextTransfers.some(
+            (transfer) =>
+              transfer.type === "subagent_result" &&
+              transfer.sourceThreadId === child &&
+              transfer.targetThreadId === successor,
+          ),
+          "C's result transfers to S",
+        );
+        // [F] S no longer waits on C, nor lists it as running work, in either shell builder.
+        const sqlShell = (yield* store.getShellSnapshot({ location: "active" })).threads.find(
+          (row) => row.id === successor,
+        )!;
+        const liveShell = (yield* orchestrator.getThreadShell(successor))!;
+        for (const [read, shell] of [
+          ["in-memory", liveShell],
+          ["sql", sqlShell],
+        ] as const) {
+          assert.isFalse(
+            (shell.waitingOn ?? []).some((target) => target.threadId === child),
+            `${read}: S does not wait on C`,
+          );
+          assert.isFalse(
+            (shell.pendingBackgroundTasks ?? []).some((task) => task.taskId === anchorTaskId),
+            `${read}: S lists no running anchor`,
+          );
+          assert.notEqual(shell.waitPhase, "waiting", `${read}: S's phase`);
+        }
+        // [N] P's original task stays closed by the move.
+        const old = (yield* orchestrator.getThreadProjection(predecessor)).subagents.find(
+          (task) => task.childThreadId === child,
+        )!;
+        assert.equal(old.transferredTo?.threadId, successor);
+        assert.equal(old.completionDelivery?.state, "disposed");
+      }),
   );
 });
 

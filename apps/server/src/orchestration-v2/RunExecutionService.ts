@@ -825,11 +825,15 @@ export const layer: Layer.Layer<
         // lane runs one effect at a time in enqueue order, so the next turn's start (enqueued
         // later) cannot reach the provider before this capture ends, as with stopped runs.
         const persistedStatus = input.terminal.status;
-        // Omit delegatedCompletion; the startup snapshot must not overwrite newer acknowledgements, successors, or Stop barriers.
-        const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } =
-          input.run;
+        // Omit delegatedCompletion and delegatedTaskId; the startup snapshot must not overwrite newer
+        // acknowledgements, successors, Stop barriers, or a takeover's rebind of this run.
+        const {
+          delegatedCompletion: _delegatedCompletion,
+          delegatedTaskId: _delegatedTaskId,
+          ...runWithoutDelegatedFields
+        } = input.run;
         const finalizedRun: OrchestrationV2Run = {
-          ...runWithoutDelegatedCompletion,
+          ...runWithoutDelegatedFields,
           status: persistedStatus,
           completedAt,
         };
