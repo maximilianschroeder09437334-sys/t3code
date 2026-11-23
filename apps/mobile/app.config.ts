@@ -16,9 +16,9 @@ const isMaxiAndroidBuild = repoEnv.T3CODE_MAXI_ANDROID === "1";
 const isMaxiBuild = isIosPersonalTeamBuild || isMaxiAndroidBuild;
 // Keep personal Android and iOS release numbers independent.
 const MAXI_IOS_MARKETING_VERSION = "2.2.7";
-const MAXI_ANDROID_MARKETING_VERSION = "2.2.8";
+const MAXI_ANDROID_MARKETING_VERSION = "2.2.9";
 const MAXI_IOS_BUILD_NUMBER = "11";
-const MAXI_ANDROID_VERSION_CODE = 16;
+const MAXI_ANDROID_VERSION_CODE = 17;
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
