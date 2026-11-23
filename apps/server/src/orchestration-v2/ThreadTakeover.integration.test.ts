@@ -343,6 +343,16 @@ const setup = (
     };
   });
 
+/** False on cc15112571, which has no takeover: `[N]` tests stop there instead of waiting. */
+const hasTakeover = Effect.map(
+  Orchestrator.OrchestratorV2,
+  (orchestrator) =>
+    (orchestrator as { readonly takeoverThread?: unknown }).takeoverThread !== undefined,
+);
+const requireTakeover = Effect.flatMap(hasTakeover, (available) =>
+  available ? Effect.void : Effect.sync(() => assert.fail("[N]: this build has no takeover")),
+);
+
 /** The baseline adapter (plan §9): .23 has no takeover, so S settles P as t3_thread_organize does. */
 const takeover = (predecessorThreadId: ThreadId, successorThreadId: ThreadId) =>
   Effect.gen(function* () {
@@ -485,6 +495,8 @@ const takeoverProbe = Effect.gen(function* () {
 /** Started before the call: completes once the predecessor records an `attempting` takeover. */
 const attemptBegun = (predecessor: ThreadId) =>
   Effect.gen(function* () {
+    // The baseline settles synchronously and records no attempt.
+    if (!(yield* hasTakeover)) return yield* Effect.forkChild(Effect.void);
     const sink = yield* EventSink.EventSinkV2;
     const afterSequence = yield* sink.latestSequence();
     return yield* sink.stream({ afterSequence, eventType: "thread.metadata-updated" }).pipe(
@@ -589,14 +601,14 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
       // [G] the call returns within deadline + 2 s.
       assert.isAtMost(DateTime.toEpochMillis(yield* DateTime.now) - started, 32_000);
       yield* release;
+      // [G] the child's result still reaches the predecessor.
+      const runId = yield* finishChild(child, predecessor);
+      assert.isTrue(notifiable(yield* recordedTask(predecessor, child, runId)));
       // [N] timed_out on P, no ownership on C.
       assert.deepInclude(outcome, { ok: false, code: "takeover_timeout" });
       const record = (yield* thread(predecessor)).continuedBy;
       assert.equal(record?.state, "timed_out");
       assert.isUndefined((yield* thread(child)).ownership);
-      // [G] the child's result still reaches the predecessor.
-      const runId = yield* finishChild(child, predecessor);
-      assert.isTrue(notifiable(yield* recordedTask(predecessor, child, runId)));
       // [N] a retry is attempt k+1 and takes over.
       const retry = yield* takeover(predecessor, successor);
       assert.isTrue(retry.ok);
@@ -620,6 +632,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
 
   it.effect("7: an expired attempt record does not block the next attempt", () =>
     Effect.gen(function* () {
+      yield* requireTakeover;
       const { predecessor, successor } = yield* setup("t7-expired");
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const now = yield* DateTime.now;
@@ -651,6 +664,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
   it.effect("7/7b: one try-lock miss, a joining call, one attempt and one deadline", () =>
     Effect.gen(function* () {
       const { predecessor, successor, child } = yield* setup("t7b");
+      yield* requireTakeover;
       const probe = yield* takeoverProbe;
       const release = yield* holdLocks([child]);
       const first = yield* Effect.forkChild(probe.observe(takeover(predecessor, successor)));
@@ -695,9 +709,9 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
       yield* TestClock.adjust("1 second");
       const winner = yield* Fiber.join(one);
       // [F] one effective owner, the other conflicts.
+      assert.equal(ownerOf(yield* thread(child)), first);
       assert.isTrue(winner.ok);
       assert.deepInclude(other, { ok: false, code: "takeover_conflict" });
-      assert.equal(ownerOf(yield* thread(child)), first);
       const late = yield* takeover(predecessor, second!);
       assert.deepInclude(late, { ok: false, code: "takeover_conflict" });
     }),
