@@ -15434,6 +15434,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const { contextTransfers } = yield* projectionStore.getThreadRecords(childThreadId, [
       "contextTransfers",
     ]);
+    // A task naming an older attempt still owes a later finished run bound to it, whatever
+    // transfer the older attempt left.
+    const ordinalOf = (runId: RunId | undefined) =>
+      childControls.runs.find((run) => run.id === runId)?.ordinal;
+    const owesLaterAttempt = (task: OrchestrationV2Subagent) => {
+      const named = ordinalOf(task.resultRunId);
+      return (
+        named !== undefined &&
+        childControls.runs.some(
+          (run) =>
+            run.delegatedTaskId === task.id &&
+            run.ordinal > named &&
+            delegatedTaskTerminalStatus(run.status) !== null,
+        )
+      );
+    };
     for (const task of parent.subagents) {
       // A cancelled task does not wait for the work its cancel is stopping.
       const cancelled = task.cancelledRunId !== undefined;
@@ -15443,6 +15459,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (task.id === childControls.thread.forkedFrom.nodeId &&
           (cancelled ? progress.state === "working" : progress.state !== "result_available")) ||
         (task.result !== null &&
+          !owesLaterAttempt(task) &&
           contextTransfers.some(
             (transfer) =>
               transfer.type === "subagent_result" &&
@@ -15949,20 +15966,93 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             )
           : child.runs.filter((run) => run.delegatedTaskId === current.id)
       ).toSorted((a, b) => b.ordinal - a.ordinal);
-      const open = current.result === null;
-      // A task an earlier takeover moved already names its attempt; its run stays bound there.
-      const resultRun = open
-        ? undefined
-        : (child.runs.find((run) => run.id === current.resultRunId) ??
-          boundRuns.find((run) => delegatedTaskTerminalStatus(run.status) !== null));
+      // The attempt behind the task's result: the one it names (an earlier takeover's anchor), else
+      // the run its result transfer came from, so an untagged later run is never mistaken for it.
+      const { contextTransfers: childTransfers } = yield* projectionStore
+        .getThreadRecords(childThreadId, ["contextTransfers"])
+        .pipe(mapDispatchError(command));
+      const transferredRunIds = new Set(
+        childTransfers.flatMap((transfer) =>
+          transfer.type === "subagent_result" &&
+          transfer.targetThreadId === predecessor.id &&
+          transfer.sourcePoint.runId !== undefined
+            ? [transfer.sourcePoint.runId]
+            : [],
+        ),
+      );
+      const settledRun =
+        current.result === null
+          ? undefined
+          : (child.runs.find((run) => run.id === current.resultRunId) ??
+            boundRuns.find((run) => transferredRunIds.has(run.id)) ??
+            boundRuns.find((run) => delegatedTaskTerminalStatus(run.status) !== null));
+      // C's current work may be a later run no task tracks (a third thread's send): the anchor
+      // follows that attempt, never the completed original (plan-r2 B-5, B-8).
+      const laterRun =
+        settledRun === undefined
+          ? undefined
+          : child.runs
+              .filter(
+                (run) =>
+                  run.ordinal > settledRun.ordinal &&
+                  !cancelledBeforeStart(run) &&
+                  !(run.status === "queued" && run.queueHeld === true),
+              )
+              .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+      const laterOutcome = laterRun === undefined ? undefined : runOutcome(laterRun);
+      const laterStatus =
+        laterOutcome === undefined ? null : delegatedTaskTerminalStatus(laterOutcome);
+      const laterLive = laterRun !== undefined && laterStatus === null;
+      const open = current.result === null || laterLive;
+      const resultRun = open ? undefined : (laterRun ?? settledRun);
       const delivered =
         !open &&
+        laterRun === undefined &&
         (current.completionDelivery?.state === "delivered" ||
           current.completionDelivery?.state === "acknowledged");
+      const laterResult =
+        laterRun === undefined || laterOutcome === undefined || laterLive
+          ? undefined
+          : subagentResultForRun(
+              {
+                ...child,
+                ...(yield* projectionStore
+                  .getThreadRecords(childThreadId, ["messages", "turnItems"], {
+                    messageRoles: ["assistant"],
+                    messageRunIds: [laterRun.id],
+                    turnItemRunId: laterRun.id,
+                    turnItemTypes: ["assistant_message", "error"],
+                  })
+                  .pipe(mapDispatchError(command))),
+              },
+              { ...laterRun, status: laterOutcome },
+            );
+      const laterFields: Partial<OrchestrationV2Subagent> =
+        laterRun === undefined
+          ? {}
+          : laterLive
+            ? {
+                providerThreadId: laterRun.providerThreadId,
+                status:
+                  laterRun.status === "queued"
+                    ? "pending"
+                    : laterRun.status === "waiting"
+                      ? "waiting"
+                      : "running",
+                result: null,
+                completedAt: null,
+              }
+            : {
+                providerThreadId: laterRun.providerThreadId,
+                status: laterStatus ?? "completed",
+                result: laterResult?.text ?? null,
+                completedAt: laterRun.completedAt ?? now,
+              };
       const anchorKey = takeoverAnchorKey(command.transferId, childThreadId);
       const anchorId = NodeId.make(anchorKey);
       let anchor: OrchestrationV2Subagent = {
         ...current,
+        ...laterFields,
         id: anchorId,
         threadId: successor.id,
         runId: successorRun.id,
@@ -16072,7 +16162,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "subagent_result",
             sourceThreadId: childThreadId,
             targetThreadId: successor.id,
-            sourcePoint: contextSourcePointForRun(child, resultRun),
+            sourcePoint: {
+              ...contextSourcePointForRun(child, resultRun),
+              ...(resultRun === laterRun &&
+              laterResult !== undefined &&
+              laterResult.turnItemId !== null
+                ? { turnItemId: laterResult.turnItemId }
+                : {}),
+            },
             basePoint: null,
             sourceProviderInstanceId: resultRun.providerInstanceId,
             targetProviderInstanceId: successorRun.providerInstanceId,
@@ -16090,7 +16187,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (open) {
         // The child's live runs, and its latest one whose result may still be finalizing, report
         // to the anchor. Only `delegatedTaskId` changes; the run's stored status is kept.
-        for (const [position, run] of boundRuns.entries()) {
+        for (const [position, run] of (laterLive ? [laterRun] : boundRuns).entries()) {
           if (position > 0 && delegatedTaskTerminalStatus(run.status) !== null) continue;
           yield* emitEvent({
             type: "run.updated",

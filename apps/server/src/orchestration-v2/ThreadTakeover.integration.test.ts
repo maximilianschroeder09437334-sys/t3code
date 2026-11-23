@@ -30,9 +30,11 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -57,6 +59,7 @@ import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
@@ -92,67 +95,70 @@ const providerInstance = {
   textGeneration: {} as ProviderInstance["textGeneration"],
 } satisfies ProviderInstance;
 
-const layerTest = Layer.mergeAll(
-  RuntimeLayer.layer,
-  RuntimeLayer.layerEventSink,
-  // The orchestrator's own executor (layers are shared by reference), so held locks are real.
-  ThreadCommandExecutor.layer,
-  EffectOutbox.layer,
-  ProjectionStore.layer,
-).pipe(
-  Layer.provideMerge(RuntimeLayer.layerProjectService),
-  Layer.provide(
-    Layer.mock(WorkspacePaths.WorkspacePaths)({
-      normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
-    }),
-  ),
-  Layer.provide(ProviderTurnStartServiceTestkit.layer),
-  Layer.provide(
-    Layer.succeed(ProjectEnrichmentService.ProjectEnrichmentService, {
-      peek: () =>
-        Effect.succeed({
-          repositoryIdentity: null,
-          faviconPath: null,
-          repositoryIdentityResolved: false,
-        }),
-      request: () => Effect.void,
-      readRepositoryIdentity: () => Effect.succeed(null),
-      getAvailable: () =>
-        Effect.succeed({
-          repositoryIdentity: null,
-          faviconPath: null,
-          repositoryIdentityResolved: false,
-        }),
-      invalidate: () => Effect.void,
-      refreshRepositoryIdentity: () => Effect.void,
-      subscribeChanges: Effect.never,
-    }),
-  ),
-  Layer.provide(McpSessionRegistryTestkit.layer),
-  Layer.provide(McpProviderSessions.layer),
-  Layer.provideMerge(SqlitePersistence.layerMemory),
-  Layer.provide(
-    CheckpointStore.layer.pipe(
-      Layer.provide(VcsDriverRegistry.layer),
-      Layer.provide(VcsProcess.layer),
-      Layer.provide(layerServerConfig),
-      Layer.provide(layerPlatformTest),
+/** The server's layers over `persistence`: one in-memory database per test file, or a file. */
+const makeLayerTest = <ROut, E, R>(persistence: Layer.Layer<ROut, E, R>) =>
+  Layer.mergeAll(
+    RuntimeLayer.layer,
+    RuntimeLayer.layerEventSink,
+    // The orchestrator's own executor (layers are shared by reference), so held locks are real.
+    ThreadCommandExecutor.layer,
+    EffectOutbox.layer,
+    ProjectionStore.layer,
+  ).pipe(
+    Layer.provideMerge(RuntimeLayer.layerProjectService),
+    Layer.provide(
+      Layer.mock(WorkspacePaths.WorkspacePaths)({
+        normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
+      }),
     ),
-  ),
-  Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
-  Layer.provide(
-    Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
-      getInstance: (instanceId) =>
-        Effect.succeed(instanceId === providerInstance.instanceId ? providerInstance : undefined),
-      listInstances: Effect.succeed([providerInstance]),
-      listUnavailable: Effect.succeed([]),
-      streamChanges: Stream.empty,
-      subscribeChanges: Effect.never,
-    }),
-  ),
-  Layer.provide(layerPlatformTest),
-);
+    Layer.provide(ProviderTurnStartServiceTestkit.layer),
+    Layer.provide(
+      Layer.succeed(ProjectEnrichmentService.ProjectEnrichmentService, {
+        peek: () =>
+          Effect.succeed({
+            repositoryIdentity: null,
+            faviconPath: null,
+            repositoryIdentityResolved: false,
+          }),
+        request: () => Effect.void,
+        readRepositoryIdentity: () => Effect.succeed(null),
+        getAvailable: () =>
+          Effect.succeed({
+            repositoryIdentity: null,
+            faviconPath: null,
+            repositoryIdentityResolved: false,
+          }),
+        invalidate: () => Effect.void,
+        refreshRepositoryIdentity: () => Effect.void,
+        subscribeChanges: Effect.never,
+      }),
+    ),
+    Layer.provide(McpSessionRegistryTestkit.layer),
+    Layer.provide(McpProviderSessions.layer),
+    Layer.provideMerge(persistence),
+    Layer.provide(
+      CheckpointStore.layer.pipe(
+        Layer.provide(VcsDriverRegistry.layer),
+        Layer.provide(VcsProcess.layer),
+        Layer.provide(layerServerConfig),
+        Layer.provide(layerPlatformTest),
+      ),
+    ),
+    Layer.provide(layerServerConfig),
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+        getInstance: (instanceId) =>
+          Effect.succeed(instanceId === providerInstance.instanceId ? providerInstance : undefined),
+        listInstances: Effect.succeed([providerInstance]),
+        listUnavailable: Effect.succeed([]),
+        streamChanges: Stream.empty,
+        subscribeChanges: Effect.never,
+      }),
+    ),
+    Layer.provide(layerPlatformTest),
+  );
+const layerTest = makeLayerTest(SqlitePersistence.layerMemory);
 
 type Thread = OrchestrationV2AppThread & {
   readonly ownership?: { readonly ownerThreadId: ThreadId; readonly anchorTaskId: NodeId };
@@ -860,16 +866,13 @@ const TakeoverProbe = Context.Reference<typeof probe>("t3/orchestration-v2/Threa
   defaultValue: () => probe,
 });
 // Merged: the reactors read it from the layer, a test-driven worker from the test's context.
-const layerForwardTest = layerTest.pipe(
-  Layer.provideMerge(
-    Layer.succeed(TakeoverProbe, {
-      ownerRead: (child, owner) => Effect.suspend(() => probe.ownerRead(child, owner)),
-      ownerLocked: (child, owner) => Effect.suspend(() => probe.ownerLocked(child, owner)),
-      beforeForwardCommit: (input) => Effect.suspend(() => probe.beforeForwardCommit(input)),
-      reconcilerPassed: () => Effect.suspend(() => probe.reconcilerPassed()),
-    }),
-  ),
-);
+const layerProbe = Layer.succeed(TakeoverProbe, {
+  ownerRead: (child, owner) => Effect.suspend(() => probe.ownerRead(child, owner)),
+  ownerLocked: (child, owner) => Effect.suspend(() => probe.ownerLocked(child, owner)),
+  beforeForwardCommit: (input) => Effect.suspend(() => probe.beforeForwardCommit(input)),
+  reconcilerPassed: () => Effect.suspend(() => probe.reconcilerPassed()),
+});
+const layerForwardTest = layerTest.pipe(Layer.provideMerge(layerProbe));
 
 /** Started before an action: completes on the first stored event the filter accepts. */
 const awaitStoredEvent = (filter: (event: OrchestrationV2DomainEvent) => boolean) =>
@@ -1141,6 +1144,78 @@ const cancelWakeTurn = (threadId: ThreadId, runId: RunId) =>
         },
       ],
     });
+  });
+
+/** C's latest run gets an assistant reply, the text its result is built from. */
+const replyOnChild = (child: ThreadId, text: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(child)).runs.toSorted(
+      (a, b) => b.ordinal - a.ordinal,
+    )[0]!;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`reply:${run.id}`),
+          type: "message.updated",
+          threadId: child,
+          runId: run.id,
+          occurredAt: now,
+          payload: {
+            id: MessageId.make(`reply:${run.id}`),
+            threadId: child,
+            runId: run.id,
+            nodeId: null,
+            role: "assistant",
+            text,
+            attachments: [],
+            streaming: false,
+            createdBy: "agent",
+            creationSource: "server",
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+    return run.id;
+  });
+
+/** Started before an action: completes once `holder` records C's result `text`. */
+const awaitResultText = (holder: ThreadId, child: ThreadId, text: string) =>
+  awaitStoredEvent(
+    (event) =>
+      event.type === "subagent.updated" &&
+      event.threadId === holder &&
+      event.payload.childThreadId === child &&
+      event.payload.result === text,
+  );
+
+/** A third thread Q sends C a new turn; slice A records no task for it (display only). */
+const thirdPartyTurn = (s: Setup, name: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sender = ThreadId.make(`${name}-q`);
+    yield* seedThread({ threadId: sender, projectId: ProjectId.make(`${name}-project`) });
+    const messageId = MessageId.make(`${name}-q-turn`);
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`${name}-q-turn`),
+      threadId: s.child,
+      messageId,
+      text: "Also check the other branch.",
+      attachments: [],
+      modelSelection,
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "agent",
+      creationSource: "mcp",
+      senderThreadId: sender,
+    } as never);
+    return (yield* orchestrator.getThreadProjection(s.child)).runs.find(
+      (run) => run.userMessageId === messageId,
+    )!;
   });
 
 const layerForwardTestWithQuestions = DelegatedTaskQuestionReactor.layer.pipe(
@@ -1667,4 +1742,339 @@ it.layer(layerForwardTestWithQuestions)("thread takeover guard, forward and reco
         assert.equal((yield* openObligations(s.child)).length, 1);
       }),
   );
+
+  it.effect.each(["running", "finished", "running through S->T"] as const)(
+    "B-8: a third thread's later turn %s at the takeover is recorded by its own attempt",
+    (variant) =>
+      Effect.gen(function* () {
+        const name = `b8-${variant === "running" ? "live" : variant === "finished" ? "done" : "chain"}`;
+        const s = yield* setup(name);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sink = yield* EventSink.EventSinkV2;
+        // a: P's own task finishes and P acknowledges it.
+        yield* replyOnChild(s.child, "Result of a.");
+        const aRecorded = yield* awaitResultText(s.predecessor, s.child, "Result of a.");
+        yield* endChildRun(s.child);
+        yield* aRecorded;
+        yield* orchestrator.dispatch({
+          type: "delegated_task.completion-delivery.acknowledge",
+          commandId: CommandId.make(`${name}-ack`),
+          parentThreadId: s.predecessor,
+          taskId: s.taskId,
+          observedByRunId: s.predecessorRunId,
+        });
+        const receipt = yield* predecessorTask(s.predecessor, s.child);
+        assert.equal(receipt.completionDelivery?.state, "acknowledged");
+        // b: a real Q->C turn; no follow-up task records it.
+        const b = yield* thirdPartyTurn(s, name);
+        assert.isUndefined(b.delegatedTaskId);
+        assert.lengthOf(
+          (yield* orchestrator.getThreadProjection(s.predecessor)).subagents.filter(
+            (task) => task.childThreadId === s.child,
+          ),
+          1,
+          "the third thread's turn creates no task",
+        );
+        if (variant === "finished") {
+          yield* replyOnChild(s.child, "Result of b.");
+          yield* endChildRun(s.child);
+        }
+        const owner =
+          variant === "running through S->T" ? yield* seedSuccessorOf(s, name) : s.successor;
+        const outcome = yield* takeover(s.predecessor, s.successor);
+        if (owner !== s.successor) yield* takeover(s.successor, owner);
+        // Read before b ends, asserted after the record so a missing record is the first failure.
+        const anchorTaskId = (yield* thread(s.child)).ownership?.anchorTaskId;
+        const anchorBefore = (yield* orchestrator.getThreadProjection(owner)).subagents.find(
+          (task) => task.id === anchorTaskId,
+        );
+        const bBefore = (yield* orchestrator.getThreadProjection(s.child)).runs.find(
+          (run) => run.id === b.id,
+        )!;
+        if (variant !== "finished") {
+          yield* replyOnChild(s.child, "Result of b.");
+          const bRecorded = yield* awaitResultText(owner, s.child, "Result of b.");
+          yield* endChildRun(s.child);
+          yield* bRecorded;
+        }
+        // [F] recorded(current owner, b), class E, with b's own text.
+        const recorded = yield* recordedTask(owner, s.child, b.id);
+        assert.isDefined(recorded, "recorded(owner, b)");
+        assert.equal(recorded?.result, "Result of b.", "the owner records b's text");
+        assert.isTrue(notifiable(recorded), "b's delivery is eligible");
+        yield* requireTakeover;
+        assert.isTrue(outcome.ok);
+        assert.equal(recorded?.resultRunId, b.id);
+        assert.equal(recorded?.id, anchorTaskId);
+        if (variant !== "finished") {
+          // [N] the commit opened the owner's anchor for b and bound b to it.
+          assert.isDefined(anchorBefore);
+          assert.isNull(anchorBefore?.result);
+          assert.equal(bBefore.delegatedTaskId, anchorTaskId);
+        }
+        // [N] a's record and receipt on P are unchanged.
+        const after = yield* predecessorTask(s.predecessor, s.child);
+        assert.equal(after.result, "Result of a.");
+        assert.deepEqual(after.completionDelivery, receipt.completionDelivery);
+        // Recovery twice: the second pass writes nothing, and b stays recorded.
+        yield* outbox.reconcileAfterProcessLoss;
+        yield* orchestrator.recoverDelegatedTasks;
+        const afterFirst = yield* sink.latestSequence();
+        yield* outbox.reconcileAfterProcessLoss;
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.equal(yield* sink.latestSequence(), afterFirst);
+        assert.deepEqual(yield* recordedTask(owner, s.child, b.id), recorded);
+      }),
+  );
 });
+
+/**
+ * P2-1 (plan §6, §9 "fresh service instances"): each server process is a fresh build of the
+ * layers over one database file. Closing a process closes its reactors, reconciler, locks, stores
+ * and connection, so the next one starts only from what is on disk.
+ */
+const layerForwardFile = (dbPath: string) =>
+  makeLayerTest(SqlitePersistence.layerFromPath(dbPath)).pipe(Layer.provideMerge(layerProbe));
+type ProcessServices = Layer.Success<ReturnType<typeof layerForwardFile>>;
+
+/** A temporary database file, removed with the test's scope. */
+const databaseFile = Effect.gen(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-takeover-restart-" });
+  return path.join(directory, "state.sqlite");
+}).pipe(Effect.provide(NodeServices.layer));
+
+/** Runs `body` as one server process over `dbPath`, then shuts that process down completely. */
+const processOver =
+  (dbPath: string) =>
+  <A, E>(body: Effect.Effect<A, E, ProcessServices>) =>
+    body.pipe(Effect.provide(Layer.fresh(layerForwardFile(dbPath))));
+
+/**
+ * Startup after a process loss in production order (`serverRuntimeStartup.ts`): provider runtime
+ * recovery (with the outbox process-loss pass), delegated-task recovery with the subagent-results
+ * index answering nothing, then the effect worker.
+ */
+const startupAfterProcessLoss = Effect.gen(function* () {
+  const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  yield* recovery.recover;
+  yield* withoutResultIndex(orchestrator.recoverDelegatedTasks);
+  yield* runEffects;
+});
+
+/** What a restart could add for C: result events, result transfers and forward receipts. */
+const restartFootprint = (child: ThreadId) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ readonly kind: string; readonly count: number }>`
+      SELECT 'events' AS kind, COUNT(*) AS count FROM orchestration_v2_events
+      WHERE event_type IN ('subagent.updated', 'context-transfer.created')
+        AND (json_extract(payload_json, '$.childThreadId') = ${child}
+          OR json_extract(payload_json, '$.sourceThreadId') = ${child})
+      UNION ALL
+      SELECT 'receipts' AS kind, COUNT(*) AS count FROM orchestration_command_receipts
+      WHERE command_id LIKE 'takeover.forward:%'`;
+    return Object.fromEntries(rows.map((row) => [row.kind, row.count]));
+  });
+
+/** Fails fast, in a process of its own, on a build without takeover. */
+const requireTakeoverIn = (inProcess: ReturnType<typeof processOver>) => inProcess(requireTakeover);
+
+/** A third fresh process: startup again adds no result event or receipt for C. */
+const thirdProcessAddsNothing = (
+  inProcess: ReturnType<typeof processOver>,
+  holder: ThreadId,
+  child: ThreadId,
+  runId: RunId,
+) =>
+  inProcess(
+    Effect.gen(function* () {
+      const before = yield* restartFootprint(child);
+      const recordedBefore = yield* recordedTask(holder, child, runId);
+      yield* startupAfterProcessLoss;
+      assert.deepEqual(yield* restartFootprint(child), before, "no new result event or receipt");
+      assert.deepEqual(yield* recordedTask(holder, child, runId), recordedBefore);
+    }),
+  );
+
+const forwardAtCrash = [
+  "pending",
+  "running",
+  "failed",
+  "failed, inline repair fails once",
+] as const;
+
+it.effect.each(forwardAtCrash)(
+  "6/16 fresh processes: a forward %s at the crash is recorded by the next process",
+  (row) =>
+    Effect.gen(function* () {
+      const inProcess = processOver(yield* databaseFile);
+      yield* requireTakeoverIn(inProcess);
+      const name = `fresh-${row.replaceAll(/[^a-z]+/g, "-")}`;
+      const failing = row.startsWith("failed");
+      // Process A: the takeover, a result through G and its forward row; then A dies.
+      const seeded = yield* inProcess(
+        Effect.gen(function* () {
+          const s = yield* setup(name);
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          yield* replyOnChild(s.child, "Result of a.");
+          if (failing) probe.beforeForwardCommit = () => Effect.fail("injected fault");
+          const runId = yield* staleRouteResult(s);
+          if (failing) probe.beforeForwardCommit = () => Effect.fail("injected fault");
+          const taskId = (yield* predecessorTask(s.predecessor, s.child)).id;
+          if (row === "running") {
+            // The worker claimed it, then the process died.
+            yield* parkOtherEffects;
+            yield* outbox.claimNext({ workerId: "worker:lost" });
+          }
+          if (failing) yield* runEffects;
+          resetProbe();
+          const rows = yield* forwardRows(taskId, runId);
+          assert.equal(rows.current?.status, failing ? "failed" : row);
+          assert.lengthOf(yield* openObligations(s.child), 1);
+          return { s, runId, taskId, rearms: rows.rearms };
+        }),
+      );
+      const { s, runId, taskId } = seeded;
+      // Process B: fresh layers over the same file.
+      yield* inProcess(
+        Effect.gen(function* () {
+          let failures = row === "failed, inline repair fails once" ? 1 : 0;
+          probe.beforeForwardCommit = () =>
+            failures-- > 0 ? Effect.fail("transient fault") : Effect.void;
+          yield* startupAfterProcessLoss;
+          resetProbe();
+          // [F] recorded(S, exact a) with a's text, and the obligation is closed.
+          const recorded = yield* recordedTask(s.successor, s.child, runId);
+          assert.isTrue(notifiable(recorded), "recorded(S) E after a fresh process");
+          assert.equal(recorded?.resultRunId, runId);
+          assert.equal(recorded?.result, "Result of a.");
+          assert.deepEqual(yield* openObligations(s.child), []);
+          const rows = yield* forwardRows(taskId, runId);
+          if (row === "failed, inline repair fails once") {
+            // [N] the failed inline repair re-armed the row; this process's worker completed it.
+            assert.equal(rows.rearms, seeded.rearms + 1);
+            assert.equal(rows.current?.status, "succeeded");
+          }
+          // One success receipt at most, whichever path recorded it.
+          assert.isAtMost(
+            rows.receipts.filter((receipt) => receipt.status !== "rejected").length,
+            1,
+          );
+        }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+      );
+      // Process C: nothing new.
+      yield* thirdProcessAddsNothing(inProcess, s.successor, s.child, runId);
+    }).pipe(Effect.scoped, Effect.ensuring(Effect.sync(resetProbe))),
+);
+
+it.effect(
+  "6 fresh processes: a child running at the crash reports to S from the next process",
+  () =>
+    Effect.gen(function* () {
+      const inProcess = processOver(yield* databaseFile);
+      yield* requireTakeoverIn(inProcess);
+      // Process A: C is running when S takes over; then A dies.
+      const s = yield* inProcess(
+        Effect.gen(function* () {
+          const s = yield* setup("fresh-live");
+          const outcome = yield* takeover(s.predecessor, s.successor);
+          assert.isTrue(outcome.ok, JSON.stringify(outcome));
+          return s;
+        }),
+      );
+      // Process B: startup, then C's run finishes.
+      const runId = yield* inProcess(
+        Effect.gen(function* () {
+          yield* startupAfterProcessLoss;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const run = (yield* orchestrator.getThreadProjection(s.child)).runs.toSorted(
+            (a, b) => b.ordinal - a.ordinal,
+          )[0]!;
+          const anchorTaskId = (yield* thread(s.child)).ownership?.anchorTaskId;
+          // The anchor binding is durable: the reopened store still names S's anchor.
+          assert.equal(run.delegatedTaskId, anchorTaskId);
+          yield* replyOnChild(s.child, "Result after the restart.");
+          const recordedLive = yield* awaitResultText(
+            s.successor,
+            s.child,
+            "Result after the restart.",
+          );
+          const runId = yield* endChildRun(s.child);
+          yield* recordedLive;
+          // [F] recorded(S, exact run), class E.
+          const recorded = yield* recordedTask(s.successor, s.child, runId);
+          assert.isTrue(notifiable(recorded), "recorded(S) E");
+          assert.equal(recorded?.resultRunId, runId);
+          assert.equal(recorded?.result, "Result after the restart.");
+          // [N] the predecessor owes nothing: no forward obligation.
+          assert.deepEqual(yield* openObligations(s.child), []);
+          return runId;
+        }),
+      );
+      yield* thirdProcessAddsNothing(inProcess, s.successor, s.child, runId);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("6 fresh processes: an attempt that crashed before its commit expires; P keeps C", () =>
+  Effect.gen(function* () {
+    const inProcess = processOver(yield* databaseFile);
+    yield* requireTakeoverIn(inProcess);
+    const { takeoverTransferId } = yield* Effect.promise(() => import("./ThreadTakeover.ts"));
+    // Process A: begin, then the process dies before the commit.
+    const s = yield* inProcess(
+      Effect.gen(function* () {
+        const s = yield* setup("fresh-inert");
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        yield* orchestrator.dispatch({
+          type: "thread.takeover.begin",
+          commandId: CommandId.make("fresh-inert-begin"),
+          threadId: s.predecessor,
+          successorThreadId: s.successor,
+          transferId: takeoverTransferId(
+            s.predecessor,
+            s.successor,
+            CommandId.make(`launch:${s.successor}`),
+          ),
+          attempt: 1,
+          deadlineAt: DateTime.add(now, { seconds: 30 }),
+        } as never);
+        assert.equal((yield* thread(s.predecessor)).continuedBy?.state, "attempting");
+        return s;
+      }),
+    );
+    // Process B: startup; the deadline passes; C's result reaches P.
+    const runId = yield* inProcess(
+      Effect.gen(function* () {
+        yield* startupAfterProcessLoss;
+        yield* TestClock.adjust("31 seconds");
+        assert.isUndefined((yield* thread(s.child)).ownership, "P still owns C");
+        yield* replyOnChild(s.child, "Result for P.");
+        const recordedLive = yield* awaitResultText(s.predecessor, s.child, "Result for P.");
+        const runId = yield* endChildRun(s.child);
+        yield* recordedLive;
+        // [G] P's delivery is intact.
+        const recorded = yield* recordedTask(s.predecessor, s.child, runId);
+        assert.isTrue(notifiable(recorded), "recorded(P) E");
+        assert.equal(recorded?.result, "Result for P.");
+        // [N] the inert record stayed an expired attempt: no ownership, no move on P.
+        const record = (yield* thread(s.predecessor)).continuedBy;
+        assert.equal(record?.state, "attempting");
+        assert.isTrue(DateTime.isLessThan(record!.deadlineAt, yield* DateTime.now));
+        assert.isUndefined(recorded?.transferredTo);
+        assert.isUndefined(
+          (yield* Orchestrator.OrchestratorV2.pipe(
+            Effect.flatMap((orchestrator) => orchestrator.getThreadProjection(s.successor)),
+          )).subagents.find((task) => task.childThreadId === s.child),
+          "S has no anchor",
+        );
+        return runId;
+      }),
+    );
+    yield* thirdProcessAddsNothing(inProcess, s.predecessor, s.child, runId);
+  }).pipe(Effect.scoped),
+);

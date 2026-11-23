@@ -5211,7 +5211,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       AND requested.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
                       AND task.child_thread_id = child.thread_id
                       AND json_extract(task.payload_json, '$.origin') = 'app_owned'
-                      AND json_extract(task.payload_json, '$.result') IS NULL
+                      AND (json_extract(task.payload_json, '$.result') IS NULL
+                        -- A task naming an older attempt still owes a later run bound to it.
+                        OR requested.ordinal > (
+                          SELECT named.ordinal FROM orchestration_v2_projection_runs AS named
+                          WHERE named.thread_id = child.thread_id
+                            AND named.run_id = json_extract(task.payload_json, '$.resultRunId')
+                        ))
                   ) OR (
                     -- The original task still waits for the latest unheld work.
                     (SELECT status FROM orchestration_v2_projection_runs
