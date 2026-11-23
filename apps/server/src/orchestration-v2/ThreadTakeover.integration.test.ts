@@ -2164,7 +2164,7 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
         commandId: CommandId.make("t10-grandchild"),
         parentThreadId: child,
         parentRunId: childRun.id,
-        parentNodeId: childRun.rootNodeId,
+        parentNodeId: childRun.rootNodeId!,
         task: "Look deeper.",
         modelSelection,
         runtimeMode: "full-access",

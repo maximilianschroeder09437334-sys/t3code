@@ -2472,9 +2472,9 @@ function shellOwnershipFields(
   }
   return {
     ownerThreadId: ownership.ownerThreadId,
-    formerOwnerThreadIds: ownership.formerOwnerThreadIds ?? [
-      ...(thread.lineage.parentThreadId === null ? [] : [thread.lineage.parentThreadId]),
-    ],
+    formerOwnerThreadIds:
+      ownership.formerOwnerThreadIds ??
+      (thread.lineage.parentThreadId === null ? [] : [thread.lineage.parentThreadId]),
   };
 }
 
