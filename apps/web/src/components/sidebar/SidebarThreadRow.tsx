@@ -1580,11 +1580,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       data-thread-item={threadKey}
       {...sortableRootProps}
       {...(fileDropHandlers ?? {})}
-      // The hints are the rendered heights inside py-0.5. Revealing the open thread measures rows
-      // that have not rendered yet, so a hint off by a pixel lands it a pixel short per row above.
+      // The hints are the rendered heights inside py-0.5, in rem like the card: an unrendered card
+      // above the viewport that resizes as it renders jumps the rows on screen while scrolling up,
+      // and px hints miss whenever the root font size is not 16px. Revealing the open thread also
+      // measures unrendered rows, so a hint off by a pixel lands it a pixel short per row above.
       className={cn(
-        "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
-        metaLineEmpty && "[contain-intrinsic-size:auto_60px]",
+        "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_4.875rem]",
+        metaLineEmpty && "[contain-intrinsic-size:auto_3.75rem]",
         sortable?.isDragging && "relative z-20",
       )}
     >
