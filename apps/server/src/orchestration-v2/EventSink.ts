@@ -228,6 +228,8 @@ export interface EventSinkV2Shape {
     readonly cancelHandoffStart?: { readonly threadId: ThreadId; readonly runId: RunId };
     /** Like writeWithEffects' updateDelegatedCompletionOnly, for this run's run.updated only. */
     readonly updateDelegatedCompletionOnlyRunId?: RunId;
+    /** These runs' run.updated events change only `delegatedTaskId` of the stored row. */
+    readonly rebindDelegatedTaskOnlyRunIds?: ReadonlyArray<RunId>;
   }) => Effect.Effect<
     {
       readonly receipt: CommandReceiptStore.CommandReceiptV2;
@@ -419,6 +421,7 @@ const layerBase: Layer.Layer<
     const guardHandoffEvent = Effect.fn("EventSink.guardHandoffEvent")(function* (
       event: OrchestrationV2DomainEvent,
       handoffMutation: boolean,
+      takeoverMutation: boolean,
     ): Effect.fn.Return<OrchestrationV2DomainEvent, unknown> {
       const runnable =
         ((event.type === "run.created" || event.type === "run.updated") &&
@@ -549,6 +552,15 @@ const layerBase: Layer.Layer<
               ...(!handoffMutation ? { handoffTransfer: thread.handoffTransfer } : {}),
               handoffSourceThreadId: thread.handoffSourceThreadId,
               ...(!handoffMutation ? { handoffStopCommandId: thread.handoffStopCommandId } : {}),
+              // Whole-row writes from a stale read never drop or rewrite a takeover's records.
+              launchedBy: thread.launchedBy,
+              ...(!takeoverMutation
+                ? {
+                    continuedBy: thread.continuedBy,
+                    continues: thread.continues,
+                    ownership: thread.ownership,
+                  }
+                : {}),
             },
           };
         default:
@@ -559,6 +571,7 @@ const layerBase: Layer.Layer<
     const normalizeEvents = (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
       handoffMutation = false,
+      takeoverMutation = false,
     ) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
@@ -571,7 +584,7 @@ const layerBase: Layer.Layer<
         events,
         (incoming) =>
           Effect.gen(function* (): Effect.fn.Return<OrchestrationV2DomainEvent, unknown> {
-            const event = yield* guardHandoffEvent(incoming, handoffMutation);
+            const event = yield* guardHandoffEvent(incoming, handoffMutation, takeoverMutation);
             if (event.type !== "turn-item.updated") return event;
             const payload = yield* turnItemPositions.normalize(
               event.payload,
@@ -685,6 +698,29 @@ const layerBase: Layer.Layer<
                 ...event,
                 payload: { ...current, delegatedCompletion: event.payload.delegatedCompletion },
               };
+        }),
+      );
+    });
+
+    // A run that may change status without its thread's lock keeps the stored status.
+    const rebindDelegatedTaskOnly = Effect.fnUntraced(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      includesRun: (runId: RunId) => boolean,
+    ) {
+      return yield* Effect.forEach(events, (event) =>
+        Effect.gen(function* () {
+          if (event.type !== "run.updated" || !includesRun(event.payload.id)) return event;
+          const { runs } = yield* projectionStore.getThreadRecords(event.threadId, ["runs"], {
+            runIds: [event.payload.id],
+          });
+          const current = runs[0];
+          if (current === undefined) return event;
+          const { delegatedTaskId } = event.payload;
+          const { delegatedTaskId: _replaced, ...rest } = current;
+          return {
+            ...event,
+            payload: delegatedTaskId === undefined ? rest : { ...rest, delegatedTaskId },
+          };
         }),
       );
     });
@@ -1093,13 +1129,19 @@ const layerBase: Layer.Layer<
           }
 
           const runId = input.updateDelegatedCompletionOnlyRunId;
-          const normalized = yield* normalizeEvents(
+          const rebound = new Set<RunId>(input.rebindDelegatedTaskOnlyRunIds ?? []);
+          const completionOnly =
             runId === undefined
               ? input.events
-              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
+              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId);
+          const normalized = yield* normalizeEvents(
+            rebound.size === 0
+              ? completionOnly
+              : yield* rebindDelegatedTaskOnly(completionOnly, (id) => rebound.has(id)),
             input.commandType.startsWith("handoff.transfer.") ||
               input.commandType === "prepared-run.release" ||
               input.commandType === "thread.stop",
+            input.commandType.startsWith("thread.takeover."),
           );
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,

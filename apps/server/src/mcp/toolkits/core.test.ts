@@ -133,6 +133,7 @@ it.effect("only a thread its predecessor launched can take that predecessor over
     [threadId]: predecessorId,
     "thread:q-launched": ThreadId.make("thread:q"),
   };
+  const takeovers: Array<{ predecessorThreadId: ThreadId; successorThreadId: ThreadId }> = [];
   return Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     const call = (
@@ -151,8 +152,12 @@ it.effect("only a thread its predecessor launched can take that predecessor over
     );
     expect(declaredFailure(fromClient)).toMatchObject({ code: "thread_credential_required" });
 
+    // Admitted: the orchestrator runs the attempt for the bound caller, and its outcome is the result.
     const admitted = yield* call({ predecessorThreadId: predecessorId }, scope);
-    expect(declaredFailure(admitted)?.code).not.toMatch(/^takeover_|thread_not_found/);
+    expect(declaredFailure(admitted)).toMatchObject({ code: "takeover_timeout" });
+    expect(takeovers).toEqual([
+      { predecessorThreadId: predecessorId, successorThreadId: threadId },
+    ]);
 
     const unproven = yield* call(
       { predecessorThreadId: predecessorId },
@@ -169,6 +174,11 @@ it.effect("only a thread its predecessor launched can take that predecessor over
         Layer.provide(NodeCrypto.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
+            takeoverThread: (input) =>
+              Effect.sync(() => {
+                takeovers.push({ ...input });
+                return { ok: false as const, code: "takeover_timeout" as const, message: "busy" };
+              }),
             getThreadShell: (id) =>
               Effect.succeed(
                 id === "thread:missing" ? null : McpToolAccessTestkit.liveThreadShell(id),

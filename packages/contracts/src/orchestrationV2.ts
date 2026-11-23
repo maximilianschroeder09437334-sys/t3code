@@ -1052,6 +1052,8 @@ export const OrchestrationV2Subagent = Schema.Struct({
       forwards: Schema.optional(Schema.Array(RunId)),
     }),
   ),
+  /** The child run this task's result came from; set on every result write for a migrated child. */
+  resultRunId: Schema.optional(RunId),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -3844,6 +3846,27 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     requestId: RuntimeRequestId,
     generation: Schema.String,
+  }),
+  /**
+   * A successor's takeover of its predecessor's app-owned children, on the predecessor. `begin`
+   * and `timeout` touch only the predecessor; `commit` moves every child in one transaction.
+   */
+  Schema.Struct({
+    type: Schema.Literals([
+      "thread.takeover.begin",
+      "thread.takeover.commit",
+      "thread.takeover.timeout",
+    ]),
+    commandId: CommandId,
+    threadId: ThreadId,
+    successorThreadId: ThreadId,
+    transferId: TrimmedNonEmptyString,
+    attempt: PositiveInt,
+    deadlineAt: Schema.DateTimeUtc,
+    /** `commit` only: the children locked for it, sorted. */
+    childThreadIds: Schema.optional(Schema.Array(ThreadId)),
+    /** `timeout` only: why the attempt ended without moving anything. */
+    reason: Schema.optional(Schema.String),
   }),
   Schema.Struct({
     type: Schema.Literal("handoff.approval.record"),

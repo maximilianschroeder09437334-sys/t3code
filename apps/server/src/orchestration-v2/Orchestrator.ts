@@ -67,6 +67,7 @@ import {
   type OrchestrationV2ThreadShellSnapshot,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2Subagent,
+  type OrchestratorMcpThreadTakeoverResult,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   latestProviderTurnForAttempt,
@@ -87,6 +88,12 @@ import {
   managedRuntimeModeCeilingMessage,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import {
+  admitTakeover,
+  ThreadTakeoverSettings,
+  type ThreadTakeoverFailureCode,
+  type ThreadTakeoverOutcome,
+} from "./ThreadTakeover.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { modelSwitchSince } from "./modelSwitch.ts";
 import { isPlaceholderThreadTitle } from "./placeholderThreadTitle.ts";
@@ -99,12 +106,15 @@ import {
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -420,6 +430,14 @@ export interface OrchestratorV2Shape {
       dispatch: OrchestratorV2Shape["dispatch"],
     ) => Effect.Effect<void, E, R>;
   }) => Effect.Effect<void, E | OrchestratorV2Error, R>;
+  /**
+   * The successor's bounded synchronous takeover of its predecessor's app-owned children. On a
+   * timeout nothing moved and the predecessor keeps owning.
+   */
+  readonly takeoverThread: (input: {
+    readonly predecessorThreadId: ThreadId;
+    readonly successorThreadId: ThreadId;
+  }) => Effect.Effect<ThreadTakeoverOutcome, OrchestratorV2Error>;
   readonly delegatedTaskResultPending: (
     childThreadId: ThreadId,
     taskId?: NodeId,
@@ -635,8 +653,44 @@ export function threadHasUnfinishedWork(records: {
   );
 }
 
+type ThreadTakeoverCommand = Extract<
+  OrchestrationV2ServerCommand,
+  {
+    readonly type: "thread.takeover.begin" | "thread.takeover.commit" | "thread.takeover.timeout";
+  }
+>;
+
+const CURRENT_OWNER_LOCK_TRIES = 8;
+
+/** The thread an app-owned subagent reports to: the successor that took it over, else its parent. */
+function currentOwnerThreadId(
+  thread: Pick<OrchestrationV2AppThread, "lineage" | "forkedFrom" | "ownership">,
+): ThreadId | undefined {
+  const { lineage } = thread;
+  return lineage.relationshipToParent === "subagent" &&
+    lineage.parentThreadId !== null &&
+    thread.forkedFrom?.type === "node"
+    ? (thread.ownership?.ownerThreadId ?? lineage.parentThreadId)
+    : undefined;
+}
+
+/** Latest first: a child's current task on its owner. */
+function latestTaskFirst(a: OrchestrationV2Subagent, b: OrchestrationV2Subagent): number {
+  const started = (task: OrchestrationV2Subagent) =>
+    task.startedAt === null ? 0 : DateTime.toEpochMillis(task.startedAt);
+  return started(b) - started(a) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+}
+
+/** The anchor's node, task and turn item ids: one per (transfer, child). */
+function takeoverAnchorKey(transferId: string, childThreadId: ThreadId): string {
+  return `takeover:${transferId.slice(0, 24)}:${childThreadId}`;
+}
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
+    case "thread.takeover.begin":
+    case "thread.takeover.commit":
+    case "thread.takeover.timeout":
     case "thread.create":
     case "thread.archive":
     case "thread.unarchive":
@@ -14601,6 +14655,40 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  /** After a takeover the successor owns the child; `lineage` keeps the thread that created it. */
+  const appOwnedSubagentOwnerThreadId = Effect.fn("Orchestrator.appOwnedSubagentOwnerThreadId")(
+    function* (childThreadId: ThreadId) {
+      const childThread = yield* projectionStore.getThread(childThreadId);
+      return currentOwnerThreadId(childThread);
+    },
+  );
+
+  /**
+   * Runs `f` under the lock of the child's current owner. The owner is read, locked and read
+   * again; a takeover that moved the child in between releases and retries. One lock at a time,
+   * owner before child, as before. `exhausted` after 8 moves: callers log it, and the work stays
+   * derivable from durable state (a terminal child run whose task lacks its result).
+   */
+  const withCurrentOwnerLock = Effect.fn("Orchestrator.withCurrentOwnerLock")(function* <A, E, R>(
+    childThreadId: ThreadId,
+    f: (ownerThreadId: ThreadId) => Effect.Effect<A, E, R>,
+  ) {
+    for (let attempt = 0; attempt < CURRENT_OWNER_LOCK_TRIES; attempt++) {
+      const ownerThreadId = yield* appOwnedSubagentOwnerThreadId(childThreadId);
+      if (ownerThreadId === undefined) return { _tag: "no_owner" as const };
+      const locked = yield* threadDispatch.withLock(
+        ownerThreadId,
+        Effect.gen(function* () {
+          if ((yield* appOwnedSubagentOwnerThreadId(childThreadId)) !== ownerThreadId)
+            return Option.none<A>();
+          return Option.some(yield* f(ownerThreadId));
+        }),
+      );
+      if (Option.isSome(locked)) return { _tag: "locked" as const, value: locked.value };
+    }
+    return { _tag: "exhausted" as const };
+  });
+
   const awaitsRestartContinuation = (run: OrchestrationV2Run) =>
     effectOutbox
       .get(`effect:restart-continuation:${run.id}`)
@@ -14872,6 +14960,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly syncRunId?: RunId;
         readonly task: OrchestrationV2Subagent;
         readonly resultRun?: OrchestrationV2Run;
+        /** The locked thread that owns the task; the child's lineage parent until a takeover. */
+        readonly ownerThreadId: ThreadId;
       },
     ) {
       const childThreadId = childControls.thread.id;
@@ -14906,7 +14996,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : "running";
         if (task.result !== null || task.status === status) return;
         const parent = yield* projectionStore.getThreadRecords(
-          childControls.thread.lineage.parentThreadId,
+          options.ownerThreadId,
           ["nodes", "turnItems"],
           { nodeIds: [task.id], turnItemNodeIds: [task.id], turnItemTypes: ["subagent"] },
         );
@@ -14985,7 +15075,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messages: childResult.messages,
         turnItems: childResult.turnItems,
       };
-      const parentThreadId = childControls.thread.lineage.parentThreadId;
+      const parentThreadId = options.ownerThreadId;
       // The task's node and turn item share its id.
       const parentTask = yield* projectionStore.getThreadRecords(
         parentThreadId,
@@ -15040,6 +15130,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerThreadId: childRun.providerThreadId,
         status: terminalStatus,
         result: result.text,
+        // A migrated child's result names its exact attempt, so owners and forwards can compare.
+        ...(childControls.thread.ownership === undefined ? {} : { resultRunId: childRun.id }),
         completedAt: now,
         updatedAt: now,
         // The cancelling parent gets no wake, and the task records the run it settled from.
@@ -15165,8 +15257,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     });
 
+  /** `ownerThreadId` is the locked thread; a child another thread owns now is left to that owner. */
   const finalizeAppOwnedSubagent = Effect.fn("Orchestrator.finalizeAppOwnedSubagent")(function* (
     childThreadId: ThreadId,
+    ownerThreadId: ThreadId,
     options?: { readonly settledContinuationOf?: RunId; readonly syncRunId?: RunId },
   ) {
     const childControls = yield* projectionStore.getThreadRecords(
@@ -15174,10 +15268,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ["runs", "messages", "subagents", "providerThreads", "providerTurns", "attempts"],
       { messageRoles: ["user"] },
     );
-    const parentThreadId = childControls.thread.lineage.parentThreadId;
+    const parentThreadId = currentOwnerThreadId(childControls.thread);
     if (
-      childControls.thread.lineage.relationshipToParent !== "subagent" ||
-      parentThreadId === null ||
+      parentThreadId === undefined ||
+      parentThreadId !== ownerThreadId ||
       childControls.thread.forkedFrom?.type !== "node"
     )
       return;
@@ -15208,6 +15302,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         continue;
       yield* finalizeAppOwnedSubagentTask(childControls, {
         ...options,
+        ownerThreadId: parentThreadId,
         task,
         ...(progress.resultRun === undefined ? {} : { resultRun: progress.resultRun }),
       });
@@ -15457,6 +15552,468 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }),
     );
 
+  /** The predecessor's tasks a takeover moves, by child, and the live work it leaves there. */
+  const readTakeoverTasks = Effect.fnUntraced(function* (predecessorThreadId: ThreadId) {
+    const { subagents } = yield* projectionStore.getThreadRecords(predecessorThreadId, [
+      "subagents",
+    ]);
+    const byChild = new Map<ThreadId, Array<OrchestrationV2Subagent>>();
+    const notMigrated: Array<OrchestratorMcpThreadTakeoverResult["notMigrated"][number]> = [];
+    const leave = (
+      task: OrchestrationV2Subagent,
+      reason: "provider_native" | "child_unavailable",
+    ) => {
+      if (isOrchestrationV2WorkActive(task.status))
+        notMigrated.push({ taskId: task.id, kind: "subagent", reason });
+    };
+    for (const task of subagents) {
+      if (task.transferredTo !== undefined) continue;
+      if (task.origin !== "app_owned") {
+        leave(task, "provider_native");
+        continue;
+      }
+      if (task.childThreadId === null) {
+        leave(task, "child_unavailable");
+        continue;
+      }
+      const child = yield* projectionStore
+        .getThread(task.childThreadId)
+        .pipe(Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }));
+      if (
+        child === null ||
+        child.archivedAt !== null ||
+        child.deletedAt !== null ||
+        currentOwnerThreadId(child) !== predecessorThreadId
+      ) {
+        leave(task, "child_unavailable");
+        continue;
+      }
+      byChild.set(child.id, [...(byChild.get(child.id) ?? []), task]);
+    }
+    return { byChild, childThreadIds: [...byChild.keys()].toSorted(), notMigrated };
+  });
+
+  /** Rebuilt from durable state, so a repeat call after the commit returns the same result. */
+  const readTakeoverResult = Effect.fnUntraced(function* (
+    predecessorThreadId: ThreadId,
+    transferId: string,
+  ) {
+    const { subagents } = yield* projectionStore.getThreadRecords(predecessorThreadId, [
+      "subagents",
+    ]);
+    const moved = subagents.filter(
+      (task): task is OrchestrationV2Subagent & { readonly childThreadId: ThreadId } =>
+        task.transferredTo?.transferId === transferId && task.childThreadId !== null,
+    );
+    const current = new Map<ThreadId, OrchestrationV2Subagent>();
+    for (const task of moved.toSorted(latestTaskFirst))
+      if (!current.has(task.childThreadId)) current.set(task.childThreadId, task);
+    const { notMigrated } = yield* readTakeoverTasks(predecessorThreadId);
+    return {
+      transferId,
+      state: "effective",
+      migrated: moved.map((task) => ({
+        childThreadId: task.childThreadId,
+        taskId: task.id,
+        anchorTaskId: task.transferredTo!.taskId,
+      })),
+      // A task the move closed is disposed; only a result the predecessor received stays delivered.
+      alreadyDeliveredToPredecessor: [...current.values()].flatMap((task) =>
+        task.childThreadId !== null &&
+        (task.completionDelivery?.state === "delivered" ||
+          task.completionDelivery?.state === "acknowledged")
+          ? [task.childThreadId]
+          : [],
+      ),
+      notMigrated,
+    } satisfies OrchestratorMcpThreadTakeoverResult;
+  });
+
+  const takeoverUpstream = Effect.fnUntraced(function* (thread: OrchestrationV2AppThread) {
+    const upstream: Array<ThreadId> = [];
+    let next = thread.continues?.threadId;
+    while (next !== undefined && upstream.length < 32) {
+      upstream.push(next);
+      next = (yield* projectionStore
+        .getThread(next)
+        .pipe(Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) })))
+        ?.continues?.threadId;
+    }
+    return upstream;
+  });
+
+  /**
+   * `begin` and `timeout` write only the predecessor's record; `timeout` is a compare-and-set on
+   * the attempt, so a late one never overwrites a later attempt or an effective takeover. `commit`
+   * runs under the predecessor's, every child's and the successor's locks and moves every child in
+   * this one command's transaction.
+   */
+  const dispatchThreadTakeover = Effect.fn("orchestrationV2.dispatch.threadTakeover")(function* (
+    command: ThreadTakeoverCommand,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ): Effect.fn.Return<
+    {
+      readonly updateDelegatedCompletionOnlyRunId?: RunId;
+      readonly rebindDelegatedTaskOnlyRunIds?: ReadonlyArray<RunId>;
+    },
+    OrchestratorV2Error
+  > {
+    const fail = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    const emitEvent = emit(events, command);
+    const predecessor = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(mapDispatchError(command));
+    const now = yield* DateTime.now;
+    const metadata = (thread: OrchestrationV2AppThread) =>
+      emitEvent({
+        type: "thread.metadata-updated",
+        threadId: thread.id,
+        occurredAt: now,
+        payload: thread,
+      });
+    const record = predecessor.continuedBy;
+    const attempting =
+      record !== undefined &&
+      record.threadId === command.successorThreadId &&
+      record.transferId === command.transferId &&
+      record.attempt === command.attempt &&
+      record.state === "attempting"
+        ? record
+        : undefined;
+    if (command.type === "thread.takeover.timeout") {
+      if (attempting !== undefined)
+        yield* metadata({
+          ...predecessor,
+          continuedBy: {
+            ...attempting,
+            state: "timed_out",
+            reason: command.reason ?? "lock_contention",
+          },
+        });
+      return {};
+    }
+    if (command.type === "thread.takeover.begin") {
+      yield* metadata({
+        ...predecessor,
+        continuedBy: {
+          threadId: command.successorThreadId,
+          transferId: command.transferId,
+          attempt: command.attempt,
+          state: "attempting",
+          deadlineAt: command.deadlineAt,
+        },
+      });
+      return {};
+    }
+    if (attempting === undefined) return yield* fail("The takeover attempt was superseded.");
+    const successor = yield* projectionStore
+      .getThread(command.successorThreadId)
+      .pipe(mapDispatchError(command));
+    const admission = admitTakeover({
+      predecessor,
+      successor,
+      now,
+      predecessorUpstream: yield* takeoverUpstream(predecessor).pipe(mapDispatchError(command)),
+    });
+    if (!admission.ok) return yield* fail(admission.message);
+    if (admission.transferId !== command.transferId)
+      return yield* fail("The takeover names another launch of the successor.");
+    const successorRecords = yield* projectionStore
+      .getThreadRecords(successor.id, ["runs", "providerTurns", "attempts"])
+      .pipe(mapDispatchError(command));
+    const successorRun = successorRecords.runs
+      .filter((run) => isActiveRun(run) && run.rootNodeId !== null)
+      .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+    if (successorRun === undefined || successorRun.rootNodeId === null)
+      return yield* fail("takeover_successor_not_running");
+    const successorRootNodeId = successorRun.rootNodeId;
+    const { byChild, childThreadIds } = yield* readTakeoverTasks(predecessor.id).pipe(
+      mapDispatchError(command),
+    );
+    if (childThreadIds.some((id) => !(command.childThreadIds ?? []).includes(id)))
+      return yield* fail("A child the takeover did not lock belongs to the predecessor.");
+    const movedTaskIds = [...byChild.values()].flatMap((tasks) => tasks.map((task) => task.id));
+    const predecessorItems = yield* projectionStore
+      .getThreadRecords(predecessor.id, ["nodes", "turnItems"], {
+        nodeIds: movedTaskIds,
+        turnItemNodeIds: movedTaskIds,
+        turnItemTypes: ["subagent"],
+      })
+      .pipe(mapDispatchError(command));
+    const firstOrdinal = yield* nextTurnItemOrdinal({ thread: successor });
+    const providerTurnId = providerTurnForRun(successorRecords, successorRun)?.id ?? null;
+    const reboundRunIds: Array<RunId> = [];
+    let plansDelivery = false;
+    for (const [index, childThreadId] of childThreadIds.entries()) {
+      // A follow-up is recorded only once the task before it has a result, so the latest is current.
+      const tasks = (byChild.get(childThreadId) ?? []).toSorted(latestTaskFirst);
+      const current = tasks[0];
+      if (current === undefined) continue;
+      const child = yield* projectionStore
+        .getThreadRecords(
+          childThreadId,
+          ["runs", "messages", "subagents", "providerThreads", "providerTurns", "attempts"],
+          { messageRoles: ["user"] },
+        )
+        .pipe(mapDispatchError(command));
+      const originalTaskId =
+        child.thread.forkedFrom?.type === "node" ? child.thread.forkedFrom.nodeId : undefined;
+      const boundRuns = (
+        current.id === originalTaskId
+          ? child.runs.filter(
+              (run) => run.delegatedTaskId === undefined || run.delegatedTaskId === current.id,
+            )
+          : child.runs.filter((run) => run.delegatedTaskId === current.id)
+      ).toSorted((a, b) => b.ordinal - a.ordinal);
+      const open = current.result === null;
+      const resultRun = open
+        ? undefined
+        : boundRuns.find((run) => delegatedTaskTerminalStatus(run.status) !== null);
+      const delivered =
+        !open &&
+        (current.completionDelivery?.state === "delivered" ||
+          current.completionDelivery?.state === "acknowledged");
+      const anchorKey = takeoverAnchorKey(command.transferId, childThreadId);
+      const anchorId = NodeId.make(anchorKey);
+      let anchor: OrchestrationV2Subagent = {
+        ...current,
+        id: anchorId,
+        threadId: successor.id,
+        runId: successorRun.id,
+        parentNodeId: successorRootNodeId,
+        completionWake: "always",
+        // The predecessor already received this result: the successor records it without a wake.
+        completionDelivery: { state: delivered ? "disposed" : "pending", observedByRunId: null },
+        cancelledRunId: undefined,
+        transferredTo: undefined,
+        resultRunId: resultRun?.id,
+        startedAt: now,
+        updatedAt: now,
+      };
+      if (!open && !delivered) {
+        // Planned on pending events, so every moved result joins one delivery generation.
+        const projection = yield* getProjectionWithPendingEvents(successor.id, events);
+        const plan = yield* planDelegatedCompletionDelivery({
+          parentProjection: projection,
+          parentRun: projection.runs.find((run) => run.id === successorRun.id),
+          task: anchor,
+          updatedTask: anchor,
+          now,
+        }).pipe(mapDispatchError(command));
+        anchor = plan.task;
+        for (const event of delegatedCompletionPlanEvents(
+          successor.id,
+          plan,
+          successor.providerInstanceId,
+          now,
+        ))
+          yield* emitEvent(event);
+        plansDelivery = true;
+      }
+      const anchorScope = {
+        threadId: successor.id,
+        runId: successorRun.id,
+        nodeId: anchorId,
+        occurredAt: now,
+      };
+      yield* emitEvent({
+        ...anchorScope,
+        type: "node.updated",
+        payload: {
+          id: anchorId,
+          threadId: successor.id,
+          runId: successorRun.id,
+          parentNodeId: successorRootNodeId,
+          rootNodeId: successorRootNodeId,
+          kind: "subagent",
+          status: anchor.status,
+          countsForRun: false,
+          providerThreadId: anchor.providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: anchor.completedAt,
+        },
+      });
+      yield* emitEvent({ ...anchorScope, type: "subagent.updated", payload: anchor });
+      yield* emitEvent({
+        ...anchorScope,
+        type: "turn-item.updated",
+        payload: {
+          id: TurnItemId.make(anchorKey),
+          threadId: successor.id,
+          runId: successorRun.id,
+          nodeId: anchorId,
+          providerThreadId: successorRun.providerThreadId,
+          providerTurnId,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: firstOrdinal + index,
+          status: anchor.status,
+          title: child.thread.title,
+          startedAt: now,
+          completedAt: anchor.completedAt,
+          updatedAt: now,
+          type: "subagent",
+          subagentId: anchorId,
+          origin: "app_owned",
+          driver: anchor.driver,
+          providerInstanceId: anchor.providerInstanceId,
+          childThreadId,
+          prompt: anchor.prompt,
+          result: anchor.result,
+        },
+      });
+      if (resultRun !== undefined) {
+        // The transfer finalize would write, so its dedupe and recovery see the result as recorded.
+        const resultTransferId = yield* idAllocator.allocate
+          .contextTransfer({
+            sourceThreadId: childThreadId,
+            targetThreadId: successor.id,
+            type: "subagent_result",
+          })
+          .pipe(mapDispatchError(command));
+        yield* emitEvent({
+          type: "context-transfer.created",
+          threadId: successor.id,
+          runId: successorRun.id,
+          providerInstanceId: resultRun.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: resultTransferId,
+            type: "subagent_result",
+            sourceThreadId: childThreadId,
+            targetThreadId: successor.id,
+            sourcePoint: contextSourcePointForRun(child, resultRun),
+            basePoint: null,
+            sourceProviderInstanceId: resultRun.providerInstanceId,
+            targetProviderInstanceId: successorRun.providerInstanceId,
+            targetRunId: successorRun.id,
+            status: "consumed",
+            resolution: null,
+            createdBy: "system",
+            error: null,
+            createdAt: now,
+            updatedAt: now,
+            consumedAt: now,
+          },
+        });
+      }
+      if (open) {
+        // The child's live runs, and its latest one whose result may still be finalizing, report
+        // to the anchor. Only `delegatedTaskId` changes; the run's stored status is kept.
+        for (const [position, run] of boundRuns.entries()) {
+          if (position > 0 && delegatedTaskTerminalStatus(run.status) !== null) continue;
+          yield* emitEvent({
+            type: "run.updated",
+            threadId: childThreadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, delegatedTaskId: anchorId },
+          });
+          reboundRunIds.push(run.id);
+        }
+      }
+      for (const task of tasks) {
+        const transferredTo = {
+          threadId: successor.id,
+          taskId: anchorId,
+          transferId: command.transferId,
+        };
+        const taskScope = {
+          threadId: predecessor.id,
+          ...(task.runId === null ? {} : { runId: task.runId }),
+          nodeId: task.id,
+          occurredAt: now,
+        };
+        if (task.result !== null) {
+          // A result still owed here is disposed, so the predecessor never claims it again. A
+          // claimed wake stays claimed: the successor already holds the copy.
+          const owed =
+            task.completionDelivery === undefined || task.completionDelivery.state === "pending";
+          yield* emitEvent({
+            ...taskScope,
+            type: "subagent.updated",
+            payload: {
+              ...task,
+              transferredTo,
+              updatedAt: now,
+              ...(owed
+                ? { completionDelivery: { state: "disposed" as const, observedByRunId: null } }
+                : {}),
+            },
+          });
+          continue;
+        }
+        // Closed here, so the predecessor's stop, cancel and settle paths skip it.
+        const result = `Moved to ${successor.title}`;
+        yield* emitEvent({
+          ...taskScope,
+          type: "subagent.updated",
+          payload: {
+            ...task,
+            transferredTo,
+            status: "completed",
+            result,
+            completedAt: now,
+            updatedAt: now,
+            completionDelivery: { state: "disposed", observedByRunId: null },
+          },
+        });
+        const node = predecessorItems.nodes.find((row) => row.id === task.id);
+        if (node !== undefined)
+          yield* emitEvent({
+            threadId: predecessor.id,
+            ...(node.runId === null ? {} : { runId: node.runId }),
+            nodeId: node.id,
+            occurredAt: now,
+            type: "node.updated",
+            payload: { ...node, status: "completed", completedAt: now },
+          });
+        const item = predecessorItems.turnItems.find(
+          (row) => row.type === "subagent" && row.subagentId === task.id,
+        );
+        if (item?.type === "subagent")
+          yield* emitEvent({
+            threadId: predecessor.id,
+            ...(item.runId === null ? {} : { runId: item.runId }),
+            ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+            occurredAt: now,
+            type: "turn-item.updated",
+            payload: { ...item, status: "completed", result, completedAt: now, updatedAt: now },
+          });
+      }
+      yield* metadata({
+        ...child.thread,
+        ownership: {
+          ownerThreadId: successor.id,
+          transferId: command.transferId,
+          anchorTaskId: anchorId,
+          at: now,
+        },
+      });
+    }
+    yield* metadata({
+      ...predecessor,
+      continuedBy: { ...attempting, state: "effective", effectiveAt: now },
+    });
+    yield* metadata({
+      ...successor,
+      continues: { threadId: predecessor.id, transferId: command.transferId, at: now },
+    });
+    return {
+      ...(plansDelivery ? { updateDelegatedCompletionOnlyRunId: successorRun.id } : {}),
+      rebindDelegatedTaskOnlyRunIds: reboundRunIds,
+    };
+  });
+
   const dispatchOnce = Effect.fn("orchestrationV2.dispatch.once")(function* (
     command: OrchestrationV2ServerCommand,
     sideChatIds: ReadonlyArray<ThreadId>,
@@ -15470,6 +16027,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       };
       readonly cancelHandoffStart?: { readonly threadId: ThreadId; readonly runId: RunId };
       readonly updateDelegatedCompletionOnlyRunId?: RunId;
+      readonly rebindDelegatedTaskOnlyRunIds?: ReadonlyArray<RunId>;
       readonly expectedHandoff?: HandoffCommitExpectation;
       readonly expectedThreadSequences?: ReadonlyArray<{
         readonly threadId: ThreadId;
@@ -15494,6 +16052,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       | undefined;
     let cancelHandoffStart: { readonly threadId: ThreadId; readonly runId: RunId } | undefined;
     let updateDelegatedCompletionOnlyRunId: RunId | undefined;
+    let rebindDelegatedTaskOnlyRunIds: ReadonlyArray<RunId> | undefined;
     let expectedHandoff: HandoffCommitExpectation | undefined;
     let expectedThreadSequences:
       | ReadonlyArray<{ readonly threadId: ThreadId; readonly sequence: number }>
@@ -16396,6 +16955,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "link_request.record":
         yield* dispatchLinkRequestRecord(command, events, effects);
         break;
+      case "thread.takeover.begin":
+      case "thread.takeover.commit":
+      case "thread.takeover.timeout": {
+        const takeover = yield* dispatchThreadTakeover(command, events);
+        updateDelegatedCompletionOnlyRunId = takeover.updateDelegatedCompletionOnlyRunId;
+        rebindDelegatedTaskOnlyRunIds = takeover.rebindDelegatedTaskOnlyRunIds;
+        break;
+      }
       default:
         return yield* dispatchUnsupported(command);
     }
@@ -16409,6 +16976,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(updateDelegatedCompletionOnlyRunId === undefined
         ? {}
         : { updateDelegatedCompletionOnlyRunId }),
+      ...(rebindDelegatedTaskOnlyRunIds === undefined || rebindDelegatedTaskOnlyRunIds.length === 0
+        ? {}
+        : { rebindDelegatedTaskOnlyRunIds }),
     };
   });
 
@@ -16568,6 +17138,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "handoff.transfer.reverse" ||
           command.type === "handoff.transfer.cancel" ||
           command.type === "subagent.stop" ||
+          // A timeout for an attempt that already ended changes nothing.
+          command.type === "thread.takeover.timeout" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close" ||
           (command.type === "thread.delete" && command.onlyIfUnused === true),
@@ -16715,6 +17287,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(plan.updateDelegatedCompletionOnlyRunId === undefined
           ? {}
           : { updateDelegatedCompletionOnlyRunId: plan.updateDelegatedCompletionOnlyRunId }),
+        ...(plan.rebindDelegatedTaskOnlyRunIds === undefined
+          ? {}
+          : { rebindDelegatedTaskOnlyRunIds: plan.rebindDelegatedTaskOnlyRunIds }),
       })
       .pipe(
         Effect.mapError(
@@ -16776,6 +17351,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
     }
+    // Moved results joined one delivery on the successor; offer it as finalize would.
+    if (command.type === "thread.takeover.commit")
+      yield* mapDispatchError(command)(
+        offerDelegatedCompletionDeliveries(command.successorThreadId),
+      );
 
     return {
       sequence: committed.receipt.resultSequence,
@@ -16978,13 +17558,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             dispatchMode: { type: "start_immediately" },
           });
       }
-      const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
-      if (parentThreadId !== undefined) {
-        yield* threadDispatch.withLock(
-          parentThreadId,
-          finalizeAppOwnedSubagent(threadId, { syncRunId: run.id }),
-        );
-      }
+      // Exhaustion leaves a terminal run whose task lacks its result, which recovery finds.
+      const finalized = yield* withCurrentOwnerLock(threadId, (ownerThreadId) =>
+        finalizeAppOwnedSubagent(threadId, ownerThreadId, { syncRunId: run.id }),
+      );
+      if (finalized._tag === "exhausted")
+        yield* Effect.logWarning("A delegated child's owner kept changing; its result waits", {
+          threadId,
+          runId: run.id,
+        });
     },
     (effect, stored) =>
       effect.pipe(
@@ -17118,9 +17700,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         stored.event.threadId,
         Effect.gen(function* () {
           const childThreadId = stored.event.threadId;
-          const parentThreadId = yield* appOwnedSubagentParentThreadId(childThreadId);
-          if (parentThreadId === undefined) return;
-          yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(childThreadId));
+          // Exhaustion leaves the settled work for recovery, as above.
+          const finalized = yield* withCurrentOwnerLock(childThreadId, (ownerThreadId) =>
+            finalizeAppOwnedSubagent(childThreadId, ownerThreadId),
+          );
+          if (finalized._tag === "exhausted")
+            yield* Effect.logWarning("A delegated child's owner kept changing; its result waits", {
+              threadId: childThreadId,
+            });
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("Failed to finalize a delegated child after its work settled", {
@@ -17148,7 +17735,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               const thread = yield* projectionStore.getThreadShell(threadId);
               const parentThreadId = thread?.lineage.parentThreadId;
               if (parentThreadId === undefined || parentThreadId === null) return;
-              yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(threadId));
+              // Exhaustion leaves the candidate for the next recovery.
+              const finalized = yield* withCurrentOwnerLock(threadId, (ownerThreadId) =>
+                finalizeAppOwnedSubagent(threadId, ownerThreadId),
+              );
+              if (finalized._tag === "exhausted")
+                yield* Effect.logWarning("A recovered child's owner kept changing", {
+                  childThreadId: threadId,
+                });
             }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to recover terminal app-owned subagent", {
@@ -17283,15 +17877,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
       }
       const sourceRunId = options?.sourceRunId;
-      const parentThreadId = yield* appOwnedSubagentParentThreadId(threadId);
-      if (parentThreadId === undefined) return;
+      if ((yield* appOwnedSubagentOwnerThreadId(threadId)) === undefined) return;
       if (
         sourceRunId === undefined &&
         !(yield* projectionStore.hasPendingDelegatedCompletion(threadId))
       )
         return;
-      yield* threadDispatch.withLock(
-        parentThreadId,
+      // Exhaustion leaves the pending completion for the next recovery.
+      const recovered = yield* withCurrentOwnerLock(threadId, (parentThreadId) =>
         Effect.gen(function* () {
           // A task's wake lives on the run that requested it; the parent's other wakes are not this child's.
           const { subagents } = yield* projectionStore.getThreadRecords(
@@ -17311,11 +17904,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           Effect.andThen(
             finalizeAppOwnedSubagent(
               threadId,
+              parentThreadId,
               sourceRunId === undefined ? undefined : { settledContinuationOf: sourceRunId },
             ),
           ),
         ),
       );
+      if (recovered._tag === "exhausted")
+        yield* Effect.logWarning("A recovered child's owner kept changing", {
+          childThreadId: threadId,
+        });
     },
     (effect, threadId, _options) =>
       effect.pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
@@ -17392,8 +17990,321 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             yield* dispatchWithReceiptEffect(command, [], cancelledTask);
           }),
         );
-        yield* finalizeAppOwnedSubagent(command.threadId).pipe(mapDispatchError(command));
+        yield* finalizeAppOwnedSubagent(command.threadId, input.parentThreadId).pipe(
+          mapDispatchError(command),
+        );
       }),
+    );
+  });
+
+  // The attempt this process runs, by transferId. A distinct concurrent call from the same
+  // successor joins it; the executing call never awaits its own.
+  const takeoverAttempts = new Map<
+    string,
+    { readonly executionId: number; readonly done: Deferred.Deferred<ThreadTakeoverOutcome> }
+  >();
+  let takeoverExecutions = 0;
+  const nowMillis = Effect.map(DateTime.now, DateTime.toEpochMillis);
+  const takeoverFailure = (
+    code: ThreadTakeoverFailureCode,
+    message: string,
+  ): ThreadTakeoverOutcome => ({ ok: false, code, message });
+
+  /**
+   * Waits for `threadId`'s lock until `untilMs`, holding nothing. A body that got the lock always
+   * runs to the end, so a deadline never cuts a commit that already started.
+   */
+  const withLockUntil = Effect.fn("Orchestrator.withLockUntil")(function* <A, E, R>(
+    threadId: ThreadId,
+    untilMs: number,
+    body: Effect.Effect<A, E, R>,
+  ): Effect.fn.Return<Option.Option<A>, E, R> {
+    const phase = yield* Ref.make<"waiting" | "acquired" | "abandoned">("waiting");
+    const fiber = yield* Effect.forkChild(
+      threadDispatch.withLock(
+        threadId,
+        Ref.modify(phase, (current) =>
+          current === "waiting" ? [true, "acquired" as const] : [false, current],
+        ).pipe(
+          Effect.flatMap((acquired) =>
+            acquired ? Effect.asSome(body) : Effect.succeed(Option.none<A>()),
+          ),
+        ),
+      ),
+    );
+    const remaining = Math.max(0, untilMs - (yield* nowMillis));
+    const exit = yield* Fiber.await(fiber).pipe(Effect.timeoutOption(remaining));
+    if (Option.isSome(exit)) return yield* exit.value;
+    const abandoned = yield* Ref.modify(phase, (current) =>
+      current === "waiting" ? [true, "abandoned" as const] : [false, current],
+    );
+    if (!abandoned) return yield* Fiber.join(fiber);
+    yield* Fiber.interrupt(fiber);
+    return Option.none<A>();
+  });
+
+  type TakeoverToken = {
+    readonly transferId: string;
+    readonly attempt: number;
+    readonly deadlineAt: DateTime.Utc;
+    readonly executionId: number;
+    readonly done: Deferred.Deferred<ThreadTakeoverOutcome>;
+  };
+
+  /**
+   * Steps 3-5 for an admitted attempt. Each retry re-acquires the predecessor with the same
+   * deadline and resumes here while the record still matches the token; admission never reruns.
+   */
+  const runTakeoverAttempt = Effect.fnUntraced(function* (
+    predecessorThreadId: ThreadId,
+    successorThreadId: ThreadId,
+    token: TakeoverToken,
+  ): Effect.fn.Return<ThreadTakeoverOutcome, OrchestratorV2Error> {
+    const settings = yield* ThreadTakeoverSettings;
+    const deadlineMs = DateTime.toEpochMillis(token.deadlineAt);
+    const commandFields = {
+      threadId: predecessorThreadId,
+      successorThreadId,
+      transferId: token.transferId,
+      attempt: token.attempt,
+      deadlineAt: token.deadlineAt,
+    };
+    const stepCommandId = (step: "commit" | "timeout") =>
+      CommandId.make(`takeover:${token.transferId}:${token.attempt}:${step}`);
+    const projectionError = (cause: unknown) =>
+      new OrchestratorProjectionError({ threadId: predecessorThreadId, cause });
+    type Locked =
+      | { readonly _tag: "outcome"; readonly outcome: ThreadTakeoverOutcome }
+      | { readonly _tag: "deadline" }
+      | { readonly _tag: "miss" };
+    // Step 4: every lock is held.
+    const commitUnderLocks = Effect.fnUntraced(function* (
+      childThreadIds: ReadonlyArray<ThreadId>,
+    ): Effect.fn.Return<Locked, OrchestratorV2Error> {
+      if ((yield* nowMillis) >= deadlineMs) return { _tag: "deadline" };
+      const { runs } = yield* projectionStore
+        .getThreadRecords(successorThreadId, ["runs"])
+        .pipe(Effect.mapError(projectionError));
+      if (!runs.some((run) => isActiveRun(run) && run.rootNodeId !== null)) {
+        yield* dispatchWithReceiptEffect({
+          ...commandFields,
+          type: "thread.takeover.timeout",
+          commandId: stepCommandId("timeout"),
+          reason: "successor_not_running",
+        });
+        return {
+          _tag: "outcome",
+          outcome: takeoverFailure(
+            "takeover_successor_not_running",
+            "Take over from a running turn of this thread.",
+          ),
+        };
+      }
+      yield* Effect.uninterruptible(
+        dispatchWithReceiptEffect({
+          ...commandFields,
+          type: "thread.takeover.commit",
+          commandId: stepCommandId("commit"),
+          childThreadIds,
+        }),
+      );
+      return {
+        _tag: "outcome",
+        outcome: {
+          ok: true,
+          result: yield* readTakeoverResult(predecessorThreadId, token.transferId).pipe(
+            Effect.mapError(projectionError),
+          ),
+        },
+      };
+    });
+    while (true) {
+      const locked = yield* withLockUntil(
+        predecessorThreadId,
+        deadlineMs,
+        Effect.gen(function* (): Effect.fn.Return<Locked, OrchestratorV2Error> {
+          const predecessor = yield* projectionStore
+            .getThread(predecessorThreadId)
+            .pipe(Effect.mapError(projectionError));
+          const record = predecessor.continuedBy;
+          if (
+            record?.threadId !== successorThreadId ||
+            record.transferId !== token.transferId ||
+            record.attempt !== token.attempt ||
+            record.state !== "attempting"
+          )
+            return {
+              _tag: "outcome",
+              outcome: takeoverFailure("takeover_conflict", "The takeover attempt was replaced."),
+            };
+          // Step 3: the predecessor's tasks change only under its lock, so this set is stable.
+          const { childThreadIds } = yield* readTakeoverTasks(predecessorThreadId).pipe(
+            Effect.mapError(projectionError),
+          );
+          const held = yield* [...childThreadIds, successorThreadId].reduceRight<
+            Effect.Effect<Option.Option<Locked>, OrchestratorV2Error>
+          >(
+            (inner, threadId) =>
+              threadDispatch.tryWithLock(threadId, inner).pipe(
+                Effect.tap((held) =>
+                  Option.isNone(held)
+                    ? Effect.logDebug("Takeover try-lock missed", threadId)
+                    : Effect.void,
+                ),
+                Effect.map(Option.flatten),
+              ),
+            Effect.asSome(commitUnderLocks(childThreadIds)),
+          );
+          return Option.getOrElse(held, (): Locked => ({ _tag: "miss" }));
+        }),
+      );
+      if (Option.isNone(locked) || locked.value._tag === "deadline") break;
+      if (locked.value._tag === "outcome") return locked.value.outcome;
+      // A miss released every lock; pause holding nothing, then retry with the same deadline.
+      const [minPause, maxPause] = settings.retryPauseMs;
+      yield* Effect.sleep(yield* Random.nextIntBetween(minPause, maxPause));
+    }
+    // Step 5: nothing moved, the predecessor keeps owning. A bounded write records it.
+    yield* withLockUntil(
+      predecessorThreadId,
+      (yield* nowMillis) + settings.timeoutWriteMs,
+      dispatchWithReceiptEffect({
+        ...commandFields,
+        type: "thread.takeover.timeout",
+        commandId: stepCommandId("timeout"),
+        reason: "lock_contention",
+      }),
+    );
+    return takeoverFailure(
+      "takeover_timeout",
+      "The threads stayed busy, so nothing moved; the predecessor still owns its work. Retry later.",
+    );
+  });
+
+  const takeoverThread: OrchestratorV2Shape["takeoverThread"] = Effect.fn(
+    "Orchestrator.takeoverThread",
+  )(function* (input) {
+    const { predecessorThreadId, successorThreadId } = input;
+    const settings = yield* ThreadTakeoverSettings;
+    const deadlineMs = (yield* nowMillis) + settings.deadlineMs;
+    const projectionError = (cause: unknown) =>
+      new OrchestratorProjectionError({ threadId: predecessorThreadId, cause });
+    type Admitted =
+      | { readonly _tag: "outcome"; readonly outcome: ThreadTakeoverOutcome }
+      | {
+          readonly _tag: "join";
+          readonly done: Deferred.Deferred<ThreadTakeoverOutcome>;
+          readonly untilMs: number;
+        }
+      | { readonly _tag: "execute"; readonly token: TakeoverToken };
+    // Steps 1-2, once per call.
+    const admission = yield* withLockUntil(
+      predecessorThreadId,
+      deadlineMs,
+      Effect.gen(function* (): Effect.fn.Return<Admitted, OrchestratorV2Error> {
+        const predecessor = yield* projectionStore
+          .getThread(predecessorThreadId)
+          .pipe(Effect.mapError(projectionError));
+        const successor = yield* projectionStore
+          .getThread(successorThreadId)
+          .pipe(Effect.mapError(projectionError));
+        const now = yield* DateTime.now;
+        const admitted = admitTakeover({
+          predecessor,
+          successor,
+          now,
+          predecessorUpstream: yield* takeoverUpstream(predecessor).pipe(
+            Effect.mapError(projectionError),
+          ),
+        });
+        if (!admitted.ok)
+          return { _tag: "outcome", outcome: takeoverFailure(admitted.code, admitted.message) };
+        const { transferId } = admitted;
+        const record =
+          predecessor.continuedBy?.threadId === successorThreadId &&
+          predecessor.continuedBy.transferId === transferId
+            ? predecessor.continuedBy
+            : undefined;
+        if (record?.state === "effective")
+          return {
+            _tag: "outcome",
+            outcome: {
+              ok: true,
+              result: yield* readTakeoverResult(predecessorThreadId, transferId).pipe(
+                Effect.mapError(projectionError),
+              ),
+            },
+          };
+        if (record?.state === "attempting") {
+          const untilMs = DateTime.toEpochMillis(record.deadlineAt) + settings.timeoutWriteMs;
+          const running = takeoverAttempts.get(transferId);
+          if (running !== undefined && DateTime.toEpochMillis(now) < untilMs)
+            return { _tag: "join", done: running.done, untilMs };
+          takeoverAttempts.delete(transferId);
+          // A live record no process here runs is a crash leftover; past its deadline it is expired.
+          if (DateTime.toEpochMillis(now) <= DateTime.toEpochMillis(record.deadlineAt))
+            return {
+              _tag: "outcome",
+              outcome: takeoverFailure(
+                "takeover_in_progress",
+                "A takeover of that thread by this thread is still in progress. Retry shortly.",
+              ),
+            };
+        }
+        // Attempts count up per predecessor, so no attempt reuses an earlier command id.
+        const attempt = (predecessor.continuedBy?.attempt ?? 0) + 1;
+        const deadlineAt = DateTime.makeUnsafe(deadlineMs);
+        yield* dispatchWithReceiptEffect({
+          type: "thread.takeover.begin",
+          commandId: CommandId.make(`takeover:${transferId}:${attempt}:begin`),
+          threadId: predecessorThreadId,
+          successorThreadId,
+          transferId,
+          attempt,
+          deadlineAt,
+        });
+        const done = yield* Deferred.make<ThreadTakeoverOutcome>();
+        const executionId = ++takeoverExecutions;
+        takeoverAttempts.set(transferId, { executionId, done });
+        return { _tag: "execute", token: { transferId, attempt, deadlineAt, executionId, done } };
+      }),
+    );
+    if (Option.isNone(admission))
+      return takeoverFailure(
+        "takeover_timeout",
+        "That thread stayed busy, so nothing moved; it still owns its work. Retry later.",
+      );
+    const admitted = admission.value;
+    if (admitted._tag === "outcome") return admitted.outcome;
+    if (admitted._tag === "join") {
+      yield* Effect.logDebug("Takeover joined a running attempt", successorThreadId);
+      const joined = yield* Deferred.await(admitted.done).pipe(
+        Effect.timeoutOption(Math.max(0, admitted.untilMs - (yield* nowMillis))),
+      );
+      return Option.getOrElse(joined, () =>
+        takeoverFailure(
+          "takeover_in_progress",
+          "A takeover of that thread by this thread is still in progress. Retry shortly.",
+        ),
+      );
+    }
+    const { token } = admitted;
+    return yield* runTakeoverAttempt(predecessorThreadId, successorThreadId, token).pipe(
+      Effect.onExit((exit) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(
+            token.done,
+            Exit.isSuccess(exit)
+              ? exit.value
+              : takeoverFailure(
+                  "takeover_in_progress",
+                  "The takeover attempt ended without an outcome. Retry shortly.",
+                ),
+          );
+          if (takeoverAttempts.get(token.transferId)?.executionId === token.executionId)
+            takeoverAttempts.delete(token.transferId);
+        }),
+      ),
     );
   });
 
@@ -17405,6 +18316,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     recoverDelegatedTasks,
     recoverDelegatedTask,
     cancelDelegatedTask,
+    takeoverThread,
     delegatedTaskResultPending,
     restartContinuationPending: Effect.fn("OrchestratorV2.restartContinuationPending")(
       function (run) {

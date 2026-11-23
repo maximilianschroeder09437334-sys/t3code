@@ -178,7 +178,8 @@ const make = Effect.gen(function* () {
         return;
       }
       const child = yield* projections.getThread(event.threadId);
-      const parentThreadId = child.lineage.parentThreadId;
+      // After a takeover the successor owns the child's questions.
+      const parentThreadId = child.ownership?.ownerThreadId ?? child.lineage.parentThreadId;
       if (parentThreadId === null) return;
       const request = yield* projections.getRuntimeRequest(event.threadId, event.payload.id);
       if (event.payload.status !== "pending" || request?.status !== "pending") {
@@ -240,7 +241,11 @@ const make = Effect.gen(function* () {
         return event.payload.kind === "user_input"
           ? projections
               .getThread(event.threadId)
-              .pipe(Effect.map((child) => child.lineage.parentThreadId))
+              .pipe(
+                Effect.map(
+                  (child) => child.ownership?.ownerThreadId ?? child.lineage.parentThreadId,
+                ),
+              )
           : Effect.succeed(null);
       default:
         return Effect.succeed(null);

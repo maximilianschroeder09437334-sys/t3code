@@ -143,7 +143,7 @@ const admitTakeover = Effect.fn("mcp.admitTakeover")(function* (predecessorThrea
   });
   if (!admission.ok)
     return yield* new OrchestratorMcpFailure({ code: admission.code, message: admission.message });
-  return { transferId: admission.transferId, predecessor, successor };
+  return { transferId: admission.transferId, predecessor, successor, threads };
 });
 
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
@@ -407,11 +407,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     (input) => [input.predecessorThreadId],
     (input) =>
       Effect.gen(function* () {
-        yield* admitTakeover(input.predecessorThreadId);
-        return yield* new OrchestratorMcpFailure({
-          code: "orchestration_error",
-          message: "Takeover is not available in this build.",
-        });
+        // Provenance first; the orchestrator checks it again under the predecessor's lock.
+        const { predecessor, successor, threads } = yield* admitTakeover(input.predecessorThreadId);
+        const outcome = yield* threads
+          .takeoverThread({ predecessorThreadId: predecessor.id, successorThreadId: successor.id })
+          .pipe(Effect.mapError(dispatchFailure));
+        if (!outcome.ok)
+          return yield* new OrchestratorMcpFailure({
+            code: outcome.code,
+            message: outcome.message,
+          });
+        return outcome.result;
       }),
   ),
   t3_thread_organize: writesThread((input) =>

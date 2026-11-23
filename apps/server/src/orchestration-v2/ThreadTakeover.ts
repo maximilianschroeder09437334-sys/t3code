@@ -4,8 +4,10 @@ import * as NodeCrypto from "node:crypto";
 import {
   isListedThreadLineage,
   type OrchestrationV2AppThread,
+  type OrchestratorMcpThreadTakeoverResult,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 
 export type TakeoverRejection =
@@ -88,3 +90,27 @@ export const admitTakeover = (input: {
     transferId: takeoverTransferId(predecessor.id, successor.id, successor.launchedBy.commandId),
   };
 };
+
+/** Bounds of one synchronous takeover attempt. The deadline stays below the MCP call timeout. */
+export interface ThreadTakeoverSettingsValue {
+  readonly deadlineMs: number;
+  /** After the deadline: how long to wait for the predecessor to record `timed_out`. */
+  readonly timeoutWriteMs: number;
+  /** Jittered pause, holding no lock, after a try-lock miss. */
+  readonly retryPauseMs: readonly [min: number, max: number];
+}
+
+export const ThreadTakeoverSettings = Context.Reference<ThreadTakeoverSettingsValue>(
+  "t3/orchestration-v2/ThreadTakeoverSettings",
+  { defaultValue: () => ({ deadlineMs: 30_000, timeoutWriteMs: 2_000, retryPauseMs: [50, 400] }) },
+);
+
+export type ThreadTakeoverFailureCode =
+  | TakeoverRejection["code"]
+  | "takeover_in_progress"
+  | "takeover_timeout"
+  | "takeover_successor_not_running";
+
+export type ThreadTakeoverOutcome =
+  | { readonly ok: true; readonly result: OrchestratorMcpThreadTakeoverResult }
+  | { readonly ok: false; readonly code: ThreadTakeoverFailureCode; readonly message: string };

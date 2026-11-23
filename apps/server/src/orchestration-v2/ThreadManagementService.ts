@@ -422,6 +422,7 @@ export interface ThreadManagementServiceShape {
   readonly readHandoffRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
   readonly readHandoffChildIds: Orchestrator.OrchestratorV2["Service"]["listAppOwnedChildThreadIds"];
   readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
+  readonly takeoverThread: Orchestrator.OrchestratorV2["Service"]["takeoverThread"];
   readonly getThreadProjection: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadProjection, Orchestrator.OrchestratorV2Error>;
@@ -1782,6 +1783,7 @@ const make = Effect.gen(function* () {
         );
       },
     ),
+    takeoverThread: orchestrator.takeoverThread,
     getThreadProjection,
     getCheckpointContext,
     getThreadSnapshot,
