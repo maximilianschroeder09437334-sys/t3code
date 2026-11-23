@@ -62,6 +62,11 @@ describe("baseline client and server against the waiting display (WP A4)", () =>
     // Old clients show no lineage or sender edge: those parents read as ended, as on .22.
     assert.isFalse(waits.get(threadWaitKey(environmentId, ThreadId.make("parent")))?.waiting);
     assert.isFalse(waits.get(threadWaitKey(environmentId, ThreadId.make("sender")))?.waiting);
+    // A takeover's owner fields are dropped too, not an error.
+    const moved = snapshot.threads.find((thread) => thread.id === "moved-child");
+    assert.isDefined(moved);
+    assert.isFalse("ownerThreadId" in (moved as object));
+    assert.isFalse("formerOwnerThreadIds" in (moved as object));
   });
 
   it("writes the baseline server's shells for the new client", () => {

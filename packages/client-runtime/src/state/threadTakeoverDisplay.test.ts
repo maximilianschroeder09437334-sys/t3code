@@ -17,6 +17,7 @@ import { resolveListedAncestorThreadRef } from "./threadShell.ts";
 import { visibilityParentKey } from "./threadTagFilter.ts";
 import { resolveThreadWaits, threadWaitKey } from "./threadWait.ts";
 import { threadKey } from "./entities.ts";
+import { threadFamilyRowsMissingFromShell } from "./threadFamilies.ts";
 
 const env = EnvironmentId.make("env-takeover");
 const P = ThreadId.make("p");
@@ -145,6 +146,45 @@ describe("takeover display: the moved child is the successor's direct subagent (
     expect(edges).toContain("s->c");
     expect(edges).toContain("c->g");
     expect(edges).not.toContain("p->c");
+  });
+
+  it("opening C directly with S trimmed: the route's family read restores S above C and G", () => {
+    // The route reads C's detail (a thread with `ownership`, no shell `ownerThreadId`) and mounts
+    // C's family (ThreadRouteView useOpenThreadFamily). The server's family of C is S's display
+    // family: S, C and G, without P (ProjectionStore familyOf).
+    const detail = {
+      lineage: { rootThreadId: P, parentThreadId: P, relationshipToParent: "subagent" as const },
+      ownership: { ownerThreadId: S },
+    };
+    expect(visibilityParentKey(env, detail as never)).toBe(
+      threadKey({ environmentId: env, threadId: S }),
+    );
+    const grandchild = raw(G, {
+      lineage: { rootThreadId: P, parentThreadId: C, relationshipToParent: "subagent" },
+    });
+    const family = [
+      ownerWaitingOn(S, C),
+      movedChild({ owner: S, former: [P], sender: P }),
+      grandchild,
+    ];
+    const shell = [done(P)];
+    const merged = [
+      ...shell,
+      ...threadFamilyRowsMissingFromShell({
+        shellThreads: shell,
+        families: [{ snapshotSequence: 1, threads: family }],
+        removedAt: new Map(),
+      }),
+    ].map((thread) => presentThreadShell(env, thread));
+    // The client needs no change: given that family, S becomes a row and the walk ends at S
+    // (the red side of this case is the server read, ThreadTakeover.integration.test.ts).
+    expect(merged.some((thread) => thread.id === S)).toBe(true);
+    for (const id of [C, G]) {
+      expect(resolveListedAncestorThreadRef({ environmentId: env, threadId: id }, merged)).toEqual({
+        environmentId: env,
+        threadId: S,
+      });
+    }
   });
 
   it("shows S Waiting on its subagent C in the sidebar, header and Home; P does not show C", () => {

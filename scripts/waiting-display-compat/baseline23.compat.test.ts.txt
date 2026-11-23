@@ -1,0 +1,138 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Reads and writes the compatibility gate's fixtures.
+// Desktop .23 (cc15112571) baseline side of the wire gate. Not part of this repository's suites:
+// scripts/takeover-compat-gate-23.ts copies this file into a temporary cc15112571 worktree as
+// apps/server/src/orchestration-v2/waitDisplayCompat.baseline23.test.ts and runs it there, so every
+// import below is .23's contracts and client runtime. Unlike the 188a8db5 baseline, .23 already
+// knows the sender field and the lineage Waiting edge (slice A); it does not know takeover fields.
+import * as NodeFs from "node:fs";
+import * as NodePath from "node:path";
+
+import { assert, describe, it } from "vite-plus/test";
+import {
+  EnvironmentId,
+  OrchestrationV2ShellSnapshot,
+  OrchestrationV2ShellStreamItem,
+  ThreadId,
+  type OrchestrationV2ThreadShell,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+
+import { presentThreadShell } from "../../../../packages/client-runtime/src/state/models.ts";
+import {
+  v2ShellSnapshot,
+  v2ThreadShell,
+} from "../../../../packages/client-runtime/src/state/orchestrationV2TestFixtures.ts";
+import {
+  resolveThreadWaits,
+  threadWaitKey,
+} from "../../../../packages/client-runtime/src/state/threadWait.ts";
+
+const environmentId = EnvironmentId.make("env-compat");
+const readDir = process.env.T3_WAIT_COMPAT_READ;
+const writeDir = process.env.T3_WAIT_COMPAT_WRITE;
+
+const resolveAll = (threads: ReadonlyArray<OrchestrationV2ThreadShell>) =>
+  resolveThreadWaits({
+    threads: threads.map((thread) => presentThreadShell(environmentId, thread)),
+    environmentReady: () => true,
+  });
+
+describe(".23 client and server against the takeover display (slice B WP4)", () => {
+  it("decodes the .24 server's snapshot and deltas; owner fields drop, .23 Waiting stays", () => {
+    assert.isDefined(readDir, "T3_WAIT_COMPAT_READ names the new server's fixtures");
+    const read = (name: string) =>
+      JSON.parse(NodeFs.readFileSync(NodePath.join(readDir!, name), "utf8")) as unknown;
+    const snapshot = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellSnapshot))(
+      read("new-snapshot.json"),
+    );
+    const deltas = (read("new-deltas.json") as ReadonlyArray<unknown>).map((item) =>
+      Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellStreamItem))(item),
+    );
+    assert.equal(deltas.length, snapshot.threads.length);
+    const waits = resolveAll(snapshot.threads);
+    const waiting = (id: string) => waits.get(threadWaitKey(environmentId, ThreadId.make(id)));
+    for (const id of ["command-owner", "pr-owner"]) {
+      assert.isTrue(waiting(id)?.waiting, id);
+      assert.equal(waiting(id)?.targets[0]?.source, "awaited_child", id);
+    }
+    // .23 keeps the sender field and the slice A lineage/sender edges.
+    assert.equal(
+      snapshot.threads.find((thread) => thread.id === "sent-child")?.latestRunSenderThreadId,
+      "sender",
+    );
+    assert.isTrue(waiting("parent")?.waiting, "lineage parent");
+    assert.isTrue(waiting("sender")?.waiting, "sender of an open run");
+    // Takeover fields are unknown to .23: dropped, not an error. The moved child shows under its
+    // lineage parent, which waits on it (plan §7: old clients show C under P).
+    const moved = snapshot.threads.find((thread) => thread.id === "moved-child");
+    assert.isDefined(moved);
+    assert.isFalse("ownerThreadId" in (moved as object));
+    assert.isFalse("formerOwnerThreadIds" in (moved as object));
+    assert.equal(moved?.lineage.parentThreadId, "former-owner");
+    assert.isTrue(waiting("former-owner")?.waiting, ".23 waits on the lineage parent");
+    assert.equal(waiting("former-owner")?.targets[0]?.threadId, "moved-child");
+    assert.isFalse(waiting("new-owner")?.waiting ?? false, ".23 has no owner edge");
+  });
+
+  it("writes the .23 server's shells for the new client", () => {
+    assert.isDefined(writeDir, "T3_WAIT_COMPAT_WRITE names where the baseline fixtures go");
+    const shell = (id: string, overrides: Partial<OrchestrationV2ThreadShell>) =>
+      ({
+        ...v2ThreadShell,
+        id: ThreadId.make(id),
+        title: id,
+        lineage: {
+          rootThreadId: ThreadId.make(id),
+          parentThreadId: null,
+          relationshipToParent: null,
+        },
+        ...overrides,
+      }) satisfies OrchestrationV2ThreadShell;
+    const threads = [
+      shell("base-parent", {
+        status: "completed",
+        latestRunId: "run-base-parent" as never,
+        waitPhase: "ended",
+        waitingOn: [],
+      }),
+      shell("base-child", {
+        lineage: {
+          rootThreadId: ThreadId.make("base-parent"),
+          parentThreadId: ThreadId.make("base-parent"),
+          relationshipToParent: "subagent",
+        },
+        status: "running",
+        latestRunId: "run-base-child" as never,
+        activeRunId: "run-base-child" as never,
+        activityRunStatus: "running",
+        waitPhase: "working",
+        waitingOn: [],
+      }),
+      // A pre-r3 shell: no wait fields at all.
+      shell("base-legacy", { status: "completed", latestRunId: "run-base-legacy" as never }),
+    ];
+    NodeFs.mkdirSync(writeDir!, { recursive: true });
+    NodeFs.writeFileSync(
+      NodePath.join(writeDir!, "base-snapshot.json"),
+      JSON.stringify(
+        Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellSnapshot))({
+          ...v2ShellSnapshot,
+          threads,
+        }),
+      ),
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(writeDir!, "base-deltas.json"),
+      JSON.stringify(
+        threads.map((thread, index) =>
+          Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellStreamItem))({
+            kind: "thread.updated",
+            sequence: index + 1,
+            location: "active",
+            thread,
+          }),
+        ),
+      ),
+    );
+  });
+});

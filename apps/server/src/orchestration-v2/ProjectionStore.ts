@@ -7,6 +7,7 @@ import * as Stream from "effect/Stream";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { makeThreadFind } from "./ThreadFind.ts";
 import { unsentManualContinuationSource } from "./manualContinuation.ts";
+import { TAKEOVER_OBLIGATIONS_SQL } from "./takeoverRollbackPreflight.ts";
 import type {
   OrchestrationV2ThreadLinkMetadata,
   OrchestrationV2SearchThreadInput,
@@ -477,8 +478,10 @@ export interface ShellSnapshotOptions {
   readonly projectId?: ProjectId;
   readonly unsettledOnly?: boolean;
   /**
-   * Only the threads sharing this thread's `lineage.rootThreadId`: the root, its forks, and their
-   * subagent trees. The thread may be deleted: forks keep a deleted source's root.
+   * Only the threads of this thread's display family: those sharing its display root's
+   * `lineage.rootThreadId` (the root, its forks, and their subagent trees), where a subagent a
+   * takeover moved belongs to its owner's family instead of its lineage root's. The thread may be
+   * deleted: forks keep a deleted source's root.
    */
   readonly familyOf?: ThreadId;
   readonly worktreePath?: string;
@@ -5378,39 +5381,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       "ProjectionStore.getTakeoverObligations",
     )(
       function* () {
-        const rows = yield* sql<{
+        const rows = yield* sql.unsafe<{
           readonly source_thread_id: string;
           readonly source_task_id: string;
           readonly child_thread_id: string;
           readonly attempt_run_id: string;
-        }>`
-          SELECT task.thread_id AS source_thread_id, task.subagent_id AS source_task_id,
-            task.child_thread_id AS child_thread_id, forward.value AS attempt_run_id
-          FROM (
-            SELECT * FROM orchestration_v2_projection_subagents
-            WHERE child_thread_id IS NOT NULL
-              AND CASE WHEN json_valid(payload_json)
-                THEN json_type(payload_json, '$.transferredTo.forwards') = 'array'
-                ELSE 0 END
-          ) AS task
-          JOIN json_each(task.payload_json, '$.transferredTo.forwards') AS forward
-          JOIN orchestration_v2_projection_runs AS attempt
-            ON attempt.run_id = forward.value AND attempt.thread_id = task.child_thread_id
-          JOIN orchestration_v2_projection_threads AS child
-            ON child.thread_id = task.child_thread_id
-          LEFT JOIN orchestration_v2_projection_subagents AS anchor
-            ON anchor.subagent_id = json_extract(child.payload_json, '$.ownership.anchorTaskId')
-            AND anchor.thread_id = json_extract(child.payload_json, '$.ownership.ownerThreadId')
-          LEFT JOIN orchestration_v2_projection_runs AS recorded
-            ON recorded.run_id = json_extract(anchor.payload_json, '$.resultRunId')
-            AND recorded.thread_id = child.thread_id
-          WHERE NOT (
-            json_extract(anchor.payload_json, '$.result') IS NOT NULL
-            AND recorded.ordinal IS NOT NULL
-            AND recorded.ordinal >= attempt.ordinal
-          )
-          ORDER BY task.thread_id, task.subagent_id, attempt.ordinal
-        `;
+        }>(TAKEOVER_OBLIGATIONS_SQL);
         return rows.map((row): ProjectionTakeoverObligation => ({
           sourceThreadId: ThreadId.make(row.source_thread_id),
           sourceTaskId: NodeId.make(row.source_task_id),
@@ -8315,25 +8291,39 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       )`;
     };
     /**
-     * Families group by display root: subagents a takeover moved to an owner in `familyOf`'s family,
-     * with their own subagents. Uncorrelated, so SQLite evaluates it once per read; the owner match
-     * uses the root index's expression.
+     * Families group by display root (plan §7). A thread's display parent is its takeover owner,
+     * else its subagent parent; the display root is the last thread up that walk (16 hops, so a
+     * cycle ends), and the family key is that thread's `lineage.rootThreadId`. Immutable lineage
+     * is untouched: only this read follows owners.
      */
-    const movedIntoFamily = (familyOf: ThreadId) => sql`
+    const displayFamilyKey = (threadId: Statement.Fragment) => sql`(
+      WITH RECURSIVE display_up(thread_id, payload_json, depth) AS (
+        SELECT start.thread_id, start.payload_json, 0
+        FROM orchestration_v2_projection_threads start
+        WHERE start.thread_id = ${threadId}
+        UNION ALL
+        SELECT next.thread_id, next.payload_json, display_up.depth + 1
+        FROM display_up JOIN orchestration_v2_projection_threads next
+          ON next.thread_id = COALESCE(
+            json_extract(display_up.payload_json, '$.ownership.ownerThreadId'),
+            CASE WHEN json_extract(display_up.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+              THEN json_extract(display_up.payload_json, '$.lineage.parentThreadId') END
+          )
+        WHERE display_up.depth < 16
+      )
+      SELECT json_extract(payload_json, '$.lineage.rootThreadId')
+      FROM display_up ORDER BY depth DESC LIMIT 1
+    )`;
+    /**
+     * Threads a takeover moved and their subagent trees: the only rows whose display family can
+     * differ from their lineage root's. Uncorrelated, so SQLite evaluates it once per read.
+     */
+    const movedThreadIds = sql`
       WITH RECURSIVE moved(thread_id, depth) AS (
         SELECT child.thread_id, 0
         FROM orchestration_v2_projection_threads child
-        WHERE child.deleted_at IS NULL
-          AND CASE WHEN json_valid(child.payload_json)
-            THEN json_extract(child.payload_json, '$.ownership.ownerThreadId') END IN (
-            SELECT owner.thread_id FROM orchestration_v2_projection_threads owner
-            WHERE CASE WHEN json_valid(owner.payload_json)
-              THEN json_extract(owner.payload_json, '$.lineage.rootThreadId') END = (
-                SELECT json_extract(member.payload_json, '$.lineage.rootThreadId')
-                FROM orchestration_v2_projection_threads member
-                WHERE member.thread_id = ${familyOf}
-              )
-          )
+        WHERE CASE WHEN json_valid(child.payload_json)
+          THEN json_extract(child.payload_json, '$.ownership.ownerThreadId') END IS NOT NULL
         UNION
         SELECT grandchild.thread_id, moved.depth + 1
         FROM moved JOIN orchestration_v2_projection_threads grandchild
@@ -8344,6 +8334,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       )
       SELECT thread_id FROM moved
     `;
+    /**
+     * `familyOf`'s display family, the root included: unmoved rows of the display root's lineage
+     * family (the root index's expression), plus moved rows whose own walk ends in that family.
+     */
+    const inDisplayFamily = (familyOf: ThreadId) => sql`(
+      (CASE WHEN json_valid(t.payload_json)
+        THEN json_extract(t.payload_json, '$.lineage.rootThreadId') END = ${displayFamilyKey(sql`${familyOf}`)}
+        AND t.thread_id NOT IN (${movedThreadIds}))
+      OR (t.thread_id IN (${movedThreadIds})
+        AND ${displayFamilyKey(sql.literal("t.thread_id"))} = ${displayFamilyKey(sql`${familyOf}`)})
+    )`;
 
     /**
      * The in-memory sender walk from the run whose payload is `run`: hook and usage-limit
@@ -8651,16 +8652,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               unsettledOnly
                 ? sql` AND json_extract(t.payload_json, '$.settledAt') IS NULL AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'`
                 : sql``
-            }${
-              familyOf === undefined
-                ? sql``
-                : sql` AND (CASE WHEN json_valid(t.payload_json)
-                    THEN json_extract(t.payload_json, '$.lineage.rootThreadId') END = (
-                    SELECT json_extract(member.payload_json, '$.lineage.rootThreadId')
-                    FROM orchestration_v2_projection_threads member
-                    WHERE member.thread_id = ${familyOf}
-                  ) OR t.thread_id IN (${movedIntoFamily(familyOf)}))`
-            }${
+            }${familyOf === undefined ? sql`` : sql` AND ${inDisplayFamily(familyOf)}`}${
               worktreePath === undefined
                 ? sql``
                 : sql` AND CASE WHEN json_valid(t.payload_json)

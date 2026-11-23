@@ -22,8 +22,9 @@ import {
   threadWaitKey,
 } from "../../../../packages/client-runtime/src/state/threadWait.ts";
 
-// New side of scripts/waiting-display-compat-gate.ts: T3_WAIT_COMPAT_WRITE writes fixtures for the
-// baseline client, T3_WAIT_COMPAT_READ reads the baseline's. Without either, only the round trip runs.
+// New side of scripts/waiting-display-compat-gate.ts (188a8db5) and scripts/takeover-compat-gate-23.ts
+// (.23, cc15112571): T3_WAIT_COMPAT_WRITE writes fixtures for the baseline client,
+// T3_WAIT_COMPAT_READ reads the baseline's. Without either, only the round trip runs.
 
 const environmentId = EnvironmentId.make("env-compat");
 const shell = (id: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
@@ -95,6 +96,15 @@ const newServerShells: ReadonlyArray<OrchestrationV2ThreadShell> = [
     lineage: subagentOf("parent"),
     latestRunSenderThreadId: ThreadId.make("sender"),
   }),
+  // B (takeover, .24): a subagent moved from its lineage parent to a new owner.
+  shell("former-owner", completed),
+  shell("new-owner", completed),
+  shell("moved-child", {
+    ...running("moved-child"),
+    lineage: subagentOf("former-owner"),
+    ownerThreadId: ThreadId.make("new-owner"),
+    formerOwnerThreadIds: [ThreadId.make("former-owner")],
+  }),
 ];
 
 const encodeSnapshot = Schema.encodeUnknownSync(Schema.toCodecJson(OrchestrationV2ShellSnapshot));
@@ -124,6 +134,12 @@ describe("waiting display wire compatibility (WP A4)", () => {
       snapshot.threads.find((thread) => thread.id === "sent-child")?.latestRunSenderThreadId,
       "sender",
     );
+    // The new client shows the moved child under its owner, which waits on it; P does not.
+    const moved = snapshot.threads.find((thread) => thread.id === "moved-child");
+    assert.equal(moved?.ownerThreadId, "new-owner");
+    assert.deepEqual(moved?.formerOwnerThreadIds, [ThreadId.make("former-owner")]);
+    assert.isTrue(waiting(waits, "new-owner"));
+    assert.isFalse(waiting(waits, "former-owner"));
   });
 
   const writeDir = process.env.T3_WAIT_COMPAT_WRITE;

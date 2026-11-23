@@ -5,7 +5,7 @@
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
   EventId,
@@ -27,6 +27,7 @@ import {
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { classifyHomeNotification } from "@t3tools/shared/homeNotificationRules";
+import { pullRequestWatchTaskId } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -2149,6 +2150,36 @@ const endTurn = (threadId: ThreadId, options: { readonly newRun?: string } = {})
     return run.id;
   });
 
+/** The ids of the family read for `member`, as `getThreadFamily` serves it. */
+const familyIds = (member: ThreadId) =>
+  Effect.flatMap(ProjectionStore.ProjectionStoreV2, (store) =>
+    store.getShellSnapshot({ location: "active", familyOf: member }),
+  ).pipe(Effect.map((snapshot) => snapshot.threads.map((shell) => shell.id)));
+
+/** C's own subagent G, created before any move. */
+const delegateGrandchild = (child: ThreadId, name: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const childRun = (yield* orchestrator.getThreadProjection(child)).runs[0]!;
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: CommandId.make(`${name}-grandchild`),
+      parentThreadId: child,
+      parentRunId: childRun.id,
+      parentNodeId: childRun.rootNodeId!,
+      task: "Look deeper.",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      completionWake: "always",
+    });
+    return (yield* orchestrator.getThreadProjection(child)).subagents.find(
+      (task) => task.childThreadId !== null,
+    )!.childThreadId!;
+  });
+
 it.layer(layerTest)("thread takeover display (WP4)", (it) => {
   it.effect("10: the moved child shows under the successor, which waits on it; P does not", () =>
     Effect.gen(function* () {
@@ -2213,13 +2244,62 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
       assert.isTrue(trimmed.some((shell) => shell.id === successor));
       assert.equal(shownUnder(trimmed.find((shell) => shell.id === child)!), successor);
 
-      // [F] the family read for S (idle subagents a trimmed shell leaves out) returns C and G.
-      const family = (yield* store.getShellSnapshot({ location: "active", familyOf: successor }))
+      // [F] families group by display root: a read from S, C or G is S's family, without P;
+      // P's family no longer holds C or G.
+      for (const member of [successor, child, grandchild]) {
+        assert.sameMembers(
+          yield* familyIds(member),
+          [successor, child, grandchild],
+          `familyOf ${member}`,
+        );
+      }
+      assert.sameMembers(yield* familyIds(predecessor), [predecessor], "familyOf P");
+    }),
+  );
+
+  it.effect("10: after P->S->T a moved child's family is T's, without P or S", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t10-chain");
+      const grandchild = yield* delegateGrandchild(s.child, "t10-chain");
+      const t = yield* seedSuccessorOf(s, "t10-chain");
+      yield* takeover(s.predecessor, s.successor);
+      yield* takeover(s.successor, t);
+      for (const member of [t, s.child, grandchild]) {
+        assert.sameMembers(
+          yield* familyIds(member),
+          [t, s.child, grandchild],
+          `familyOf ${member}`,
+        );
+      }
+      assert.sameMembers(yield* familyIds(s.predecessor), [s.predecessor], "familyOf P");
+      assert.sameMembers(yield* familyIds(s.successor), [s.successor], "familyOf S");
+    }),
+  );
+
+  it.effect("10: opening C directly with S trimmed from the shell restores S from C's family", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t10-open");
+      const grandchild = yield* delegateGrandchild(s.child, "t10-open");
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      yield* takeover(s.predecessor, s.successor);
+      // The trimmed shell this client holds: S is an older settled owner and C an idle subagent,
+      // both left to the family read.
+      const shell = (yield* store.getShellSnapshot({ location: "active" })).threads.filter(
+        (row) => row.id !== s.successor && row.id !== s.child,
+      );
+      const present = new Set(shell.map((row) => row.id));
+      // What threadFamilyRowsMissingFromShell merges in when the route mounts C's family.
+      const family = (yield* store.getShellSnapshot({ location: "active", familyOf: s.child }))
         .threads;
-      assert.includeMembers(
-        family.map((shell) => shell.id),
-        [successor, child, grandchild],
-        "S's family holds the moved child and its subagent",
+      const rows = [...shell, ...family.filter((row) => !present.has(row.id))];
+      const row = (id: ThreadId) => rows.find((candidate) => candidate.id === id);
+      // [F] C's display parent S, and G's parent C, are both rows the client can now walk to.
+      assert.equal(shownUnder(row(s.child)!), s.successor);
+      assert.isDefined(row(s.successor), "S is restored");
+      assert.equal(shownUnder(row(grandchild)!), s.child);
+      assert.isFalse(
+        family.some((candidate) => candidate.id === s.predecessor),
+        "P is not in C's family",
       );
     }),
   );
@@ -2324,6 +2404,52 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
     }),
   );
 
+  it.effect(
+    "14: a pull request watch stays on the predecessor through takeover and continuation",
+    () =>
+      Effect.gen(function* () {
+        const { predecessor, successor, child } = yield* setup("t14-pr");
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const pullRequest = { host: "github.com", repository: "pingdotgg/t3code", number: 14 };
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make("t14-pr:watch"),
+          threadId: predecessor,
+          ...pullRequest,
+          watching: true,
+          link: { url: "https://github.com/pingdotgg/t3code/pull/14", source: "agent" },
+        });
+        const watched = (threadId: ThreadId) =>
+          Effect.map(orchestrator.getThreadProjection(threadId), (projection) =>
+            (projection.thread.pullRequests ?? [])
+              .filter((link) => link.watch !== undefined)
+              .map((link) => link.number),
+          );
+        const watchTask = (threadId: ThreadId) =>
+          Effect.map(orchestrator.getThreadShell(threadId), (shell) =>
+            (shell?.pendingBackgroundTasks ?? []).some(
+              (task) => task.taskId === pullRequestWatchTaskId({ ...pullRequest }),
+            ),
+          );
+        assert.deepEqual(yield* watched(predecessor), [14]);
+
+        yield* takeover(predecessor, successor);
+        // [G] the watch stays on P (excluded from the moved work), and none appears on S.
+        assert.deepEqual(yield* watched(predecessor), [14], "P keeps the watch");
+        assert.deepEqual(yield* watched(successor), [], "S has no watch");
+
+        // [G] continuation: S's turn ends and C finishes into S, then P's turn ends. P's roster
+        // (listed once its turn ended, as in .23) still holds the watch; S's never does.
+        yield* endTurn(successor);
+        yield* finishChild(child);
+        yield* endTurn(predecessor);
+        assert.deepEqual(yield* watched(predecessor), [14], "P keeps the watch after continuation");
+        assert.isTrue(yield* watchTask(predecessor), "P lists its watch");
+        assert.deepEqual(yield* watched(successor), []);
+        assert.isFalse(yield* watchTask(successor), "S lists no watch");
+      }),
+  );
+
   it.effect("14: the successor is pushed for the migrated completion, not before it", () =>
     Effect.gen(function* () {
       const { predecessor, successor, child } = yield* setup("t14-push");
@@ -2347,5 +2473,447 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
         key: `done:${successor}:${wakeRun}`,
       });
     }),
+  );
+});
+
+/**
+ * .23 upgrade/rollback over persisted state (plan §8), steps of scripts/takeover-compat-gate-23.ts;
+ * copied into a cc15112571 worktree, the .23 steps use .23's own stores and startup. Fixture files
+ * only, in T3_TAKEOVER_COMPAT_DIR; T3_TAKEOVER_COMPAT_STEP names the step.
+ */
+const compatDir = process.env.T3_TAKEOVER_COMPAT_DIR;
+const compatStep = process.env.T3_TAKEOVER_COMPAT_STEP;
+const compatFile = (name: string) => `${compatDir}/${name}`;
+
+const withFileSystem = <A, E>(
+  body: (fileSystem: FileSystem.FileSystem) => Effect.Effect<A, E, never>,
+) => Effect.flatMap(FileSystem.FileSystem, body).pipe(Effect.provide(NodeServices.layer));
+const writeJson = (name: string, value: unknown) =>
+  withFileSystem((fileSystem) =>
+    fileSystem.writeFileString(compatFile(name), JSON.stringify(value, null, 2)),
+  );
+const readJson = <A>(name: string) =>
+  withFileSystem((fileSystem) => fileSystem.readFileString(compatFile(name))).pipe(
+    Effect.map((text) => JSON.parse(text) as A),
+  );
+/** A scoped copy of a fixture database (with its WAL, if any), so a step never edits the fixture. */
+const copyOfFixture = (name: string) =>
+  Effect.gen(function* () {
+    const target = yield* databaseFile;
+    yield* withFileSystem((fileSystem) =>
+      Effect.gen(function* () {
+        yield* fileSystem.copyFile(compatFile(name), target);
+        if (yield* fileSystem.exists(`${compatFile(name)}-wal`)) {
+          yield* fileSystem.copyFile(`${compatFile(name)}-wal`, `${target}-wal`);
+        }
+      }),
+    );
+    return target;
+  });
+
+/** The task fields both builds decode, for every task of `holder` on `child`. */
+const taskViews = (holder: ThreadId, child: ThreadId) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.getThreadProjection(holder),
+  ).pipe(
+    Effect.map((projection) =>
+      projection.subagents
+        .filter((task) => task.childThreadId === child)
+        .map((task) => ({
+          id: task.id,
+          status: task.status,
+          result: task.result,
+          delivery: task.completionDelivery?.state ?? null,
+        }))
+        .toSorted((a, b) => a.id.localeCompare(b.id)),
+    ),
+  );
+
+/** Forward outbox rows (re-armed copies included) and takeover command receipts, raw. */
+const takeoverRows = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const forwards = yield* sql<{ readonly effect_id: string; readonly status: string }>`
+    SELECT effect_id, status FROM orchestration_v2_effect_outbox
+    WHERE effect_type = 'takeover.forward' ORDER BY effect_id`;
+  const receipts = yield* sql<{ readonly command_id: string; readonly status: string }>`
+    SELECT command_id, status FROM orchestration_command_receipts
+    WHERE command_id LIKE 'takeover.%' ORDER BY command_id`;
+  return {
+    forwards: forwards.map((row) => ({ effectId: row.effect_id, status: row.status })),
+    receipts: receipts.map((row) => ({ commandId: row.command_id, status: row.status })),
+  };
+});
+
+/** Every stored event, decoded by this build's event store: the event log's replay. */
+const replayEventLog = Effect.gen(function* () {
+  const sink = yield* EventSink.EventSinkV2;
+  const sql = yield* SqlClient.SqlClient;
+  const stored = (yield* sql<{ readonly sequence: number }>`
+    SELECT sequence FROM orchestration_events WHERE aggregate_kind = 'thread'
+    ORDER BY sequence`).map((row) => row.sequence);
+  const latest = stored.at(-1) ?? 0;
+  const decoded =
+    latest === 0
+      ? []
+      : yield* sink.stream({ afterSequence: 0 }).pipe(
+          Stream.takeUntil((event) => event.sequence >= latest),
+          Stream.map((event) => event.sequence),
+          Stream.runCollect,
+        );
+  return { stored, decoded: [...decoded] };
+});
+
+/** This build's decode of every projection row: no thread may be unreadable. */
+const assertEverythingDecodes = (threadIds: ReadonlyArray<ThreadId>) =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    assert.deepEqual(yield* store.getUnreadableThreadIds(), [], "no unreadable thread");
+    for (const threadId of threadIds) yield* orchestrator.getThreadProjection(threadId);
+    const shells = (yield* store.getShellSnapshot({ location: "active" })).threads;
+    for (const threadId of threadIds) {
+      assert.isDefined(
+        shells.find((shell) => shell.id === threadId),
+        `shell row for ${threadId}`,
+      );
+    }
+    const { stored, decoded } = yield* replayEventLog;
+    assert.isNotEmpty(stored);
+    assert.deepEqual(decoded, stored, "every stored event decodes, in order");
+    return shells;
+  });
+
+/** The takeover rollback preflight (branch only) over a closed database file. */
+const rollbackPreflight = (dbPath: string, now: DateTime.Utc) =>
+  Effect.promise(async () => {
+    const { takeoverRollbackBlockers } = await import("./takeoverRollbackPreflight.ts");
+    const NodeSqlite = await import("node:sqlite");
+    const database = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+    try {
+      return takeoverRollbackBlockers(database, DateTime.formatIso(now));
+    } finally {
+      database.close();
+    }
+  });
+/** Sets a fixture copy's outbox rows under `effectIdPrefix` to `status`. */
+const setOutboxStatus = (dbPath: string, effectIdPrefix: string, status: string) =>
+  Effect.promise(async () => {
+    const NodeSqlite = await import("node:sqlite");
+    const database = new NodeSqlite.DatabaseSync(dbPath);
+    try {
+      database
+        .prepare(
+          "UPDATE orchestration_v2_effect_outbox SET status = ?, lease_owner = NULL WHERE effect_id LIKE ?",
+        )
+        .run(status, `${effectIdPrefix}%`);
+    } finally {
+      database.close();
+    }
+  });
+
+interface From23 {
+  readonly predecessor: ThreadId;
+  readonly successor: ThreadId;
+  readonly child: ThreadId;
+  readonly done: ThreadId;
+  readonly doneTasks: ReadonlyArray<unknown>;
+}
+interface From24Settled {
+  readonly predecessor: ThreadId;
+  readonly successor: ThreadId;
+  readonly child: ThreadId;
+  readonly runId: RunId;
+  readonly successorTasks: ReadonlyArray<unknown>;
+  readonly predecessorTasks: ReadonlyArray<unknown>;
+  readonly rows: Effect.Success<typeof takeoverRows>;
+}
+
+describe.runIf(compatStep === "write-23")("compat gate .23: baseline writes", () => {
+  it.effect("writes .23 state: P running with a live child C, a finished child, S unproven", () =>
+    Effect.gen(function* () {
+      const fixture = yield* processOver(compatFile("from23.sqlite"))(
+        Effect.gen(function* () {
+          const s = yield* setup("c23");
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          yield* orchestrator.dispatch({
+            type: "delegated_task.request",
+            createdBy: "agent",
+            creationSource: "mcp",
+            commandId: CommandId.make("c23-delegate-done"),
+            parentThreadId: s.predecessor,
+            parentRunId: s.predecessorRunId,
+            parentNodeId: NodeId.make(`root:${s.predecessor}`),
+            task: "Finish on .23.",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            completionWake: "always",
+          });
+          const done = (yield* orchestrator.getThreadProjection(s.predecessor)).subagents.find(
+            (task) => task.childThreadId !== null && task.childThreadId !== s.child,
+          )!.childThreadId!;
+          yield* replyOnChild(done, "Result on .23.");
+          yield* finishChild(done);
+          return {
+            predecessor: s.predecessor,
+            successor: s.successor,
+            child: s.child,
+            done,
+            doneTasks: yield* taskViews(s.predecessor, done),
+          } satisfies From23;
+        }),
+      );
+      assert.equal((fixture.doneTasks[0] as { readonly result: string }).result, "Result on .23.");
+      yield* writeJson("from23.json", fixture);
+    }),
+  );
+});
+
+describe.runIf(compatStep === "on-24")("compat gate .23: branch reads .23 and writes .24", () => {
+  it.effect("(a) .24 loads .23 state; a pre-.24 successor still cannot take over", () =>
+    Effect.gen(function* () {
+      const fixture = yield* readJson<From23>("from23.json");
+      const inProcess = processOver(yield* copyOfFixture("from23.sqlite"));
+      // First .24 process over the .23 file: decode everything, then try the takeover the
+      // pre-.24 S cannot prove (it has no launchedBy), before startup ends S's turn.
+      yield* inProcess(
+        Effect.gen(function* () {
+          const ids = [fixture.predecessor, fixture.successor, fixture.child, fixture.done];
+          yield* assertEverythingDecodes(ids);
+          assert.isUndefined((yield* thread(fixture.successor)).launchedBy, "S is pre-.24");
+          assert.deepEqual(yield* taskViews(fixture.predecessor, fixture.done), fixture.doneTasks);
+          const outcome = yield* takeover(fixture.predecessor, fixture.successor);
+          assert.deepInclude(outcome, { ok: false, code: "takeover_unproven" });
+          assert.isUndefined((yield* thread(fixture.child)).ownership, "P keeps C");
+          assert.isUndefined((yield* thread(fixture.predecessor)).continuedBy);
+          assert.deepEqual((yield* takeoverRows).forwards, []);
+          // A successor P launches on .24 can take over the .23 predecessor's live child.
+          const launched = ThreadId.make("c23-s24");
+          yield* seedThread({
+            threadId: launched,
+            projectId: ProjectId.make("c23-project"),
+            launchedBy: fixture.predecessor,
+          });
+          const accepted = yield* takeover(fixture.predecessor, launched);
+          assert.isTrue(accepted.ok, JSON.stringify(accepted));
+          assert.equal(ownerOf(yield* thread(fixture.child)), launched);
+        }),
+      );
+      // Second .24 process: production startup over the upgraded file keeps the .23 result.
+      yield* inProcess(
+        Effect.gen(function* () {
+          yield* startupAfterProcessLoss;
+          yield* assertEverythingDecodes([fixture.predecessor, fixture.done]);
+          assert.deepEqual(yield* taskViews(fixture.predecessor, fixture.done), fixture.doneTasks);
+        }),
+      );
+    }).pipe(Effect.scoped, Effect.ensuring(Effect.sync(resetProbe))),
+  );
+
+  it.effect("(b, c) writes settled takeover state; the rollback preflight allows it", () =>
+    Effect.gen(function* () {
+      const file = compatFile("from24-settled.sqlite");
+      const inProcess = processOver(file);
+      // Process A: takeover, C's result through G, five failed forward tries; then A dies.
+      const s = yield* inProcess(
+        Effect.gen(function* () {
+          const s = yield* setup("c24");
+          yield* replyOnChild(s.child, "Result of a.");
+          probe.beforeForwardCommit = () => Effect.fail("injected fault");
+          const runId = yield* staleRouteResult(s);
+          probe.beforeForwardCommit = () => Effect.fail("injected fault");
+          yield* runEffects;
+          resetProbe();
+          assert.lengthOf(yield* openObligations(s.child), 1);
+          return { ...s, runId };
+        }),
+      );
+      // Process B: startup repairs once, fails once, re-arms; the worker records on S.
+      const fixture = yield* inProcess(
+        Effect.gen(function* () {
+          let failures = 1;
+          probe.beforeForwardCommit = () =>
+            failures-- > 0 ? Effect.fail("transient fault") : Effect.void;
+          yield* startupAfterProcessLoss;
+          resetProbe();
+          const recorded = yield* recordedTask(s.successor, s.child, s.runId);
+          assert.equal(recorded?.result, "Result of a.");
+          assert.deepEqual(yield* openObligations(s.child), []);
+          const rows = yield* takeoverRows;
+          // Settled forward rows of both kinds stay behind: failed re-armed copies and a success.
+          assert.isTrue(
+            rows.forwards.some((row) => row.status === "failed"),
+            "a failed row",
+          );
+          assert.isTrue(
+            rows.forwards.some((row) => row.status === "succeeded"),
+            "a success",
+          );
+          assert.isNotEmpty(rows.receipts, "forward receipts");
+          return {
+            predecessor: s.predecessor,
+            successor: s.successor,
+            child: s.child,
+            runId: s.runId,
+            successorTasks: yield* taskViews(s.successor, s.child),
+            predecessorTasks: yield* taskViews(s.predecessor, s.child),
+            rows,
+          } satisfies From24Settled;
+        }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+      );
+      yield* writeJson("from24-settled.json", fixture);
+      // (c) settled rows may stay: nothing live, pending or owed.
+      assert.deepEqual(yield* rollbackPreflight(file, yield* DateTime.now), []);
+    }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+  );
+
+  it.effect("(c) the rollback preflight rejects live, pending, owed and attempting work", () =>
+    Effect.gen(function* () {
+      const file = compatFile("from24-open.sqlite");
+      const { takeoverTransferId } = yield* Effect.promise(() => import("./ThreadTakeover.ts"));
+      const fixture = yield* processOver(file)(
+        Effect.gen(function* () {
+          // A migrated child still running.
+          const live = yield* setup("c24o-live");
+          assert.isTrue((yield* takeover(live.predecessor, live.successor)).ok);
+          // A result through G whose forward row is pending and whose obligation is open.
+          const owed = yield* setup("c24o-owed");
+          yield* replyOnChild(owed.child, "Owed result.");
+          const runId = yield* staleRouteResult(owed);
+          const taskId = (yield* predecessorTask(owed.predecessor, owed.child)).id;
+          assert.equal((yield* forwardRows(taskId, runId)).current?.status, "pending");
+          // A takeover attempt still before its deadline.
+          const attempting = yield* setup("c24o-attempt");
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const now = yield* DateTime.now;
+          yield* orchestrator.dispatch({
+            type: "thread.takeover.begin",
+            commandId: CommandId.make("c24o-attempt-begin"),
+            threadId: attempting.predecessor,
+            successorThreadId: attempting.successor,
+            transferId: takeoverTransferId(
+              attempting.predecessor,
+              attempting.successor,
+              CommandId.make(`launch:${attempting.successor}`),
+            ),
+            attempt: 1,
+            deadlineAt: DateTime.add(now, { seconds: 30 }),
+          } as never);
+          return { live, owed, forwardId: `effect:takeover.forward:${taskId}:${runId}` };
+        }),
+      ).pipe(Effect.ensuring(Effect.sync(resetProbe)));
+      const now = yield* DateTime.now;
+      const kinds = (blockers: ReadonlyArray<{ readonly kind: string }>) =>
+        [...new Set(blockers.map((blocker) => blocker.kind))].toSorted();
+      const blockers = yield* rollbackPreflight(file, now);
+      assert.deepEqual(kinds(blockers), [
+        "live_migrated_child",
+        "open_obligation",
+        "pending_forward",
+        "takeover_attempting",
+      ]);
+      assert.isTrue(
+        blockers.some(
+          (blocker) =>
+            blocker.kind === "live_migrated_child" && blocker.childThreadId === fixture.live.child,
+        ),
+        "the running migrated child",
+      );
+      assert.isTrue(
+        blockers.some(
+          (blocker) =>
+            blocker.kind === "open_obligation" && blocker.childThreadId === fixture.owed.child,
+        ),
+        "the owed forward",
+      );
+      // A failed or succeeded forward row with the obligation still open still blocks.
+      for (const status of ["failed", "succeeded"] as const) {
+        const copy = yield* copyOfFixture("from24-open.sqlite");
+        yield* setOutboxStatus(copy, fixture.forwardId, status);
+        const after = yield* rollbackPreflight(copy, now);
+        assert.notInclude(kinds(after), "pending_forward", status);
+        assert.isTrue(
+          after.some(
+            (blocker) =>
+              blocker.kind === "open_obligation" && blocker.childThreadId === fixture.owed.child,
+          ),
+          `a ${status} row with its obligation open`,
+        );
+      }
+      // Past its deadline an attempt reads as timed out and no longer blocks.
+      assert.notInclude(
+        kinds(yield* rollbackPreflight(file, DateTime.add(now, { seconds: 31 }))),
+        "takeover_attempting",
+      );
+      yield* writeJson("from24-open.json", {
+        liveChild: fixture.live.child,
+        owedChild: fixture.owed.child,
+        blockers,
+      });
+    }).pipe(Effect.scoped, Effect.ensuring(Effect.sync(resetProbe))),
+  );
+});
+
+describe.runIf(compatStep === "read-24")("compat gate .23: baseline reads .24 state", () => {
+  it.effect("(b) .23 decodes, replays and keeps completed takeover state, twice", () =>
+    Effect.gen(function* () {
+      const fixture = yield* readJson<From24Settled>("from24-settled.json");
+      const inProcess = processOver(yield* copyOfFixture("from24-settled.sqlite"));
+      const ids = [fixture.predecessor, fixture.successor, fixture.child];
+      for (const round of [1, 2]) {
+        yield* inProcess(
+          Effect.gen(function* () {
+            yield* startupAfterProcessLoss;
+            const shells = yield* assertEverythingDecodes(ids);
+            // Receipts and results are preserved: S keeps C's result, P its moved task.
+            assert.deepEqual(
+              yield* taskViews(fixture.successor, fixture.child),
+              fixture.successorTasks,
+              `round ${round}: S's record`,
+            );
+            assert.deepEqual(
+              yield* taskViews(fixture.predecessor, fixture.child),
+              fixture.predecessorTasks,
+              `round ${round}: P's task`,
+            );
+            assert.deepEqual(
+              yield* takeoverRows,
+              fixture.rows,
+              `round ${round}: forward rows and receipts`,
+            );
+            // .23 knows no owner: it shows C under its lineage parent P, as plan §7 says.
+            const childShell = shells.find((shell) => shell.id === fixture.child)!;
+            assert.equal(childShell.lineage.parentThreadId, fixture.predecessor);
+            assert.isFalse("ownerThreadId" in childShell, "the owner field is not .23's");
+          }),
+        );
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("records what .23 does with the unsettled state the preflight rejects", () =>
+    Effect.gen(function* () {
+      const fixture = yield* readJson<{ readonly owedChild: ThreadId }>("from24-open.json");
+      const observed = yield* processOver(yield* copyOfFixture("from24-open.sqlite"))(
+        Effect.gen(function* () {
+          const startup = yield* Effect.exit(startupAfterProcessLoss);
+          const owners = yield* Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+            orchestrator.getThreadProjection(fixture.owedChild),
+          );
+          return {
+            startup: startup._tag,
+            forwards: (yield* takeoverRows).forwards,
+            owedChildParent: owners.thread.lineage.parentThreadId,
+          };
+        }),
+      );
+      // Evidence only (plan §8 "[G] baseline-replay test records the actual .23 behaviour"):
+      // .23 has no forward handler and no owner, so an owed result stays unforwarded.
+      yield* writeJson("observed-23-on-open.json", observed);
+      assert.isTrue(
+        observed.forwards.every((row) => row.status !== "succeeded"),
+        ".23 never completes a forward",
+      );
+    }).pipe(Effect.scoped),
   );
 });
