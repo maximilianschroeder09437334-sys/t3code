@@ -174,6 +174,35 @@ const make = Effect.gen(function* () {
         );
         return;
       }
+      if (event.type === "thread.metadata-updated") {
+        // A takeover moved this child: its still-open questions go to the new owner too, keyed by
+        // request id per owner, so a repeat finds the earlier wake. The old owner's may stay.
+        const ownership = event.payload.ownership;
+        if (ownership === undefined) return;
+        const owner = yield* projections.getThreadRecords(ownership.ownerThreadId, ["subagents"], {
+          subagentIds: [ownership.anchorTaskId],
+        });
+        const anchor = owner.subagents.find(
+          (task) =>
+            task.id === ownership.anchorTaskId &&
+            task.origin === "app_owned" &&
+            task.childThreadId === event.threadId,
+        );
+        if (
+          anchor === undefined ||
+          owner.thread.archivedAt !== null ||
+          owner.thread.deletedAt !== null
+        )
+          return;
+        const { runtimeRequests } = yield* projections.getThreadRecords(event.threadId, [
+          "runtimeRequests",
+        ]);
+        for (const request of runtimeRequests) {
+          if (request.kind !== "user_input" || request.status !== "pending") continue;
+          yield* wakeParent(anchor, request);
+        }
+        return;
+      }
       if (event.type !== "runtime-request.updated" || event.payload.kind !== "user_input") {
         return;
       }
@@ -237,6 +266,8 @@ const make = Effect.gen(function* () {
         return Effect.succeed(event.threadId);
       case "subagent.updated":
         return Effect.succeed(event.payload.threadId);
+      case "thread.metadata-updated":
+        return Effect.succeed(event.payload.ownership?.ownerThreadId ?? null);
       case "runtime-request.updated":
         return event.payload.kind === "user_input"
           ? projections

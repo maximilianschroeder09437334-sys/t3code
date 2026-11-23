@@ -1692,6 +1692,22 @@ const make = Effect.gen(function* () {
   const requestKey = (clientRequestId: string | undefined): Effect.Effect<string> =>
     clientRequestId === undefined ? random.uuidV4() : Effect.succeed(clientRequestId);
 
+  /** The thread and task now holding a moved task's child, following successive takeovers. */
+  const movedTaskHolder = Effect.fn("OrchestratorMcpService.movedTaskHolder")(function* (
+    threadId: ThreadId,
+    taskId: NodeId,
+  ) {
+    let holder = { threadId, taskId };
+    for (let hop = 0; hop < 8; hop++) {
+      const task = (yield* loadTasks(holder.threadId, [holder.taskId])).find(
+        (candidate) => candidate.id === holder.taskId && candidate.origin === "app_owned",
+      );
+      if (task?.transferredTo === undefined) return hop === 0 ? undefined : holder;
+      holder = { threadId: task.transferredTo.threadId, taskId: task.transferredTo.taskId };
+    }
+    return holder;
+  });
+
   const readTask = Effect.fn("OrchestratorMcpService.readTask")(function* (
     scope: McpThreadInvocationScope,
     taskId: NodeId,
@@ -1711,6 +1727,17 @@ const make = Effect.gen(function* () {
         "task_not_found",
         `Delegated task ${taskId} does not belong to thread ${scope.thread.threadId}.`,
       );
+    }
+    // A task a takeover moved reports the task now holding its child; only that owner
+    // acknowledges it.
+    if (task.transferredTo !== undefined) {
+      const holder = yield* movedTaskHolder(scope.thread.threadId, taskId);
+      if (holder !== undefined)
+        return yield* readTask(
+          { ...scope, thread: { ...scope.thread, threadId: holder.threadId } },
+          holder.taskId,
+          waitTimedOut,
+        );
     }
     if (task.childThreadId === null) {
       return yield* readRemoteTask(scope, task, waitTimedOut, acknowledgeTerminal);
@@ -2653,6 +2680,8 @@ const make = Effect.gen(function* () {
           incrementalThreadRead: true,
           scheduledTasks: true,
           agentModelPolicyVersion: 1,
+          // Guard G and the forward obligation (slice B WP3) make a takeover lose no result.
+          threadTakeover: 1,
           maxBatchThreads: 20,
         },
       };
@@ -2856,6 +2885,12 @@ const make = Effect.gen(function* () {
     }),
     cancelTask: Effect.fn("OrchestratorMcpService.cancelTask")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "task_cancel");
+      // A moved task's child belongs to the successor now: never stopped from here.
+      if ((yield* movedTaskHolder(scope.thread.threadId, input.taskId)) !== undefined)
+        return {
+          taskId: input.taskId,
+          status: "transferred",
+        } satisfies OrchestratorMcpTaskCancelResult;
       const current = yield* readTask(scope, input.taskId);
       const childThreadId = current.childThreadId;
       if (childThreadId === null) {

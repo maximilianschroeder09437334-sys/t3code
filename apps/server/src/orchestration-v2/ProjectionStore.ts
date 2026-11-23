@@ -190,7 +190,17 @@ export type ProjectionRecoveryKind =
   | "runtime"
   | "restart-continuations"
   | "subagent-results"
+  /** `subagent-results` restricted to children a takeover moved: the live reconciler's scan. */
+  | "owned-subagent-results"
   | "delegated-completions";
+
+/** A migrated child's result attempt owed to its current owner (plan-b-r6 §5a). */
+export interface ProjectionTakeoverObligation {
+  readonly sourceThreadId: ThreadId;
+  readonly sourceTaskId: NodeId;
+  readonly childThreadId: ThreadId;
+  readonly attemptRunId: RunId;
+}
 
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
@@ -822,6 +832,14 @@ export interface ProjectionStoreV2Shape {
       readonly exclude?: ReadonlyArray<string>;
     },
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  /**
+   * Open obligations: each `transferredTo.forwards` attempt whose child's current owner anchor
+   * has no result from that run or a later one. Closure is the owner's record itself.
+   */
+  readonly getTakeoverObligations: () => Effect.Effect<
+    ReadonlyArray<ProjectionTakeoverObligation>,
+    ProjectionStoreV2Error
+  >;
   readonly getUnreadableThreadIds: () => Effect.Effect<
     ReadonlyArray<ThreadId>,
     ProjectionStoreV2Error
@@ -5176,12 +5194,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ELSE 0 END
               `;
             case "subagent-results":
+            case "owned-subagent-results":
               return sql`
                 SELECT child.thread_id FROM orchestration_v2_projection_threads AS child
                 WHERE CASE WHEN json_valid(child.payload_json) THEN
                   json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
                   AND json_extract(child.payload_json, '$.lineage.parentThreadId') IS NOT NULL
                   AND json_extract(child.payload_json, '$.forkedFrom.type') = 'node'
+                  ${kind === "owned-subagent-results" ? sql`AND json_extract(child.payload_json, '$.ownership.ownerThreadId') IS NOT NULL` : sql``}
                   ELSE 0 END
                   AND (EXISTS (
                     SELECT 1 FROM orchestration_v2_projection_runs AS requested
@@ -5202,7 +5222,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     AND NOT EXISTS (
                     SELECT 1 FROM orchestration_v2_projection_context_transfers
                     WHERE source_thread_id = child.thread_id
-                      AND target_thread_id = json_extract(child.payload_json, '$.lineage.parentThreadId')
+                      -- A migrated child reports to its current owner.
+                      AND target_thread_id = COALESCE(
+                        json_extract(child.payload_json, '$.ownership.ownerThreadId'),
+                        json_extract(child.payload_json, '$.lineage.parentThreadId')
+                      )
                       AND type = 'subagent_result'
                   )))
               `;
@@ -5321,6 +5345,53 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ORDER BY updated_at ASC, thread_id ASC
         `;
         return rows.map((row) => ThreadId.make(row.thread_id));
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getTakeoverObligations: ProjectionStoreV2Shape["getTakeoverObligations"] = Effect.fn(
+      "ProjectionStore.getTakeoverObligations",
+    )(
+      function* () {
+        const rows = yield* sql<{
+          readonly source_thread_id: string;
+          readonly source_task_id: string;
+          readonly child_thread_id: string;
+          readonly attempt_run_id: string;
+        }>`
+          SELECT task.thread_id AS source_thread_id, task.subagent_id AS source_task_id,
+            task.child_thread_id AS child_thread_id, forward.value AS attempt_run_id
+          FROM (
+            SELECT * FROM orchestration_v2_projection_subagents
+            WHERE child_thread_id IS NOT NULL
+              AND CASE WHEN json_valid(payload_json)
+                THEN json_type(payload_json, '$.transferredTo.forwards') = 'array'
+                ELSE 0 END
+          ) AS task
+          JOIN json_each(task.payload_json, '$.transferredTo.forwards') AS forward
+          JOIN orchestration_v2_projection_runs AS attempt
+            ON attempt.run_id = forward.value AND attempt.thread_id = task.child_thread_id
+          JOIN orchestration_v2_projection_threads AS child
+            ON child.thread_id = task.child_thread_id
+          LEFT JOIN orchestration_v2_projection_subagents AS anchor
+            ON anchor.subagent_id = json_extract(child.payload_json, '$.ownership.anchorTaskId')
+            AND anchor.thread_id = json_extract(child.payload_json, '$.ownership.ownerThreadId')
+          LEFT JOIN orchestration_v2_projection_runs AS recorded
+            ON recorded.run_id = json_extract(anchor.payload_json, '$.resultRunId')
+            AND recorded.thread_id = child.thread_id
+          WHERE NOT (
+            json_extract(anchor.payload_json, '$.result') IS NOT NULL
+            AND recorded.ordinal IS NOT NULL
+            AND recorded.ordinal >= attempt.ordinal
+          )
+          ORDER BY task.thread_id, task.subagent_id, attempt.ordinal
+        `;
+        return rows.map((row): ProjectionTakeoverObligation => ({
+          sourceThreadId: ThreadId.make(row.source_thread_id),
+          sourceTaskId: NodeId.make(row.source_task_id),
+          childThreadId: ThreadId.make(row.child_thread_id),
+          attemptRunId: RunId.make(row.attempt_run_id),
+        }));
       },
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
@@ -10051,6 +10122,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getLimitRecoveryCandidates: readOnReader(getLimitRecoveryCandidates),
       getLimitRecoveryWakeAt: readOnReader(getLimitRecoveryWakeAt),
       getRecoveryThreadIds: readOnReader(getRecoveryThreadIds),
+      getTakeoverObligations: readOnReader(getTakeoverObligations),
       getUnreadableThreadIds: readOnReader(getUnreadableThreadIds),
       getThreadSnapshot: readOnReader(getThreadSnapshot),
       getThreadSnapshotWindow: readOnReader(getThreadSnapshotWindow),

@@ -147,6 +147,14 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("delegated-tasks.stop"),
     reason: Schema.optional(Schema.String),
   }),
+  /** A migrated child's result attempt that reached a moved task, owed to its current owner. */
+  Schema.Struct({
+    type: Schema.Literal("takeover.forward"),
+    childThreadId: ThreadId,
+    sourceThreadId: ThreadId,
+    sourceTaskId: NodeId,
+    attemptRunId: RunId,
+  }),
 ]);
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
@@ -163,6 +171,8 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "attachment.cleanup",
   "thread-title.generate",
   "delegated-tasks.stop",
+  // Idempotent: its command receipt and the owner's record make a rerun a no-op.
+  "takeover.forward",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const PROCESS_BOUND_EFFECT_TYPES = [
@@ -240,6 +250,22 @@ export interface EffectOutboxV2Shape {
     previous: OrchestrationEffectV2,
     request: HandoffRequest,
   ) => Effect.Effect<boolean, EffectOutboxError>;
+  /**
+   * Replaces a settled or lost row with a fresh `pending` one under the same id, command and
+   * payload; the old row is kept as `<id>:rearm:<createdAt>`. Pending or running rows are left
+   * alone. Returns whether a fresh row was inserted.
+   */
+  readonly rearm: (
+    effect: PendingOrchestrationEffectV2,
+  ) => Effect.Effect<boolean, EffectOutboxError>;
+  /** How many times `effectId` was re-armed, and when its latest row settled. */
+  readonly rearmHistory: (effectId: string) => Effect.Effect<
+    {
+      readonly rearms: number;
+      readonly current: Option.Option<OrchestrationEffectV2>;
+    },
+    EffectOutboxError
+  >;
   readonly get: (
     effectId: string,
   ) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
@@ -503,6 +529,51 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             ),
           );
       }),
+      rearm: Effect.fn("EffectOutbox.rearm")(function* (effect) {
+        const rearmed = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const current = yield* sql<EffectRow>`
+                SELECT * FROM orchestration_v2_effect_outbox WHERE effect_id = ${effect.id} LIMIT 1
+              `;
+              const row = current[0];
+              if (row !== undefined) {
+                if (row.status === "pending" || row.status === "running") return false;
+                const now = DateTime.formatIso(yield* DateTime.now);
+                yield* sql`
+                  UPDATE orchestration_v2_effect_outbox
+                  SET effect_id = ${`${effect.id}:rearm:${row.created_at}`}, lease_owner = NULL,
+                      updated_at = ${now}
+                  WHERE effect_id = ${effect.id} AND created_at = ${row.created_at}
+                `;
+              }
+              yield* service.enqueue([effect]);
+              return true;
+            }),
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) => new EffectOutboxError({ operation: "rearm", effectId: effect.id, cause }),
+            ),
+          );
+        if (rearmed) yield* notifyAvailable();
+        return rearmed;
+      }),
+      rearmHistory: Effect.fn("EffectOutbox.rearmHistory")(
+        function* (effectId) {
+          const counted = yield* sql<{ readonly rearms: number }>`
+            SELECT COUNT(*) AS rearms FROM orchestration_v2_effect_outbox
+            WHERE effect_id LIKE ${`${effectId}:rearm:%`}
+          `.pipe(NodeSqliteClient.readOnly);
+          return { rearms: counted[0]?.rearms ?? 0, current: yield* service.get(effectId) };
+        },
+        (effect, effectId) =>
+          effect.pipe(
+            Effect.mapError(
+              (cause) => new EffectOutboxError({ operation: "rearm-history", effectId, cause }),
+            ),
+          ),
+      ),
       get: (effectId) =>
         sql<EffectRow>`
           SELECT *

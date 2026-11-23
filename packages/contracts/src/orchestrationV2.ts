@@ -3868,6 +3868,19 @@ const OrchestrationV2InternalCommand = Schema.Union([
     /** `timeout` only: why the attempt ended without moving anything. */
     reason: Schema.optional(Schema.String),
   }),
+  /**
+   * Records a migrated child's result attempt that reached a moved task (`sourceTaskId` on
+   * `sourceThreadId`) on the child's current owner, `threadId`, under that owner's lock.
+   */
+  Schema.Struct({
+    type: Schema.Literal("thread.takeover.forward"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    childThreadId: ThreadId,
+    sourceThreadId: ThreadId,
+    sourceTaskId: NodeId,
+    attemptRunId: RunId,
+  }),
   Schema.Struct({
     type: Schema.Literal("handoff.approval.record"),
     commandId: CommandId,

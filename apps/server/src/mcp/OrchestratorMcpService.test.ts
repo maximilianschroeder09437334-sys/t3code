@@ -255,6 +255,146 @@ describe("OrchestratorMcpService", () => {
     }),
   );
 
+  // Slice B WP3 test 11 (plan-b-r6 §8): a takeover moved the task to the successor's anchor.
+  it.effect("an old task id after a takeover reports the anchor and never stops the child", () =>
+    Effect.gen(function* () {
+      const predecessorThreadId = ThreadId.make("thread:mcp-moved-predecessor");
+      const successorThreadId = ThreadId.make("thread:mcp-moved-successor");
+      const childThreadId = ThreadId.make("thread:mcp-moved-child");
+      const taskId = NodeId.make("node:mcp-moved-task");
+      const anchorTaskId = NodeId.make("node:mcp-moved-anchor");
+      const stops = yield* Ref.make<ReadonlyArray<string>>([]);
+      const task = {
+        threadId: predecessorThreadId,
+        origin: "app_owned",
+        childThreadId,
+        driver: "codex",
+        model: "gpt-5.6-terra",
+        completionDelivery: { state: "disposed" },
+      };
+      const projections = new Map<ThreadId, OrchestrationV2ThreadProjection>([
+        [
+          predecessorThreadId,
+          {
+            thread: { id: predecessorThreadId },
+            runs: [],
+            subagents: [
+              {
+                ...task,
+                id: taskId,
+                status: "completed",
+                result: "Moved to Successor",
+                transferredTo: {
+                  threadId: successorThreadId,
+                  taskId: anchorTaskId,
+                  transferId: "transfer:mcp-moved",
+                },
+              },
+            ],
+          } as unknown as OrchestrationV2ThreadProjection,
+        ],
+        [
+          successorThreadId,
+          {
+            thread: { id: successorThreadId },
+            runs: [],
+            subagents: [
+              {
+                ...task,
+                id: anchorTaskId,
+                threadId: successorThreadId,
+                status: "running",
+                result: null,
+                completionDelivery: { state: "pending" },
+              },
+            ],
+          } as unknown as OrchestrationV2ThreadProjection,
+        ],
+        [
+          childThreadId,
+          {
+            thread: { id: childThreadId, title: "Child" },
+            runs: [
+              {
+                id: RunId.make("run:mcp-moved-child"),
+                ordinal: 1,
+                status: "running",
+                delegatedTaskId: anchorTaskId,
+                startedAt: DateTime.makeUnsafe("2026-11-23T01:00:00Z"),
+                completedAt: null,
+              },
+            ],
+            contextTransfers: [],
+            messages: [],
+            turnItems: [],
+            subagents: [],
+            providerThreads: [],
+            providerTurns: [],
+            runtimeRequests: [],
+            nodes: [],
+          } as unknown as OrchestrationV2ThreadProjection,
+        ],
+      ]);
+      const recordStop = (what: string) =>
+        Ref.update(stops, (all) => [...all, what]).pipe(Effect.as({} as never));
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) => Effect.sync(() => projections.get(threadId) as never),
+          getThreadShell: () => Effect.succeed(null),
+          listAppOwnedChildThreadIds: () => Effect.succeed([]),
+          delegatedTaskResultPending: () => Effect.succeed(false),
+          cancelDelegatedTask: () => recordStop("cancelDelegatedTask"),
+          stopDelegatedTasks: () => recordStop("stopDelegatedTasks"),
+          dispatch: (command) => recordStop(command.type),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-moved"),
+        requestNamespace: "provider-session:mcp-moved",
+        thread: {
+          threadId: predecessorThreadId,
+          providerSessionId: "provider-session:mcp-moved",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        // [F] task_status on the old id reports the anchor's live state.
+        const status = yield* service.taskStatus(scope, taskId).pipe(Effect.exit);
+        assert.isTrue(
+          status._tag === "Success" && status.value.status === "running",
+          JSON.stringify(status),
+        );
+        // [F] task_cancel on the old id answers `transferred` and stops nothing, also on replay.
+        for (const attempt of [1, 2]) {
+          const cancelled = yield* service
+            .cancelTask(scope, { taskId, clientRequestId: "mcp-moved-cancel" } as never)
+            .pipe(Effect.exit);
+          assert.isTrue(
+            cancelled._tag === "Success" && cancelled.value.status === "transferred",
+            `attempt ${attempt}: ${JSON.stringify(cancelled)}`,
+          );
+        }
+        assert.deepEqual(yield* Ref.get(stops), []);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect("reports a restart-cut child as working until its continuation settles", () =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-restart-parent");

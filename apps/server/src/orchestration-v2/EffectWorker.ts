@@ -790,6 +790,26 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "takeover.forward":
+            // Succeeds only once the owner's record of this attempt exists; every other
+            // outcome is an error, so the row retries and never settles without the record.
+            return threads
+              .forwardTakeoverResult({
+                childThreadId: effect.request.childThreadId,
+                sourceThreadId: effect.request.sourceThreadId,
+                sourceTaskId: effect.request.sourceTaskId,
+                attemptRunId: effect.request.attemptRunId,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "delegated-tasks.stop":
             return threads
               .stopDelegatedTasks({

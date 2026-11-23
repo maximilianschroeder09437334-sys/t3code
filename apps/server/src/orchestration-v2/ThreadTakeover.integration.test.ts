@@ -1,6 +1,7 @@
-// Slice B WP2 (plan-b-r6 §3, §4, §9): the bounded synchronous takeover and its one-transaction
-// commit, against the real EventSink, projections and outbox. `[F]` assertions are red on
-// cc15112571 through the baseline adapter below; `[G]` pass on both; `[N]` run on the branch.
+// Slice B WP2 + WP3 (plan-b-r6 §3-§6, §9): the bounded synchronous takeover, its one-transaction
+// commit, guard G, the forward effect, durable obligations and the live reconciler, against the
+// real EventSink, projections, outbox and effect worker. `[F]` assertions are red on cc15112571
+// through the baseline adapter below; `[G]` pass on both; `[N]` run on the branch.
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -12,27 +13,33 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2Subagent,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
 import * as References from "effect/References";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
 import * as ServerConfig from "../config.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -46,8 +53,10 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
@@ -89,6 +98,7 @@ const layerTest = Layer.mergeAll(
   // The orchestrator's own executor (layers are shared by reference), so held locks are real.
   ThreadCommandExecutor.layer,
   EffectOutbox.layer,
+  ProjectionStore.layer,
 ).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
@@ -120,7 +130,7 @@ const layerTest = Layer.mergeAll(
   ),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
-  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(
     CheckpointStore.layer.pipe(
       Layer.provide(VcsDriverRegistry.layer),
@@ -448,7 +458,8 @@ const finishChild = (child: ThreadId, status: "completed" | "failed" = "complete
         },
       ],
     });
-    yield* Fiber.join(settled);
+    // Bounded in real time: a build that records the result nowhere fails on the caller's assertion.
+    yield* TestClock.withLive(Fiber.join(settled).pipe(Effect.timeoutOption("5 seconds")));
     return run.id;
   });
 
@@ -821,6 +832,839 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
         assert.isDefined(recorded);
         assert.equal(recorded?.completionDelivery?.state, "disposed");
         assert.equal((yield* orchestrator.getThreadProjection(successor)).runs.length, runsBefore);
+      }),
+  );
+});
+
+/**
+ * The branch's fault-injection seam (`ThreadTakeoverProbe`), declared here by its key so this file
+ * also loads on cc15112571, where nothing reads it. Tests set the mutable hooks below.
+ */
+type OwnerSeen = "check" | "moved" | "stale";
+const probe = {
+  ownerRead: (_child: ThreadId, _owner: ThreadId): Effect.Effect<void> => Effect.void,
+  ownerLocked: (_child: ThreadId, _owner: ThreadId): Effect.Effect<OwnerSeen> =>
+    Effect.succeed("check"),
+  beforeForwardCommit: (_input: {
+    readonly childThreadId: ThreadId;
+  }): Effect.Effect<void, string> => Effect.void,
+  reconcilerPassed: (): Effect.Effect<void> => Effect.void,
+};
+const resetProbe = () => {
+  probe.ownerRead = () => Effect.void;
+  probe.ownerLocked = () => Effect.succeed("check");
+  probe.beforeForwardCommit = () => Effect.void;
+  probe.reconcilerPassed = () => Effect.void;
+};
+const TakeoverProbe = Context.Reference<typeof probe>("t3/orchestration-v2/ThreadTakeoverProbe", {
+  defaultValue: () => probe,
+});
+// Merged: the reactors read it from the layer, a test-driven worker from the test's context.
+const layerForwardTest = layerTest.pipe(
+  Layer.provideMerge(
+    Layer.succeed(TakeoverProbe, {
+      ownerRead: (child, owner) => Effect.suspend(() => probe.ownerRead(child, owner)),
+      ownerLocked: (child, owner) => Effect.suspend(() => probe.ownerLocked(child, owner)),
+      beforeForwardCommit: (input) => Effect.suspend(() => probe.beforeForwardCommit(input)),
+      reconcilerPassed: () => Effect.suspend(() => probe.reconcilerPassed()),
+    }),
+  ),
+);
+
+/** Started before an action: completes on the first stored event the filter accepts. */
+const awaitStoredEvent = (filter: (event: OrchestrationV2DomainEvent) => boolean) =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const afterSequence = yield* sink.latestSequence();
+    const fiber = yield* sink.stream({ afterSequence }).pipe(
+      Stream.filter((stored) => filter(stored.event)),
+      Stream.take(1),
+      Stream.runDrain,
+      Effect.forkChild,
+    );
+    // Bounded in real time, so a build without the behaviour fails on the next assertion.
+    return TestClock.withLive(Fiber.join(fiber).pipe(Effect.timeoutOption("5 seconds")));
+  });
+
+/** Ends C's latest run as the provider would, without waiting for its result. */
+const endChildRun = (child: ThreadId, status: "completed" | "failed" = "completed") =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(child)).runs.toSorted(
+      (a, b) => b.ordinal - a.ordinal,
+    )[0]!;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`end:${run.id}:${status}`),
+          type: "run.updated",
+          threadId: child,
+          runId: run.id,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: { ...run, status, completedAt: now },
+        },
+      ],
+    });
+    return run.id;
+  });
+
+/**
+ * Settles every other effect as if the server had run it (the provider stubs here cannot), so
+ * the worker runs only forwards. A child's earlier rows would otherwise block its lane.
+ */
+const parkOtherEffects = Effect.flatMap(
+  SqlClient.SqlClient,
+  (sql) => sql`
+    UPDATE orchestration_v2_effect_outbox SET status = 'cancelled', lease_owner = NULL
+    WHERE status IN ('pending', 'running') AND effect_type != 'takeover.forward'
+  `,
+);
+
+/** The effect worker, as the daemon runs it: drain, then wait (fake clock) for the next retry. */
+const runEffects = Effect.gen(function* () {
+  const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+  yield* parkOtherEffects;
+  for (let round = 0; round < 12; round++) {
+    yield* worker.drain();
+    const next = yield* worker.nextClaimableAt();
+    if (Option.isNone(next)) return;
+    const wait = DateTime.toEpochMillis(next.value) - DateTime.toEpochMillis(yield* DateTime.now);
+    yield* TestClock.adjust(Math.max(1, wait));
+  }
+});
+
+/** Advances the fake clock past one live reconciler tick and waits for that pass to finish. */
+const reconcilerTick = Effect.gen(function* () {
+  const passed = yield* Deferred.make<void>();
+  probe.reconcilerPassed = () => Deferred.succeed(passed, undefined).pipe(Effect.asVoid);
+  yield* TestClock.adjust("70 seconds");
+  yield* TestClock.withLive(Deferred.await(passed).pipe(Effect.timeoutOption("5 seconds")));
+  probe.reconcilerPassed = () => Effect.void;
+});
+
+/** The open obligations for one child (branch only). */
+const openObligations = (child: ThreadId) =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const read = (store as { readonly getTakeoverObligations?: unknown }).getTakeoverObligations as
+      | (() => Effect.Effect<ReadonlyArray<{ readonly childThreadId: ThreadId }>, Error>)
+      | undefined;
+    if (read === undefined) return assert.fail("[N]: this build has no obligations");
+    return (yield* read().pipe(Effect.orDie)).filter((row) => row.childThreadId === child);
+  });
+
+/** The forward's outbox row and its command receipts. */
+const forwardRows = (taskId: NodeId, runId: RunId) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const effectId = `effect:takeover.forward:${taskId}:${runId}`;
+    const rows = yield* sql<{
+      readonly effect_id: string;
+      readonly status: string;
+      readonly attempt_count: number;
+      readonly last_error: string | null;
+    }>`SELECT effect_id, status, attempt_count, last_error FROM orchestration_v2_effect_outbox
+      WHERE effect_id = ${effectId} OR effect_id LIKE ${`${effectId}:rearm:%`}`;
+    const receipts = yield* sql<{ readonly command_id: string; readonly status: string }>`
+      SELECT command_id, status FROM orchestration_command_receipts
+      WHERE command_id LIKE ${`takeover.forward:${taskId}:${runId}:%`}`;
+    return {
+      current: rows.find((row) => row.effect_id === effectId),
+      rearms: rows.filter((row) => row.effect_id !== effectId).length,
+      receipts,
+    };
+  });
+
+/** The subagent-results index answers nothing for these kinds while `effect` runs. */
+const withoutResultIndex = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const store = (yield* ProjectionStore.ProjectionStoreV2) as {
+      getRecoveryThreadIds: ProjectionStore.ProjectionStoreV2["Service"]["getRecoveryThreadIds"];
+    };
+    const original = store.getRecoveryThreadIds;
+    store.getRecoveryThreadIds = (kind, projects) =>
+      kind === "subagent-results" || String(kind) === "owned-subagent-results"
+        ? Effect.succeed([])
+        : original(kind, projects);
+    return yield* effect.pipe(
+      Effect.ensuring(Effect.sync(() => (store.getRecoveryThreadIds = original))),
+    );
+  });
+
+/** C's original task on the predecessor. */
+const predecessorTask = (predecessor: ThreadId, child: ThreadId) =>
+  Effect.flatMap(Orchestrator.OrchestratorV2, (orchestrator) =>
+    orchestrator.getThreadProjection(predecessor),
+  ).pipe(
+    Effect.map(
+      (projection) =>
+        projection.subagents.find(
+          (task) =>
+            task.childThreadId === child &&
+            projection.thread.id === predecessor &&
+            task.transferredTo !== undefined,
+        ) ?? projection.subagents.find((task) => task.childThreadId === child)!,
+    ),
+  );
+
+type Setup = Effect.Success<ReturnType<typeof setup>>;
+
+/** The next 8 owner validations for `child` see the owner move; completes on the 8th. */
+const flipOwnerEightTimes = (child: ThreadId) =>
+  Effect.gen(function* () {
+    let flips = 0;
+    const exhausted = yield* Deferred.make<void>();
+    probe.ownerLocked = (candidate) =>
+      Effect.gen(function* () {
+        if (candidate !== child || flips >= 8) return "check" as const;
+        if (++flips === 8) yield* Deferred.succeed(exhausted, undefined);
+        return "moved" as const;
+      });
+    return exhausted;
+  });
+
+/**
+ * A holder of P's lock that read the owner before the takeover slips through after it (§3), so
+ * C's result lands on P's moved task and G forwards it (left to the worker). The commit's rebind
+ * reaction on S sees 8 owner flips and gives up, leaving the forward or the reconciler.
+ */
+const staleRouteResult = (s: Setup) =>
+  Effect.gen(function* () {
+    if (!(yield* hasTakeover)) {
+      const runId = yield* finishChild(s.child);
+      yield* takeover(s.predecessor, s.successor);
+      return runId;
+    }
+    const read = yield* Deferred.make<void>();
+    const go = yield* Deferred.make<void>();
+    let latched = false;
+    probe.ownerRead = (child, owner) =>
+      child === s.child && owner === s.predecessor && !latched
+        ? Effect.sync(() => {
+            latched = true;
+          }).pipe(
+            Effect.andThen(Deferred.succeed(read, undefined)),
+            Effect.andThen(Deferred.await(go)),
+          )
+        : Effect.void;
+    let flips = 0;
+    const exhausted = yield* Deferred.make<void>();
+    probe.ownerLocked = (child, owner) =>
+      Effect.gen(function* () {
+        if (child !== s.child) return "check" as const;
+        if (owner === s.predecessor) return "stale" as const;
+        if (flips >= 8) return "check" as const;
+        if (++flips === 8) yield* Deferred.succeed(exhausted, undefined);
+        return "moved" as const;
+      });
+    const forwarded = yield* awaitStoredEvent(
+      (event) =>
+        event.type === "subagent.updated" &&
+        event.threadId === s.predecessor &&
+        event.payload.childThreadId === s.child &&
+        (event.payload.transferredTo?.forwards?.length ?? 0) > 0,
+    );
+    const runId = yield* endChildRun(s.child);
+    yield* Deferred.await(read);
+    const outcome = yield* takeover(s.predecessor, s.successor);
+    assert.isTrue(outcome.ok, JSON.stringify(outcome));
+    yield* Deferred.succeed(go, undefined);
+    yield* forwarded;
+    yield* Deferred.await(exhausted);
+    resetProbe();
+    return runId;
+  });
+
+/** T, launched by S, with its own running turn. */
+const seedSuccessorOf = (s: Setup, name: string) =>
+  Effect.gen(function* () {
+    const thread = ThreadId.make(`${name}-t`);
+    yield* seedThread({
+      threadId: thread,
+      projectId: ProjectId.make(`${name}-project`),
+      launchedBy: s.successor,
+    });
+    return thread;
+  });
+
+/** P's queued wake for its claimed results, as the provider continuation would queue it. */
+const queuePredecessorWake = (s: Setup, name: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const delivery = (yield* orchestrator.getThreadProjection(s.predecessor)).runs.find(
+      (run) => run.id === s.predecessorRunId,
+    )!.delegatedCompletion!.delivery!;
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      createdBy: "agent",
+      creationSource: "server",
+      commandId: CommandId.make(`${name}-wake`),
+      threadId: s.predecessor,
+      messageId: delivery.messageId,
+      text: "Delegated tasks completed",
+      attachments: [],
+      modelSelection,
+      dispatchMode: { type: "queue_after_active" },
+      delegatedCompletion: {
+        parentRunId: s.predecessorRunId,
+        generation: delivery.generation,
+        taskIds: delivery.taskIds,
+      },
+    });
+    return (yield* orchestrator.getThreadProjection(s.predecessor)).runs.find(
+      (run) => run.userMessageId === delivery.messageId,
+    )!.id;
+  });
+
+/** P's wake turn started and was then cancelled (not a user cancel of the queued wake). */
+const cancelWakeTurn = (threadId: ThreadId, runId: RunId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+      (candidate) => candidate.id === runId,
+    )!;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`cancel-wake:${runId}`),
+          type: "run.updated",
+          threadId,
+          runId,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: { ...run, status: "cancelled", startedAt: now, completedAt: now },
+        },
+      ],
+    });
+  });
+
+const layerForwardTestWithQuestions = DelegatedTaskQuestionReactor.layer.pipe(
+  Layer.provideMerge(layerForwardTest),
+);
+
+it.layer(layerForwardTestWithQuestions)("thread takeover guard, forward and reconciler", (it) => {
+  it.effect("4 (§4): a question open at the takeover is forwarded to the successor once", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("tq");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const reactor = yield* DelegatedTaskQuestionReactor.DelegatedTaskQuestionReactor;
+      const now = yield* DateTime.now;
+      const childRun = (yield* orchestrator.getThreadProjection(s.child)).runs[0]!;
+      const question = {
+        id: EventId.make("tq-question"),
+        type: "runtime-request.updated",
+        threadId: s.child,
+        runId: childRun.id,
+        occurredAt: now,
+        payload: {
+          id: RuntimeRequestId.make("tq-request"),
+          nodeId: childRun.rootNodeId!,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: "message" },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      } satisfies OrchestrationV2DomainEvent;
+      yield* sink.write({ events: [question] });
+      yield* reactor.handle(question);
+      const questionWakes = (threadId: ThreadId) =>
+        Effect.map(orchestrator.getThreadProjection(threadId), (projection) =>
+          projection.messages.filter(
+            (message) => message.notification !== undefined && message.text.includes("tq-request"),
+          ),
+        );
+      assert.equal((yield* questionWakes(s.predecessor)).length, 1, "forwarded to P first");
+      yield* takeover(s.predecessor, s.successor);
+      const moved = {
+        id: EventId.make("tq-moved"),
+        type: "thread.metadata-updated",
+        threadId: s.child,
+        occurredAt: now,
+        payload: yield* thread(s.child),
+      } satisfies OrchestrationV2DomainEvent;
+      yield* reactor.handle(moved);
+      yield* reactor.handle(moved);
+      // [F] the successor gets the open question, once; P's copy may stay.
+      assert.equal((yield* questionWakes(s.successor)).length, 1, "re-forwarded to S once");
+    }),
+  );
+
+  it.effect(
+    "3: a grandfathered predecessor wake, cancelled after the takeover, is never re-claimed",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* setup("t3");
+        const runId = yield* finishChild(s.child);
+        const wakeRunId = yield* queuePredecessorWake(s, "t3");
+        const outcome = yield* takeover(s.predecessor, s.successor);
+        // [F] recorded(S, a), class E.
+        assert.isTrue(
+          notifiable(yield* recordedTask(s.successor, s.child, runId)),
+          "recorded(S) E",
+        );
+        assert.isTrue(outcome.ok);
+        const old = yield* predecessorTask(s.predecessor, s.child);
+        assert.equal(old.completionDelivery?.state, "claimed", "grandfathered claim left as is");
+        const settled = yield* awaitStoredEvent(
+          (event) =>
+            event.type === "subagent.updated" &&
+            event.payload.id === old.id &&
+            event.payload.completionDelivery?.state !== "claimed",
+        );
+        yield* cancelWakeTurn(s.predecessor, wakeRunId);
+        yield* settled;
+        // [N] guard G: disposed, never claimed again on P; the attempt is owed to the owner.
+        const after = yield* predecessorTask(s.predecessor, s.child);
+        assert.equal(after.completionDelivery?.state, "disposed");
+        assert.deepEqual(after.transferredTo?.forwards, [runId]);
+        yield* runEffects;
+        // [F] still recorded on S; [N] the forward was a no-op and the obligation is closed.
+        const recorded = yield* recordedTask(s.successor, s.child, runId);
+        assert.isTrue(notifiable(recorded));
+        assert.equal(recorded?.resultRunId, runId);
+        assert.deepEqual(yield* openObligations(s.child), []);
+        assert.equal((yield* forwardRows(old.id, runId)).current?.status, "succeeded");
+      }),
+  );
+
+  it.effect("4: the cancel after a second takeover S->T reaches T", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t4");
+      const t = yield* seedSuccessorOf(s, "t4");
+      const runId = yield* finishChild(s.child);
+      const wakeRunId = yield* queuePredecessorWake(s, "t4");
+      yield* takeover(s.predecessor, s.successor);
+      yield* takeover(s.successor, t);
+      yield* cancelWakeTurn(s.predecessor, wakeRunId);
+      yield* runEffects;
+      // [F] recorded(T, a), class E.
+      const recorded = yield* recordedTask(t, s.child, runId);
+      assert.isTrue(notifiable(recorded), "recorded(T) E");
+      assert.equal(ownerOf(yield* thread(s.child)), t);
+      yield* requireTakeover;
+      assert.deepEqual(yield* openObligations(s.child), []);
+    }),
+  );
+
+  it.effect("5: a stale route after the takeover is forwarded to the successor", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t5");
+      const runId = yield* staleRouteResult(s);
+      yield* runEffects;
+      // [F] recorded(S, a), class E.
+      const recorded = yield* recordedTask(s.successor, s.child, runId);
+      assert.isTrue(notifiable(recorded), "recorded(S) E");
+      yield* requireTakeover;
+      // [N] exact attempt, and the obligation is closed by that record.
+      assert.equal(recorded?.resultRunId, runId);
+      assert.deepEqual(yield* openObligations(s.child), []);
+    }),
+  );
+
+  it.effect.each(["pending", "running", "failed"] as const)(
+    "6: a forward %s at a crash is recorded after restart, twice, without the results index",
+    (row) =>
+      Effect.gen(function* () {
+        const s = yield* setup(`t6-${row}`);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sink = yield* EventSink.EventSinkV2;
+        if (row === "failed") probe.beforeForwardCommit = () => Effect.fail("injected fault");
+        const runId = yield* staleRouteResult(s);
+        if (row === "failed") probe.beforeForwardCommit = () => Effect.fail("injected fault");
+        const taskId = (yield* predecessorTask(s.predecessor, s.child)).id;
+        if (row === "running") {
+          // The worker claimed it, then the process died.
+          yield* parkOtherEffects;
+          yield* outbox.claimNext({ workerId: "worker:lost" });
+        }
+        if (row === "failed") {
+          yield* runEffects;
+          resetProbe();
+        }
+        // Restart twice: process-loss reconcile, then recovery, with the index answering nothing.
+        yield* outbox.reconcileAfterProcessLoss;
+        if (row === "running" && (yield* hasTakeover))
+          // [N] the effect type is replay-safe: requeued, not cancelled.
+          assert.equal((yield* forwardRows(taskId, runId)).current?.status, "pending");
+        yield* withoutResultIndex(orchestrator.recoverDelegatedTasks);
+        const afterFirst = yield* sink.latestSequence();
+        yield* outbox.reconcileAfterProcessLoss;
+        yield* withoutResultIndex(orchestrator.recoverDelegatedTasks);
+        // [F] recorded(S, a) after restart.
+        const recorded = yield* recordedTask(s.successor, s.child, runId);
+        assert.isTrue(notifiable(recorded), "recorded(S) E after restart");
+        yield* requireTakeover;
+        // [N] the second restart wrote nothing new; the leftover row is a no-op.
+        assert.equal(yield* sink.latestSequence(), afterFirst);
+        assert.equal(recorded?.resultRunId, runId);
+        yield* runEffects;
+        assert.deepEqual(yield* openObligations(s.child), []);
+      }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+  );
+
+  it.effect.each(["successor", "predecessor"] as const)(
+    "9: a follow-up the %s sends after the takeover reports to the successor",
+    (sender) =>
+      Effect.gen(function* () {
+        const s = yield* setup(`t9-${sender}`);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* finishChild(s.child);
+        yield* takeover(s.predecessor, s.successor);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`t9-${sender}-follow-up`),
+          threadId: s.child,
+          messageId: MessageId.make(`t9-${sender}-follow-up`),
+          text: "One more check, please.",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "mcp",
+          senderThreadId: sender === "successor" ? s.successor : s.predecessor,
+        } as never);
+        const runId = yield* finishChild(s.child);
+        // [F] recorded(S, a), class E.
+        assert.isTrue(
+          notifiable(yield* recordedTask(s.successor, s.child, runId)),
+          "recorded(S) E",
+        );
+      }),
+  );
+
+  it.effect("11: the predecessor's old task id cannot stop the moved child", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t11-old-cancel");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* takeover(s.predecessor, s.successor);
+      const before = (yield* orchestrator.getThreadProjection(s.child)).runs.at(-1)!.status;
+      const cancelled = yield* orchestrator
+        .cancelDelegatedTask({
+          parentThreadId: s.predecessor,
+          taskId: s.taskId,
+          command: {
+            type: "thread.stop",
+            commandId: CommandId.make("t11-old-cancel"),
+            threadId: s.child,
+            stopDelegatedTasks: false,
+          },
+          stopDescendants: () => Effect.void,
+        })
+        .pipe(Effect.exit);
+      // [F] refused as transferred, and C keeps running.
+      assert.isTrue(
+        cancelled._tag === "Failure" && String(cancelled.cause).includes("transferred"),
+        String(cancelled),
+      );
+      assert.equal((yield* orchestrator.getThreadProjection(s.child)).runs.at(-1)!.status, before);
+    }),
+  );
+
+  it.effect("11: cancelling the anchor on the successor stops the child", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t11-anchor-cancel");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const outcome = yield* takeover(s.predecessor, s.successor);
+      const anchorTaskId = outcome.ok
+        ? (
+            outcome.result as unknown as {
+              readonly migrated: ReadonlyArray<{ readonly anchorTaskId: NodeId }>;
+            }
+          ).migrated[0]!.anchorTaskId
+        : s.taskId;
+      yield* orchestrator
+        .cancelDelegatedTask({
+          parentThreadId: s.successor,
+          taskId: anchorTaskId,
+          command: {
+            type: "thread.stop",
+            commandId: CommandId.make("t11-anchor-cancel"),
+            threadId: s.child,
+            stopDelegatedTasks: false,
+          },
+          stopDescendants: () => Effect.void,
+        })
+        .pipe(Effect.exit);
+      // [F] the anchor carries the cancel marker and C's run stopped.
+      const anchor = (yield* orchestrator.getThreadProjection(s.successor)).subagents.find(
+        (task) => task.id === anchorTaskId,
+      );
+      assert.isDefined(anchor?.cancelledRunId, "the anchor records the cancel");
+      const run = (yield* orchestrator.getThreadProjection(s.child)).runs.at(-1)!;
+      assert.notInclude(["starting", "running", "queued"], run.status);
+    }),
+  );
+
+  it.effect("11: a child failing on its own after the takeover reports the failure to S", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t11-failed");
+      yield* takeover(s.predecessor, s.successor);
+      const runId = yield* finishChild(s.child, "failed");
+      // [F] recorded(S, a), class E, with the failed result.
+      const recorded = yield* recordedTask(s.successor, s.child, runId);
+      assert.isTrue(notifiable(recorded), "recorded(S) E");
+      assert.equal(recorded?.status, "failed");
+    }),
+  );
+
+  it.effect("15: a failed forward is re-armed live and records the exact attempt", () =>
+    Effect.gen(function* () {
+      for (const second of [false, true]) {
+        const s = yield* setup(`t15-${second ? "t" : "s"}`);
+        const t = second ? yield* seedSuccessorOf(s, "t15-t") : undefined;
+        const fault = () => Effect.fail("injected fault");
+        const runId = yield* staleRouteResult(s);
+        const taskId = (yield* predecessorTask(s.predecessor, s.child)).id;
+        // All five executions fail before the command commits.
+        probe.beforeForwardCommit = fault;
+        yield* withoutResultIndex(runEffects);
+        if (yield* hasTakeover) {
+          const failed = yield* forwardRows(taskId, runId);
+          assert.equal(failed.current?.status, "failed");
+          // [N] no receipt for the failed tries.
+          assert.deepEqual(failed.receipts, []);
+        }
+        if (t !== undefined) {
+          // The second commit rebinds C's run to T's anchor; that reaction's owner flips 8 times
+          // too, so only the re-armed forward can record on T.
+          const exhausted = yield* flipOwnerEightTimes(s.child);
+          yield* takeover(s.successor, t);
+          if (yield* hasTakeover) yield* Deferred.await(exhausted);
+        }
+        resetProbe();
+        // No restart and no recovery call: only the clock moves, past the re-arm spacing.
+        yield* withoutResultIndex(
+          Effect.gen(function* () {
+            yield* reconcilerTick;
+            yield* reconcilerTick;
+            yield* runEffects;
+          }),
+        );
+        // [F] recorded(owner, exact a).
+        const owner = t ?? s.successor;
+        const recorded = yield* recordedTask(owner, s.child, runId);
+        assert.isTrue(notifiable(recorded), `recorded(${owner}) E`);
+        yield* requireTakeover;
+        assert.equal(recorded?.resultRunId, runId);
+        const rows = yield* forwardRows(taskId, runId);
+        assert.isAtLeast(rows.rearms, 1, "re-armed by the live reconciler");
+        assert.equal(rows.current?.status, "succeeded");
+        assert.deepEqual(yield* openObligations(s.child), []);
+      }
+    }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+  );
+
+  it.effect("15b: owner churn exhausts the forward as a retryable error, never a success", () =>
+    Effect.gen(function* () {
+      for (const second of [false, true]) {
+        const s = yield* setup(`t15b-${second ? "t" : "s"}`);
+        const t = second ? yield* seedSuccessorOf(s, "t15b-t") : undefined;
+        const runId = yield* staleRouteResult(s);
+        if (t !== undefined) yield* takeover(s.successor, t);
+        const taskId = (yield* predecessorTask(s.predecessor, s.child)).id;
+        // The owner flips on all 8 validations of the first forward execution, then settles.
+        let flips = 0;
+        probe.ownerLocked = (child) =>
+          Effect.succeed(child === s.child && flips < 8 ? (flips++, "moved") : "check");
+        yield* withoutResultIndex(runEffects);
+        resetProbe();
+        // [F] recorded(owner, exact a), no restart and no recovery call.
+        const owner = t ?? s.successor;
+        const recorded = yield* recordedTask(owner, s.child, runId);
+        assert.isTrue(notifiable(recorded), `recorded(${owner}) E`);
+        yield* requireTakeover;
+        assert.equal(flips, 8);
+        assert.equal(recorded?.resultRunId, runId);
+        const rows = yield* forwardRows(taskId, runId);
+        // [N] the exhausted try was a retry, not a success: two executions, one receipt.
+        assert.equal(rows.current?.status, "succeeded");
+        assert.equal(rows.current?.attempt_count, 2);
+        assert.equal(rows.receipts.length, 1);
+        assert.deepEqual(yield* openObligations(s.child), []);
+      }
+    }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+  );
+
+  it.effect("15b: an open obligation behind a succeeded row is re-armed within one tick", () =>
+    Effect.gen(function* () {
+      yield* requireTakeover;
+      const s = yield* setup("t15b-forced");
+      const sql = yield* SqlClient.SqlClient;
+      const runId = yield* staleRouteResult(s);
+      const taskId = (yield* predecessorTask(s.predecessor, s.child)).id;
+      // Forced: the row claims success although the owner never recorded the attempt.
+      yield* sql`UPDATE orchestration_v2_effect_outbox SET status = 'succeeded'
+        WHERE effect_id = ${`effect:takeover.forward:${taskId}:${runId}`}`;
+      assert.equal((yield* openObligations(s.child)).length, 1);
+      yield* withoutResultIndex(reconcilerTick);
+      // [N] one tick later the obligation has a fresh pending row.
+      const rows = yield* forwardRows(taskId, runId);
+      assert.equal(rows.current?.status, "pending");
+      assert.equal(rows.rearms, 1);
+      yield* withoutResultIndex(runEffects);
+      const recorded = yield* recordedTask(s.successor, s.child, runId);
+      assert.equal(recorded?.resultRunId, runId);
+      assert.deepEqual(yield* openObligations(s.child), []);
+    }),
+  );
+
+  it.effect("16: a transient failure in the startup repair re-arms the row and records live", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t16");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const runId = yield* staleRouteResult(s);
+      const taskId = (yield* predecessorTask(s.predecessor, s.child)).id;
+      // Before the crash every execution failed, so the row is failed.
+      probe.beforeForwardCommit = () => Effect.fail("injected fault");
+      yield* withoutResultIndex(runEffects);
+      // Restart: the inline repair fails once more, then the fault clears.
+      let failures = 1;
+      probe.beforeForwardCommit = () =>
+        failures-- > 0 ? Effect.fail("transient fault") : Effect.void;
+      yield* outbox.reconcileAfterProcessLoss;
+      yield* withoutResultIndex(orchestrator.recoverDelegatedTasks);
+      if (yield* hasTakeover) {
+        const rearmed = yield* forwardRows(taskId, runId);
+        // [N] the inline failure left durable work: a fresh pending row.
+        assert.equal(rearmed.current?.status, "pending");
+        assert.equal(rearmed.rearms, 1);
+      }
+      // Without a second restart, the worker records it.
+      yield* withoutResultIndex(runEffects);
+      // [F] recorded(owner, exact a).
+      const recorded = yield* recordedTask(s.successor, s.child, runId);
+      assert.isTrue(notifiable(recorded), "recorded(S) E");
+      yield* requireTakeover;
+      assert.equal(recorded?.resultRunId, runId);
+      assert.deepEqual(yield* openObligations(s.child), []);
+    }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+  );
+
+  it.effect("17: owner churn during the live terminal reaction is finished by the reconciler", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t17");
+      yield* takeover(s.predecessor, s.successor);
+      let flips = 0;
+      const exhausted = yield* Deferred.make<void>();
+      probe.ownerLocked = (child) =>
+        Effect.gen(function* () {
+          if (child !== s.child || flips >= 8) return "check" as const;
+          flips++;
+          if (flips === 8) yield* Deferred.succeed(exhausted, undefined);
+          return "moved" as const;
+        });
+      yield* endChildRun(s.child);
+      const runId = (yield* Orchestrator.OrchestratorV2.pipe(
+        Effect.flatMap((orchestrator) => orchestrator.getThreadProjection(s.child)),
+      )).runs.toSorted((a, b) => b.ordinal - a.ordinal)[0]!.id;
+      if (yield* hasTakeover) {
+        yield* Deferred.await(exhausted);
+        resetProbe();
+        yield* reconcilerTick;
+      }
+      // [F] recorded(owner) through reconciler (ii), no restart and no recovery call.
+      const recorded = yield* recordedTask(s.successor, s.child, runId);
+      assert.isTrue(notifiable(recorded), "recorded(S) E");
+      assert.equal(flips, 8);
+    }).pipe(Effect.ensuring(Effect.sync(resetProbe))),
+  );
+
+  it.effect("18: a backing-off forward on C's lane does not hold up S's continuation", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("t18");
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const takeoverBuild = yield* hasTakeover;
+      yield* parkOtherEffects;
+      // A row on C's lane that keeps backing off: on .23 any C effect, here a forward.
+      yield* outbox.enqueue([
+        {
+          id: "t18-child-lane",
+          commandId: CommandId.make("t18-child-lane"),
+          threadId: s.child,
+          request: takeoverBuild
+            ? {
+                type: "takeover.forward",
+                childThreadId: s.child,
+                sourceThreadId: s.predecessor,
+                sourceTaskId: s.taskId,
+                attemptRunId: RunId.make("t18-attempt"),
+              }
+            : ({ type: "delegated-tasks.stop" } as never),
+        } as never,
+      ]);
+      const claimed = yield* outbox.claimNext({ workerId: "t18" });
+      assert.isTrue(Option.isSome(claimed));
+      yield* outbox.retry({
+        effectId: "t18-child-lane",
+        workerId: "t18",
+        error: "backing off",
+        delayMs: 60_000,
+      });
+      yield* outbox.enqueue([
+        {
+          id: "t18-successor-continue",
+          commandId: CommandId.make("t18-successor-continue"),
+          threadId: s.successor,
+          request: {
+            type: "provider-runtime.continue",
+            sourceRunId: RunId.make(`run:${s.successor}`),
+          },
+        },
+      ]);
+      // [G] S's continuation is claimable at once.
+      const next = yield* outbox.claimNext({ workerId: "t18" });
+      assert.equal(Option.getOrUndefined(next)?.id, "t18-successor-continue");
+      yield* outbox.fail({ effectId: "t18-successor-continue", workerId: "t18", error: "test" });
+    }),
+  );
+
+  it.effect(
+    "18: a forward with no resolvable owner anchor fails with no events and no receipt",
+    () =>
+      Effect.gen(function* () {
+        yield* requireTakeover;
+        const s = yield* setup("t18-anchor");
+        const sql = yield* SqlClient.SqlClient;
+        const sink = yield* EventSink.EventSinkV2;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const runId = yield* staleRouteResult(s);
+        const taskId = (yield* predecessorTask(s.predecessor, s.child)).id;
+        const anchorTaskId = (yield* thread(s.child)).ownership!.anchorTaskId;
+        // The owner's anchor row is lost.
+        yield* sql`DELETE FROM orchestration_v2_projection_subagents WHERE subagent_id = ${anchorTaskId}`;
+        const before = yield* sink.latestSequence();
+        const forwarded = yield* (
+          orchestrator as unknown as {
+            readonly forwardTakeoverResult: (input: object) => Effect.Effect<void, Error>;
+          }
+        )
+          .forwardTakeoverResult({
+            childThreadId: s.child,
+            sourceThreadId: s.predecessor,
+            sourceTaskId: taskId,
+            attemptRunId: runId,
+          })
+          .pipe(Effect.exit);
+        // [N] fails as forward_target_unavailable, writes nothing, and the obligation stays open.
+        assert.isTrue(
+          forwarded._tag === "Failure" &&
+            String(forwarded.cause).includes("forward_target_unavailable"),
+          String(forwarded),
+        );
+        assert.equal(yield* sink.latestSequence(), before);
+        assert.deepEqual((yield* forwardRows(taskId, runId)).receipts, []);
+        assert.equal((yield* openObligations(s.child)).length, 1);
       }),
   );
 });

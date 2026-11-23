@@ -97,7 +97,10 @@ export const restartStopRequested = Effect.fn("RestartContinuation.restartStopRe
       fields: ReadonlyArray<K>,
       filter: ProjectionRecordFilter,
     ) => Effect.Effect<ProjectionRecords<K>, E>,
-    thread: Pick<ProjectionRuntimeRecoveryState["thread"], "id" | "lineage" | "forkedFrom">,
+    thread: Pick<
+      ProjectionRuntimeRecoveryState["thread"],
+      "id" | "lineage" | "forkedFrom" | "ownership"
+    >,
     source: Pick<OrchestrationV2Run, "id" | "delegatedTaskId">,
   ) {
     const { turnItems } = yield* getThreadRecords(thread.id, ["turnItems"], {
@@ -109,13 +112,15 @@ export const restartStopRequested = Effect.fn("RestartContinuation.restartStopRe
     const { lineage, forkedFrom } = thread;
     const taskId =
       source.delegatedTaskId ?? (forkedFrom?.type === "node" ? forkedFrom.nodeId : undefined);
+    // After a takeover the task lives on the child's current owner.
+    const ownerThreadId = thread.ownership?.ownerThreadId ?? lineage.parentThreadId;
     if (
       lineage.relationshipToParent !== "subagent" ||
-      lineage.parentThreadId === null ||
+      ownerThreadId === null ||
       taskId === undefined
     )
       return false;
-    const task = (yield* getThreadRecords(lineage.parentThreadId, ["subagents"], {
+    const task = (yield* getThreadRecords(ownerThreadId, ["subagents"], {
       subagentIds: [taskId],
     })).subagents.find((candidate) => candidate.id === taskId);
     // A settled task no longer owns later work in its thread.
@@ -127,7 +132,7 @@ export const restartStopRequested = Effect.fn("RestartContinuation.restartStopRe
     )
       return false;
     return (
-      (yield* getThreadRecords(lineage.parentThreadId, ["turnItems"], {
+      (yield* getThreadRecords(ownerThreadId, ["turnItems"], {
         turnItemTypes: ["run_interrupt_request"],
         turnItemRunIds: [task.runId],
       })).turnItems.length > 0

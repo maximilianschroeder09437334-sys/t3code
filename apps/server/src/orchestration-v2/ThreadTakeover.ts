@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 
 export type TakeoverRejection =
   | { readonly code: "takeover_unproven"; readonly message: string }
@@ -114,3 +115,62 @@ export type ThreadTakeoverFailureCode =
 export type ThreadTakeoverOutcome =
   | { readonly ok: true; readonly result: OrchestratorMcpThreadTakeoverResult }
   | { readonly ok: false; readonly code: ThreadTakeoverFailureCode; readonly message: string };
+
+/** The live reconciler of open forward obligations (plan §5a). */
+export interface TakeoverReconcilerSettingsValue {
+  readonly tickMs: number;
+  /** Added at random to each tick, so many servers never tick together. */
+  readonly jitterMs: number;
+  /** Re-arm spacing per obligation: doubles from `minRearmMs` per earlier re-arm, up to `maxRearmMs`. */
+  readonly minRearmMs: number;
+  readonly maxRearmMs: number;
+  /** Re-arms after which each further one logs a warning; retrying never stops. */
+  readonly warnAfterRearms: number;
+}
+
+export const TakeoverReconcilerSettings = Context.Reference<TakeoverReconcilerSettingsValue>(
+  "t3/orchestration-v2/TakeoverReconcilerSettings",
+  {
+    defaultValue: () => ({
+      tickMs: 60_000,
+      jitterMs: 5_000,
+      minRearmMs: 60_000,
+      maxRearmMs: 600_000,
+      warnAfterRearms: 3,
+    }),
+  },
+);
+
+/** Re-arm spacing for an obligation re-armed `rearms` times before. */
+export const takeoverRearmSpacingMs = (settings: TakeoverReconcilerSettingsValue, rearms: number) =>
+  Math.min(settings.maxRearmMs, settings.minRearmMs * 2 ** Math.min(rearms, 20));
+
+/**
+ * Test seam for the "never neither" net; production keeps the no-op defaults. Under the owner's
+ * lock `ownerLocked` can report `moved` (retry) or `stale` (skip the re-read).
+ */
+export interface ThreadTakeoverProbeValue {
+  readonly ownerRead: (childThreadId: ThreadId, ownerThreadId: ThreadId) => Effect.Effect<void>;
+  readonly ownerLocked: (
+    childThreadId: ThreadId,
+    ownerThreadId: ThreadId,
+  ) => Effect.Effect<"check" | "moved" | "stale">;
+  readonly beforeForwardCommit: (input: {
+    readonly childThreadId: ThreadId;
+    readonly attemptRunId: string;
+  }) => Effect.Effect<void, string>;
+  /** After each live reconciler pass. */
+  readonly reconcilerPassed: () => Effect.Effect<void>;
+}
+
+export const ThreadTakeoverProbe = Context.Reference<ThreadTakeoverProbeValue>(
+  "t3/orchestration-v2/ThreadTakeoverProbe",
+  {
+    defaultValue: () => ({
+      ownerRead: () => Effect.void,
+      ownerLocked: () => Effect.succeed("check" as const),
+      beforeForwardCommit: () => Effect.void,
+      reconcilerPassed: () => Effect.void,
+    }),
+  },
+);
