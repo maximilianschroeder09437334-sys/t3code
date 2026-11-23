@@ -930,6 +930,10 @@ function preserveRunRecordedFields(
     current.restartCancelledBackgroundWork !== undefined
       ? { restartCancelledBackgroundWork: current.restartCancelledBackgroundWork }
       : {}),
+    // As the SQL upsert does: a write without delegatedTaskId keeps the recorded binding.
+    ...(next.delegatedTaskId === undefined && current.delegatedTaskId !== undefined
+      ? { delegatedTaskId: current.delegatedTaskId }
+      : {}),
   };
 }
 

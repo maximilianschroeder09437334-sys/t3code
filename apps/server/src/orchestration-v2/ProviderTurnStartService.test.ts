@@ -3528,6 +3528,54 @@ effectIt.effect("does not overwrite a run interrupted while its provider session
   }),
 );
 
+// A takeover rebinds a starting run to its successor's anchor without changing its status or
+// attempt, so the start's writes from its earlier read must not restore the old task id.
+effectIt.effect.each(["opens", "fails to open"] as const)(
+  "keeps a takeover's rebind made while the provider session %s",
+  (outcome) =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness(
+        outcome === "opens"
+          ? { text: "Continue", failReadsAfterRunning: true }
+          : { text: "Continue", openFailure: new Error("provider session rejected") },
+      );
+      const runId = harness.projection().runs.at(-1)!.id;
+      const bind = (delegatedTaskId: NodeId) => {
+        const projection = harness.projection();
+        harness.setProjection({
+          ...projection,
+          runs: projection.runs.map((run) =>
+            run.id === runId ? { ...run, delegatedTaskId } : run,
+          ),
+        });
+      };
+      const anchorTaskId = NodeId.make("takeover:successor-anchor");
+      bind(NodeId.make("task:owner-follow-up"));
+      const openEntered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const open = harness.open.getMockImplementation()!;
+      harness.open.mockImplementation(() =>
+        Deferred.succeed(openEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(open()),
+        ),
+      );
+
+      const startup = yield* harness.start.pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(openEntered);
+      bind(anchorTaskId);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(startup);
+
+      const run = harness.projection().runs.find((candidate) => candidate.id === runId)!;
+      expect(run.status).toBe(outcome === "opens" ? "running" : "failed");
+      expect(run.delegatedTaskId).toBe(anchorTaskId);
+      const runWrites = harness.events.filter((event) => event.type === "run.updated");
+      expect(runWrites).toHaveLength(1);
+      expect(runWrites[0]!.payload).not.toHaveProperty("delegatedTaskId");
+    }),
+);
+
 effectIt.effect("checks the run's status without loading the thread's history", () =>
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({

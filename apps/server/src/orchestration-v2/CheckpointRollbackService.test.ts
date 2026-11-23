@@ -739,6 +739,8 @@ const seedRollbackHistory = Effect.gen(function* () {
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const committed: OrchestrationV2DomainEvent[] = [];
+  // Runs while the provider rolls back, before the service takes the thread lock.
+  let duringProviderRollback: Effect.Effect<void> = Effect.void;
   const serviceLayer = layerCheckpointRollbackService.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -776,6 +778,7 @@ const seedRollbackHistory = Effect.gen(function* () {
               rollbackThread: (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
                 Effect.gen(function* () {
                   rollbackCounts.push(yield* resolveCodexRollbackTurnCount(input));
+                  yield* duringProviderRollback;
                   return { providerThread: input.providerThread };
                 }),
             } as never),
@@ -803,6 +806,9 @@ const seedRollbackHistory = Effect.gen(function* () {
     nodeId,
     checkpointId,
     rollback,
+    setDuringProviderRollback: (effect: Effect.Effect<void>) => {
+      duringProviderRollback = effect;
+    },
     rollbackCounts,
     restored,
     deletedRefs,
@@ -871,6 +877,30 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
           checkpoints.map((checkpoint) => checkpoint.status),
           ["ready", "ready", "ready", "stale", "stale", "stale", "stale", "stale", "ready"],
         );
+      }),
+    );
+
+    // A takeover rebinds a run's delegatedTaskId without changing its status; the rollback's
+    // run snapshot, loaded before the provider rollback, must not restore the old task id.
+    it.effect("keeps a takeover's rebind made while the provider rolls back", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        const sql = yield* SqlClient.SqlClient;
+        const { threadId, runId } = history;
+        const bind = (delegatedTaskId: string) =>
+          sql`UPDATE orchestration_v2_projection_runs
+            SET payload_json = json_set(payload_json, '$.delegatedTaskId', ${delegatedTaskId})
+            WHERE run_id = ${runId(3)}`.pipe(Effect.orDie, Effect.asVoid);
+        yield* bind("task:owner-follow-up");
+        history.setDuringProviderRollback(bind("takeover:successor-anchor"));
+
+        yield* history.rollback(2);
+
+        const run = (yield* history.store.getThreadRecords(threadId, ["runs"])).runs.find(
+          (candidate) => candidate.id === runId(3),
+        );
+        assert.equal(run?.status, "rolled_back");
+        assert.equal(run?.delegatedTaskId, "takeover:successor-anchor");
       }),
     );
 

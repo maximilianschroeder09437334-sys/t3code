@@ -407,6 +407,8 @@ export const layer: Layer.Layer<
       }) {
         const { run, rootNode, attempt, turnItems, now, status } = input;
         const runId = run.id;
+        // Omit delegatedTaskId: a takeover may rebind this run while its start awaits.
+        const { delegatedTaskId: _delegatedTaskId, ...runWithoutDelegatedTaskId } = run;
         const started = input.startedAt === undefined ? {} : { startedAt: input.startedAt };
         const item: OrchestrationV2TurnItem = {
           id: idAllocator.derive.runSignalTurnItem({ runId, signal: input.signal }),
@@ -430,7 +432,10 @@ export const layer: Layer.Layer<
         };
         const eventPayloads = [
           { type: "turn-item.updated", payload: item },
-          { type: "run.updated", payload: { ...run, status, ...started, completedAt: now } },
+          {
+            type: "run.updated",
+            payload: { ...runWithoutDelegatedTaskId, status, ...started, completedAt: now },
+          },
           {
             type: "run-attempt.updated",
             payload: { ...attempt, status, ...started, completedAt: now },
@@ -1861,6 +1866,8 @@ export const layer: Layer.Layer<
         status: "running",
         startedAt: run.startedAt ?? now,
       };
+      // The run was read before session setup; a takeover may have rebound it since.
+      const { delegatedTaskId: _delegatedTaskId, ...runningRunPayload } = runningRun;
       const runningAttempt: OrchestrationV2RunAttempt = {
         ...attempt,
         ...(runningProviderThread.nativeThreadRef?.nativeId == null
@@ -1946,7 +1953,7 @@ export const layer: Layer.Layer<
           nodeId: rootNode.id,
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
-          payload: runningRun,
+          payload: runningRunPayload,
         },
         {
           id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),

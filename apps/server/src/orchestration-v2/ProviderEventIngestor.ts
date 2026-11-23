@@ -621,6 +621,8 @@ export const layer: Layer.Layer<
       }
       for (const run of runs) {
         const rootNode = projection.nodes.find((node) => node.id === run.rootNodeId);
+        // Read outside the thread lock; omit delegatedTaskId so a concurrent rebind stays.
+        const { delegatedTaskId: _delegatedTaskId, ...runWithoutDelegatedTaskId } = run;
         events.push({
           id: yield* eventId(),
           type: "run.updated",
@@ -629,7 +631,7 @@ export const layer: Layer.Layer<
           ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
-          payload: { ...run, status: "rolled_back", completedAt: now },
+          payload: { ...runWithoutDelegatedTaskId, status: "rolled_back", completedAt: now },
         });
         if (rootNode !== undefined) {
           events.push({

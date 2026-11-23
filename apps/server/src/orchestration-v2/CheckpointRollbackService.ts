@@ -389,6 +389,8 @@ export const layer: Layer.Layer<
           }
           for (const run of runsToRollback) {
             const rootNode = context.rootNodes.find((candidate) => candidate.id === run.rootNodeId);
+            // Loaded before the provider rollback; omit delegatedTaskId so a rebind made since stays.
+            const { delegatedTaskId: _delegatedTaskId, ...runWithoutDelegatedTaskId } = run;
             events.push(
               yield* makeEvent({
                 type: "run.updated",
@@ -397,7 +399,7 @@ export const layer: Layer.Layer<
                 ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
                 providerInstanceId: run.providerInstanceId,
                 occurredAt: now,
-                payload: { ...run, status: "rolled_back", completedAt: now },
+                payload: { ...runWithoutDelegatedTaskId, status: "rolled_back", completedAt: now },
               }),
             );
             if (rootNode !== undefined) {

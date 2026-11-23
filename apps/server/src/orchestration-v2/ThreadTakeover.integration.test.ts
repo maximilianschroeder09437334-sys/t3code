@@ -14,6 +14,7 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadShell,
@@ -21,6 +22,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderTurnId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -29,7 +31,7 @@ import {
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { classifyHomeNotification } from "@t3tools/shared/homeNotificationRules";
 import { pullRequestWatchTaskId } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -40,6 +42,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as References from "effect/References";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -84,6 +87,9 @@ const modelSelection = {
   model: "gpt-5.4",
 } satisfies ModelSelection;
 const driver = ProviderDriverKind.make("codex");
+/** A test that starts a real provider turn sets `open`; any other session open dies. */
+const testSessions: { open?: ProviderAdapter.ProviderAdapterV2["Service"]["openSession"] } = {};
+
 const providerInstance = {
   instanceId: modelSelection.instanceId,
   driverKind: driver,
@@ -96,7 +102,8 @@ const providerInstance = {
     driver,
     getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
-    openSession: () => Effect.die("sessions are not used by takeover tests"),
+    openSession: (input) =>
+      testSessions.open?.(input) ?? Effect.die("sessions are not used by takeover tests"),
   } as ProviderAdapter.ProviderAdapterV2["Service"],
   textGeneration: {} as ProviderInstance["textGeneration"],
 } satisfies ProviderInstance;
@@ -2165,6 +2172,126 @@ const endTurn = (threadId: ThreadId, options: { readonly newRun?: string } = {})
     return run.id;
   });
 
+/**
+ * A provider session for C whose open waits for `release` (after signalling `entered`), then fails
+ * or opens. An opened session starts turns and reports them running; `finish` ends the last one.
+ */
+const makeHeldSession = (outcome: "fail" | "open") =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+    const started: Array<ProviderAdapter.ProviderAdapterV2TurnInput> = [];
+    const providerTurn = (turn: ProviderAdapter.ProviderAdapterV2TurnInput, now: DateTime.Utc) => ({
+      id: ProviderTurnId.make(`provider-turn:${turn.attemptId}`),
+      providerThreadId: turn.providerThread.id,
+      nodeId: turn.rootNodeId,
+      runAttemptId: turn.attemptId,
+      nativeTurnRef: {
+        driver,
+        nativeId: `native-turn:${turn.attemptId}`,
+        strength: "strong" as const,
+      },
+      ordinal: turn.providerTurnOrdinal,
+      status: "running" as const,
+      startedAt: now,
+      completedAt: null,
+    });
+    const open: ProviderAdapter.ProviderAdapterV2["Service"]["openSession"] = (input) =>
+      Effect.gen(function* () {
+        yield* Deferred.succeed(entered, undefined);
+        yield* Deferred.await(release);
+        if (outcome === "fail") {
+          return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+            driver,
+            providerSessionId: input.providerSessionId,
+            cause: new Error("held session failed to open"),
+          });
+        }
+        const now = yield* DateTime.now;
+        return {
+          instanceId: modelSelection.instanceId,
+          driver,
+          providerSessionId: input.providerSessionId,
+          providerSession: {
+            id: input.providerSessionId,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            status: "ready",
+            cwd: "/workspace/held-session",
+            model: modelSelection.model,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+          events: Stream.fromQueue(events),
+          ensureThread: ({
+            threadId,
+            existingProviderThread,
+          }: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) =>
+            Effect.succeed({
+              ...existingProviderThread!,
+              appThreadId: threadId,
+              providerSessionId: input.providerSessionId,
+              nativeThreadRef: existingProviderThread?.nativeThreadRef ?? {
+                driver,
+                nativeId: `native:${threadId}`,
+                strength: "strong",
+              },
+              updatedAt: now,
+            }),
+          resumeThread: ({
+            providerThread,
+          }: {
+            readonly providerThread: OrchestrationV2ProviderThread;
+          }) => Effect.succeed(providerThread),
+          startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+            Effect.gen(function* () {
+              started.push(turn);
+              yield* Queue.offer(events, {
+                type: "provider_turn.updated",
+                driver,
+                providerTurn: providerTurn(turn, yield* DateTime.now),
+              });
+            }),
+          steerTurn: () => Effect.die("unused"),
+          interruptTurn: () => Effect.die("unused"),
+          respondToRuntimeRequest: () => Effect.die("unused"),
+          readThreadSnapshot: () => Effect.die("unused"),
+          rollbackThread: () => Effect.die("unused"),
+          forkThread: () => Effect.die("unused"),
+        } as never;
+      });
+    /** Ends the last started turn as the provider reports a completed turn. */
+    const finish = Effect.gen(function* () {
+      const turn = started.at(-1);
+      if (turn === undefined) return yield* Effect.die("no turn was started");
+      const now = yield* DateTime.now;
+      const completed = {
+        ...providerTurn(turn, now),
+        status: "completed" as const,
+        completedAt: now,
+      };
+      yield* Queue.offer(events, {
+        type: "provider_turn.updated",
+        driver,
+        providerTurn: completed,
+      });
+      yield* Queue.offer(events, {
+        type: "turn.terminal",
+        driver,
+        providerThreadId: completed.providerThreadId,
+        providerTurnId: completed.id,
+        runOrdinal: turn.runOrdinal,
+        status: "completed",
+        failure: null,
+        threadDisposition: "reusable",
+      } as ProviderAdapter.ProviderAdapterV2Event);
+    });
+    return { entered, release, open, finish, started };
+  });
+
 /** The ids of the family read for `member`, as `getThreadFamily` serves it. */
 const familyIds = (member: ThreadId) =>
   Effect.flatMap(ProjectionStore.ProjectionStoreV2, (store) =>
@@ -2574,6 +2701,145 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
         assert.equal(old.transferredTo?.threadId, successor);
         assert.equal(old.completionDelivery?.state, "disposed");
       }),
+  );
+
+  // P's follow-up run on C is still starting (its provider session opening) when the takeover
+  // rebinds it to S's anchor. The real turn start and run executor then write it from the run they
+  // read before the move, which carries P's follow-up task id.
+  it.effect.each(["fails to open", "opens and completes"] as const)(
+    "1c: a follow-up starting at takeover ends through the real turn start and reports to S (session %s)",
+    (variant) =>
+      Effect.gen(function* () {
+        const name = variant === "fails to open" ? "t1c-fail" : "t1c-run";
+        const { predecessor, successor, child } = yield* setup(name);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        yield* replyOnChild(child, "First result.");
+        yield* finishChild(child);
+        const messageId = MessageId.make(`${name}-follow-up`);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`${name}-follow-up`),
+          threadId: child,
+          messageId,
+          text: "One more check, please.",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          // A person's send for the owner P; it needs no agent selection provenance to start.
+          createdBy: "user",
+          creationSource: "web",
+        } as never);
+        const runOf = Effect.map(orchestrator.getThreadProjection(child), (projection) =>
+          projection.runs.find((run) => run.userMessageId === messageId),
+        );
+        const followUp = (yield* runOf)!;
+        assert.equal(followUp.status, "starting");
+        assert.isDefined(followUp.delegatedTaskId, "P's follow-up is bound to its task");
+        yield* parkOtherEffects;
+
+        const session = yield* makeHeldSession(variant === "fails to open" ? "fail" : "open");
+        testSessions.open = session.open;
+        const start = yield* executor
+          .execute(
+            {
+              id: `effect:${name}:provider-turn.start`,
+              threadId: child,
+              request: { type: "provider-turn.start", runId: followUp.id },
+            } as never,
+            { willRetry: false },
+          )
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        assert.isTrue(
+          Option.isSome(
+            yield* TestClock.withLive(
+              Deferred.await(session.entered).pipe(Effect.timeoutOption("5 seconds")),
+            ),
+          ),
+          "C's turn start reaches its provider session",
+        );
+        yield* takeover(predecessor, successor);
+        yield* endTurn(successor);
+        const anchorTaskId = (yield* thread(child)).ownership?.anchorTaskId;
+        assert.isDefined(anchorTaskId);
+        assert.equal(
+          (yield* runOf)?.delegatedTaskId,
+          anchorTaskId,
+          "the move rebinds the follow-up",
+        );
+
+        yield* Deferred.succeed(session.release, undefined);
+        yield* TestClock.withLive(Fiber.join(start).pipe(Effect.timeout("10 seconds")));
+        if (variant === "opens and completes") {
+          assert.equal((yield* runOf)?.status, "running");
+          yield* replyOnChild(child, "Result after the move.");
+          const runEnded = yield* awaitStoredEvent(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id === followUp.id &&
+              event.payload.status === "completed",
+          );
+          yield* session.finish;
+          assert.isTrue(Option.isSome(yield* runEnded), "the run executor ends C's follow-up");
+          // The executor queued the run's checkpoint capture, which settles it for the finalizer.
+          const sql = yield* SqlClient.SqlClient;
+          const captureId = `effect:checkpoint.capture:${followUp.id}`;
+          yield* sql`
+            UPDATE orchestration_v2_effect_outbox SET status = 'cancelled', lease_owner = NULL
+            WHERE status IN ('pending', 'running') AND effect_id != ${captureId}
+          `;
+          yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+          const capture = yield* sql<{ readonly status: string }>`
+            SELECT status FROM orchestration_v2_effect_outbox WHERE effect_id = ${captureId}
+          `;
+          assert.equal(capture[0]?.status, "succeeded", "the run's checkpoint capture ran");
+        }
+        yield* runEffects;
+
+        // [F] the start's and executor's writes keep the anchor binding.
+        const ended = (yield* runOf)!;
+        assert.equal(ended.status, variant === "fails to open" ? "failed" : "completed");
+        assert.equal(
+          ended.delegatedTaskId,
+          anchorTaskId,
+          "C's follow-up stays bound to S's anchor",
+        );
+        // [F] S's anchor finalizes with that run and is offered to S.
+        const s = yield* orchestrator.getThreadProjection(successor);
+        const anchor = s.subagents.find((task) => task.id === anchorTaskId);
+        assert.notEqual(anchor?.status, "running", "S's anchor is finalized");
+        assert.equal(anchor?.resultRunId, followUp.id);
+        assert.isTrue(notifiable(anchor), "S is offered C's result");
+        if (variant === "opens and completes") {
+          assert.equal(anchor?.result, "Result after the move.");
+        }
+        // [F] S no longer waits on C in either shell builder.
+        const sqlShell = (yield* store.getShellSnapshot({ location: "active" })).threads.find(
+          (row) => row.id === successor,
+        )!;
+        const liveShell = (yield* orchestrator.getThreadShell(successor))!;
+        for (const [read, shell] of [
+          ["in-memory", liveShell],
+          ["sql", sqlShell],
+        ] as const) {
+          assert.isFalse(
+            (shell.waitingOn ?? []).some((target) => target.threadId === child),
+            `${read}: S does not wait on C`,
+          );
+          assert.isFalse(
+            (shell.pendingBackgroundTasks ?? []).some((task) => task.taskId === anchorTaskId),
+            `${read}: S lists no running anchor`,
+          );
+          assert.notEqual(shell.waitPhase, "waiting", `${read}: S's phase`);
+        }
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            delete testSessions.open;
+          }),
+        ),
+      ),
   );
 });
 
