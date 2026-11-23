@@ -410,12 +410,11 @@ const notifiable = (task: Task | undefined) =>
     task.completionDelivery?.state ?? "",
   );
 
-/** Ends C's current run as the provider would and waits until its owner's task settles. */
-const finishChild = (
-  child: ThreadId,
-  holder: ThreadId,
-  status: "completed" | "failed" = "completed",
-) =>
+/**
+ * Ends C's current run as the provider would and waits until some thread records its result, so
+ * a build that records it on the predecessor fails on the caller's assertion rather than here.
+ */
+const finishChild = (child: ThreadId, status: "completed" | "failed" = "completed") =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const sink = yield* EventSink.EventSinkV2;
@@ -428,7 +427,6 @@ const finishChild = (
       Stream.filter(
         (stored) =>
           stored.event.type === "subagent.updated" &&
-          stored.event.payload.threadId === holder &&
           stored.event.payload.childThreadId === child &&
           stored.event.payload.result !== null &&
           stored.event.payload.transferredTo === undefined,
@@ -541,7 +539,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
         waitingOn.some((target) => target.threadId === child),
         "the successor waits on the moved child",
       );
-      const runId = yield* finishChild(child, successor);
+      const runId = yield* finishChild(child);
       // [F] recorded(S, a), class E.
       const recorded = yield* recordedTask(successor, child, runId);
       assert.isDefined(recorded, "the successor records the child's result");
@@ -561,7 +559,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
       const { predecessor, successor, child } = yield* setup("t2", {
         completionWake: "settled_only",
       });
-      const runId = yield* finishChild(child, predecessor);
+      const runId = yield* finishChild(child);
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const waiting = (yield* orchestrator.getThreadProjection(predecessor)).subagents.find(
         (task) => task.childThreadId === child,
@@ -602,7 +600,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
       assert.isAtMost(DateTime.toEpochMillis(yield* DateTime.now) - started, 32_000);
       yield* release;
       // [G] the child's result still reaches the predecessor.
-      const runId = yield* finishChild(child, predecessor);
+      const runId = yield* finishChild(child);
       assert.isTrue(notifiable(yield* recordedTask(predecessor, child, runId)));
       // [N] timed_out on P, no ownership on C.
       assert.deepInclude(outcome, { ok: false, code: "takeover_timeout" });
@@ -756,7 +754,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
       assert.isAtMost(DateTime.toEpochMillis(yield* DateTime.now) - started, 30_000);
       // [F] exactly one owner, the successor, and it records the result.
       assert.equal(ownerOf(yield* thread(child)), successor, JSON.stringify(outcome));
-      const runId = yield* finishChild(child, successor);
+      const runId = yield* finishChild(child);
       assert.isTrue(notifiable(yield* recordedTask(successor, child, runId)));
     }),
   );
@@ -764,7 +762,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
   it.effect("12 H: a result the predecessor already received is recorded without a wake", () =>
     Effect.gen(function* () {
       const { predecessor, successor, child } = yield* setup("t12-h");
-      const runId = yield* finishChild(child, predecessor);
+      const runId = yield* finishChild(child);
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const delivered = (yield* orchestrator.getThreadProjection(predecessor)).subagents.find(
         (task) => task.childThreadId === child,
@@ -814,7 +812,7 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
             threadId: successor,
           });
         const runsBefore = (yield* orchestrator.getThreadProjection(successor)).runs.length;
-        const runId = yield* finishChild(child, successor);
+        const runId = yield* finishChild(child);
         // Restart twice: recovery runs again over the same state.
         yield* orchestrator.recoverDelegatedTasks;
         yield* orchestrator.recoverDelegatedTasks;
