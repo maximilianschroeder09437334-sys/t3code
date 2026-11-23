@@ -3797,6 +3797,112 @@ it.effect("SQL shells read a subagent family and a worktree's threads", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect(
+  "SQL display families find moved threads through indexes, never a per-step thread scan",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const id = (name: string) => ThreadId.make(`thread:moved-family:${name}`);
+      const createThread = (name: string, parent?: string, root?: string) =>
+        store.apply({
+          id: EventId.make(`event:moved-family:${name}`),
+          type: "thread.created",
+          threadId: id(name),
+          occurredAt: now,
+          payload: {
+            createdBy: "user",
+            creationSource: parent === undefined ? "web" : "mcp",
+            id: id(name),
+            projectId: ProjectId.make("project:moved-family"),
+            title: name,
+            providerInstanceId,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            activeProviderThreadId: null,
+            lineage: {
+              parentThreadId: parent === undefined ? null : id(parent),
+              relationshipToParent: parent === undefined ? null : "subagent",
+              rootThreadId: id(root ?? name),
+            },
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            lastVisitedAt: null,
+            deletedAt: null,
+          },
+        });
+      const moveTo = (name: string, owner: string) =>
+        sql`UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.ownership', json(${JSON.stringify({
+          ownerThreadId: id(owner),
+          transferId: `transfer:${name}`,
+          anchorTaskId: `node:${name}`,
+          at: DateTime.formatIso(now),
+        })}))
+        WHERE thread_id = ${id(name)}`;
+      // P took over Q's child C (with its subagent G); Q's own takeover history is unrelated to P.
+      for (const name of ["p", "q"]) yield* createThread(name);
+      yield* createThread("c", "q", "q");
+      yield* createThread("g", "c", "q");
+      yield* moveTo("c", "p");
+      for (const name of ["u1", "u2", "u3"]) {
+        yield* createThread(name, "q", "q");
+        yield* moveTo(name, "q");
+      }
+
+      const { statements, tracer } = traceSqlStatements();
+      const family = (name: string) =>
+        store.getShellSnapshot({ location: "active", familyOf: id(name) }).pipe(
+          Effect.withTracer(tracer),
+          Effect.map((snapshot) => snapshot.threads.map((thread) => thread.id)),
+        );
+      assert.sameMembers([...(yield* family("p"))], [id("p"), id("c"), id("g")]);
+      assert.sameMembers([...(yield* family("g"))], [id("p"), id("c"), id("g")]);
+      assert.sameMembers([...(yield* family("q"))], [id("q"), id("u1"), id("u2"), id("u3")]);
+
+      // Each recursive step may scan only its own queue; thread rows come from index searches.
+      // A whole-table scan per step made one small family read cost seconds once takeover
+      // history accumulated elsewhere.
+      const familyQuery = statements.find(
+        (statement) =>
+          statement.includes("AS latest_run_stop_requested") && statement.includes("display_up"),
+      );
+      assert.isDefined(familyQuery);
+      const plan = yield* sql.unsafe<{
+        readonly id: number;
+        readonly parent: number;
+        readonly detail: string;
+      }>(`EXPLAIN QUERY PLAN ${familyQuery}`, []);
+      const planText = plan.map((row) => row.detail).join("\n");
+      const steps = plan.filter((row) => row.detail === "RECURSIVE STEP");
+      assert.isAbove(steps.length, 0, planText);
+      for (const step of steps) {
+        // The one scan a step needs is its queue; any other is a table scanned per queued row.
+        const scans = plan.filter(
+          (row) =>
+            row.parent === step.id &&
+            row.detail.startsWith("SCAN ") &&
+            row.detail !== "SCAN CONSTANT ROW",
+        );
+        assert.isAtMost(scans.length, 1, planText);
+      }
+      for (const alias of ["grandchild", "member"]) {
+        assert.include(
+          planText,
+          `SEARCH ${alias} USING INDEX orchestration_v2_projection_threads_root_thread_idx`,
+        );
+      }
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("SQL list older settled threads below a cursor", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;

@@ -8314,36 +8314,40 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       SELECT json_extract(payload_json, '$.lineage.rootThreadId')
       FROM display_up ORDER BY depth DESC LIMIT 1
     )`;
+    /** The root index's expression (migration 089) on thread row `alias`. */
+    const lineageRootOf = (alias: string) =>
+      sql.literal(
+        `CASE WHEN json_valid(${alias}.payload_json) THEN json_extract(${alias}.payload_json, '$.lineage.rootThreadId') END`,
+      );
     /**
-     * Threads a takeover moved and their subagent trees: the only rows whose display family can
-     * differ from their lineage root's. Uncorrelated, so SQLite evaluates it once per read.
+     * `familyOf`'s display family, built once per read: display-root lineage members whose walk
+     * still ends there, plus moved threads whose walk ends there and their subagent trees (same
+     * lineage root, so the root index finds them; a descendant with an owner is its own seed).
      */
-    const movedThreadIds = sql`
-      WITH RECURSIVE moved(thread_id, depth) AS (
-        SELECT child.thread_id, 0
-        FROM orchestration_v2_projection_threads child
-        WHERE CASE WHEN json_valid(child.payload_json)
-          THEN json_extract(child.payload_json, '$.ownership.ownerThreadId') END IS NOT NULL
+    const inDisplayFamily = (familyOf: ThreadId) => sql`t.thread_id IN (
+      WITH RECURSIVE family(key) AS MATERIALIZED (SELECT ${displayFamilyKey(sql`${familyOf}`)}),
+      moved_in(thread_id, root_thread_id, depth) AS (
+        SELECT moved.thread_id, ${lineageRootOf("moved")}, 0
+        FROM orchestration_v2_projection_threads moved
+        WHERE CASE WHEN json_valid(moved.payload_json)
+            THEN json_extract(moved.payload_json, '$.ownership.ownerThreadId') END IS NOT NULL
+          AND ${displayFamilyKey(sql.literal("moved.thread_id"))} = (SELECT key FROM family)
         UNION
-        SELECT grandchild.thread_id, moved.depth + 1
-        FROM moved JOIN orchestration_v2_projection_threads grandchild
-          ON CASE WHEN json_valid(grandchild.payload_json)
-            THEN json_extract(grandchild.payload_json, '$.lineage.parentThreadId') END = moved.thread_id
-        WHERE moved.depth < 16
+        SELECT grandchild.thread_id, moved_in.root_thread_id, moved_in.depth + 1
+        FROM moved_in JOIN orchestration_v2_projection_threads grandchild
+          ON ${lineageRootOf("grandchild")} = moved_in.root_thread_id
+        WHERE moved_in.depth < 16
+          AND json_extract(grandchild.payload_json, '$.lineage.parentThreadId') = moved_in.thread_id
           AND json_extract(grandchild.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+          AND json_extract(grandchild.payload_json, '$.ownership.ownerThreadId') IS NULL
       )
-      SELECT thread_id FROM moved
-    `;
-    /**
-     * `familyOf`'s display family, the root included: unmoved rows of the display root's lineage
-     * family (the root index's expression), plus moved rows whose own walk ends in that family.
-     */
-    const inDisplayFamily = (familyOf: ThreadId) => sql`(
-      (CASE WHEN json_valid(t.payload_json)
-        THEN json_extract(t.payload_json, '$.lineage.rootThreadId') END = ${displayFamilyKey(sql`${familyOf}`)}
-        AND t.thread_id NOT IN (${movedThreadIds}))
-      OR (t.thread_id IN (${movedThreadIds})
-        AND ${displayFamilyKey(sql.literal("t.thread_id"))} = ${displayFamilyKey(sql`${familyOf}`)})
+      SELECT thread_id FROM moved_in
+      UNION
+      SELECT member.thread_id
+      FROM orchestration_v2_projection_threads member
+      -- A scalar key, so the root index serves this read (a join may scan the table instead).
+      WHERE ${lineageRootOf("member")} = (SELECT key FROM family)
+        AND ${displayFamilyKey(sql.literal("member.thread_id"))} = (SELECT key FROM family)
     )`;
 
     /**
