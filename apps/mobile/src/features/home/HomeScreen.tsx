@@ -8,10 +8,7 @@ import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { LegendListRef } from "@legendapp/list/react-native";
 import { AnimatedLegendList } from "@legendapp/list/reanimated";
 import { THREAD_SIDEBAR_ROW_LAYOUT } from "../threads/threadListAnimations";
-import {
-  homeThreadListItemType,
-  homeThreadListMaintainVisibleContentPosition,
-} from "./home-thread-list-sizing";
+import { homeThreadListMaintainVisibleContentPosition } from "./home-thread-list-sizing";
 import {
   type EnvironmentProject,
   type EnvironmentThreadShell,
@@ -837,7 +834,7 @@ export function HomeScreen(props: HomeScreenProps) {
                 data={threadListV2Items}
                 renderItem={renderV2Item}
                 keyExtractor={v2KeyExtractor}
-                getItemType={homeThreadListItemType}
+                getItemType={(item) => item.type}
                 itemsAreEqual={threadListV2ListItemsAreEqual}
                 maintainVisibleContentPosition={HOME_LIST_MAINTAIN_VISIBLE_CONTENT_POSITION}
                 estimatedItemSize={ESTIMATED_THREAD_LIST_V2_ROW_HEIGHT}
