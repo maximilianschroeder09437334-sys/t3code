@@ -4033,7 +4033,7 @@ it.layer(layerTest)("delegated child handoff", (it) => {
 });
 
 /** Ends `child`'s latest run as the provider would, without waiting for any result write. */
-const endRun = (child: ThreadId) =>
+const endRun = (child: ThreadId, status: "completed" | "rolled_back" = "completed") =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const sink = yield* EventSink.EventSinkV2;
@@ -4050,7 +4050,7 @@ const endRun = (child: ThreadId) =>
           runId: run.id,
           providerInstanceId: modelSelection.instanceId,
           occurredAt: now,
-          payload: { ...run, status: "completed", completedAt: now },
+          payload: { ...run, status, completedAt: now },
         },
       ],
     });
@@ -4253,6 +4253,25 @@ it.layer(layerMcpTest)("delegated child handoff during the old child's finalizat
         assert.equal(task.childThreadId, s.child, "a closed task is not handed off");
         assert.equal(task.result, "old child's final");
       }),
+  );
+
+  it.effect("R3-1: a child rolled back past all its work answers the wait as rolled back", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r3-rolled-back");
+      const waiting = yield* waitOn(s.predecessor, s.child).pipe(Effect.forkChild);
+      yield* settleLive;
+      yield* endRun(s.child, "rolled_back");
+      yield* settleLive;
+      // Nothing records a result for a rolled-back child, so a wait still open runs out here.
+      yield* TestClock.adjust("60 seconds");
+      const result = yield* joinWithin(waiting);
+      assert.isFalse(result.timedOut, "a rolled-back child is a settled answer");
+      assert.equal(result.threadId, s.child);
+      assert.equal(result.resultRun?.status, "rolled_back");
+      const task = yield* taskOf(s.predecessor, s.taskId);
+      assert.equal(task.childThreadId, s.child);
+      assert.isNull(task.result, "the task stays open");
+    }),
   );
 });
 

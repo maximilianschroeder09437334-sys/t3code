@@ -585,6 +585,19 @@ export function latestRun(
   return projection.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
 }
 
+/**
+ * The answer of a thread rolled back past all its work, with nothing left running: its latest
+ * run. Nothing will run or record a result there again. Undefined while it has work or a result.
+ */
+function rolledBackPastWork(
+  records: Parameters<typeof delegatedTaskProgress>[0],
+): OrchestrationV2Run | undefined {
+  return delegatedTaskProgress(records).resultRun === undefined &&
+    records.runs.every((run) => isTerminalRunStatus(run.status))
+    ? latestRun(records)
+    : undefined;
+}
+
 function latestRestartContinuation(
   runs: ReadonlyArray<OrchestrationV2Run>,
   run: OrchestrationV2Run,
@@ -862,6 +875,16 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /** What delegatedTaskProgress reads for a thread's delegated work. */
+  const delegatedWorkRecords = (input: {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+  }) =>
+    getProjectThreadRecords(input, ["runs", "messages", "subagents", "providerThreads"], {
+      messageRoles: ["user"],
+      monitorNotificationsOnly: true,
+    });
+
   const listProjectThreads: ThreadManagementServiceShape["listProjectThreads"] = (input) =>
     orchestrator.listActiveThreads(input.projectId).pipe(
       Effect.mapError(
@@ -1082,19 +1105,10 @@ const make = Effect.gen(function* () {
     });
     const untilDelegatedWorkSettled = input.untilDelegatedWorkSettled === true;
     const delegatedWorkResult = Effect.gen(function* () {
-      const records = yield* getProjectThreadRecords(
-        input,
-        ["runs", "messages", "subagents", "providerThreads"],
-        { messageRoles: ["user"], monitorNotificationsOnly: true },
-      );
+      const records = yield* delegatedWorkRecords(input);
+      const rolledBack = rolledBackPastWork(records);
+      if (rolledBack !== undefined) return rolledBack;
       const progress = delegatedTaskProgress(records);
-      // A thread rolled back past all its work, with nothing left running, has no answer to wait for.
-      if (
-        progress.resultRun === undefined &&
-        records.runs.every((run) => isTerminalRunStatus(run.status))
-      ) {
-        return latestRun(records);
-      }
       if (progress.state !== "result_available") return undefined;
       const pending = yield* orchestrator
         .delegatedTaskResultPending(input.threadId)
@@ -1267,6 +1281,13 @@ const make = Effect.gen(function* () {
       for (;;) {
         // Taken before the task read, so a task update after it still wakes this wait.
         const taskSequence = yield* parentSequence;
+        // A child rolled back past all its work never closes the task: no result will be recorded.
+        // Read before the task, so a handoff that committed first still moves the wait below.
+        const rolledBack = gated
+          ? rolledBackPastWork(
+              yield* delegatedWorkRecords({ projectId: input.projectId, threadId: childThreadId }),
+            )
+          : undefined;
         const task = yield* boundTask;
         const left = deadline - (yield* Clock.currentTimeMillis);
         const after = task?.childThreadId ?? null;
@@ -1285,6 +1306,7 @@ const make = Effect.gen(function* () {
           task.transferredTo !== undefined
         )
           return settled;
+        if (rolledBack !== undefined) return { ...settled, resultRun: rolledBack };
         // Still open at the deadline: the task has no answer yet.
         if (left <= 0 || Option.isNone(yield* taskUpdated(taskSequence, left)))
           return { threadId: settled.threadId, run: settled.run, timedOut: true };
