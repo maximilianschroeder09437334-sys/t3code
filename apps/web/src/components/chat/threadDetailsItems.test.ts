@@ -8,13 +8,16 @@ import {
 
 const usage = THREAD_DETAILS_ITEMS.find((item) => item.id === "usage")!;
 const servers = THREAD_DETAILS_ITEMS.find((item) => item.id === "servers")!;
+const context = THREAD_DETAILS_ITEMS.find((item) => item.id === "context")!;
 
 describe("thread details items", () => {
   it.each([
-    { legacy: false, items: {}, usage: false, context: false },
+    // A device with no saved choices (a fresh iPad or browser) shows Context like desktop does.
+    { legacy: false, items: {}, usage: false, context: true },
     { legacy: true, items: {}, usage: true, context: true },
     { legacy: true, items: { usage: false }, usage: false, context: true },
-    { legacy: false, items: { usage: true, retired: false }, usage: true, context: false },
+    { legacy: false, items: { usage: true, retired: false }, usage: true, context: true },
+    { legacy: true, items: { context: false }, usage: true, context: false },
   ])("resolves Usage and Context from overrides and the retired Labs flag: %o", (row) => {
     const visibility = resolveThreadDetailsVisibility({
       threadDetailsItems: row.items,
@@ -32,5 +35,9 @@ describe("thread details items", () => {
 
     const hidden = { threadDetailsItems: { servers: false }, threadDetailsUsageEnabled: false };
     expect(setThreadDetailsItem(hidden, servers, true)).toEqual({});
+
+    const legacyOff = { threadDetailsItems: {}, threadDetailsUsageEnabled: false };
+    expect(setThreadDetailsItem(legacyOff, context, true)).toEqual({});
+    expect(setThreadDetailsItem(legacyOff, context, false)).toEqual({ context: false });
   });
 });
