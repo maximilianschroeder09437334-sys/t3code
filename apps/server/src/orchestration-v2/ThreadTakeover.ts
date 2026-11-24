@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import {
+  displayParentThreadId,
   isListedThreadLineage,
   type OrchestrationV2AppThread,
   type OrchestratorMcpThreadTakeoverResult,
@@ -32,7 +33,14 @@ export const takeoverTransferId = (
 
 type ThreadRelations = Pick<
   OrchestrationV2AppThread,
-  "id" | "lineage" | "archivedAt" | "deletedAt" | "launchedBy" | "continuedBy" | "continues"
+  | "id"
+  | "lineage"
+  | "ownership"
+  | "archivedAt"
+  | "deletedAt"
+  | "launchedBy"
+  | "continuedBy"
+  | "continues"
 >;
 
 const rejected = (code: TakeoverRejection["code"], message: string): TakeoverAdmission => ({
@@ -60,10 +68,13 @@ export const admitTakeover = (input: {
   if (successor.id === predecessor.id)
     return rejected("takeover_invalid", "A thread cannot take over itself.");
   // A delegated child's successor is a subagent of the same parent; it takes over that child's own.
+  // An owner takeover moves a child without changing its creation parent, so either the creation
+  // parents or the current owners match (the handoff creates S under C's current owner).
   const siblings =
     predecessor.lineage.relationshipToParent === "subagent" &&
     successor.lineage.relationshipToParent === "subagent" &&
-    predecessor.lineage.parentThreadId === successor.lineage.parentThreadId;
+    (predecessor.lineage.parentThreadId === successor.lineage.parentThreadId ||
+      displayParentThreadId(predecessor) === displayParentThreadId(successor));
   for (const thread of [predecessor, successor]) {
     if (!siblings && !isListedThreadLineage(thread.lineage))
       return rejected(
@@ -206,6 +217,8 @@ export interface ThreadTakeoverProbeValue {
   readonly reconcilerPassed: () => Effect.Effect<void>;
   /** After task_cancel read the task's child binding, before it stops anything. */
   readonly taskBindingRead: (taskId: string, childThreadId: ThreadId) => Effect.Effect<void>;
+  /** A task-following wait saw its child settle, before it checks that the task closed on it. */
+  readonly waitChildSettled: (taskId: string, childThreadId: ThreadId) => Effect.Effect<void>;
 }
 
 export const ThreadTakeoverProbe = Context.Reference<ThreadTakeoverProbeValue>(
@@ -217,6 +230,7 @@ export const ThreadTakeoverProbe = Context.Reference<ThreadTakeoverProbeValue>(
       beforeForwardCommit: () => Effect.void,
       reconcilerPassed: () => Effect.void,
       taskBindingRead: () => Effect.void,
+      waitChildSettled: () => Effect.void,
     }),
   },
 );

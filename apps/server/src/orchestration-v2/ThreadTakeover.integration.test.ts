@@ -913,6 +913,7 @@ const probe = {
   }): Effect.Effect<void, string> => Effect.void,
   reconcilerPassed: (): Effect.Effect<void> => Effect.void,
   taskBindingRead: (_taskId: string, _childThreadId: ThreadId): Effect.Effect<void> => Effect.void,
+  waitChildSettled: (_taskId: string, _childThreadId: ThreadId): Effect.Effect<void> => Effect.void,
 };
 const resetProbe = () => {
   probe.ownerRead = () => Effect.void;
@@ -920,6 +921,7 @@ const resetProbe = () => {
   probe.beforeForwardCommit = () => Effect.void;
   probe.reconcilerPassed = () => Effect.void;
   probe.taskBindingRead = () => Effect.void;
+  probe.waitChildSettled = () => Effect.void;
 };
 const TakeoverProbe = Context.Reference<typeof probe>("t3/orchestration-v2/ThreadTakeoverProbe", {
   defaultValue: () => probe,
@@ -931,6 +933,7 @@ const layerProbe = Layer.succeed(TakeoverProbe, {
   beforeForwardCommit: (input) => Effect.suspend(() => probe.beforeForwardCommit(input)),
   reconcilerPassed: () => Effect.suspend(() => probe.reconcilerPassed()),
   taskBindingRead: (taskId, child) => Effect.suspend(() => probe.taskBindingRead(taskId, child)),
+  waitChildSettled: (taskId, child) => Effect.suspend(() => probe.waitChildSettled(taskId, child)),
 });
 const layerForwardTest = layerTest.pipe(Layer.provideMerge(layerProbe));
 
@@ -4181,6 +4184,78 @@ it.layer(layerMcpTest)("delegated child handoff over MCP", (it) => {
   );
 });
 
+/**
+ * Holds the old child's result finalization before it takes the parent's lock, starts the parent's
+ * wait and ends the old child. Returns once the wait saw the child settle (the gate's probe) or,
+ * on a build without the gate, already answered.
+ */
+const lateHandoffWindow = (name: string) =>
+  Effect.gen(function* () {
+    const s = yield* setup(name);
+    const finalizing = yield* Deferred.make<void>();
+    const finalize = yield* Deferred.make<void>();
+    const sawSettled = yield* Deferred.make<void>();
+    let reads = 0;
+    probe.ownerRead = (child) =>
+      child === s.child && reads++ === 0
+        ? Deferred.succeed(finalizing, undefined).pipe(Effect.andThen(Deferred.await(finalize)))
+        : Effect.void;
+    probe.waitChildSettled = (taskId, child) =>
+      taskId === s.taskId && child === s.child
+        ? Deferred.succeed(sawSettled, undefined).pipe(Effect.asVoid)
+        : Effect.void;
+    const waiting = yield* waitOn(s.predecessor, s.child).pipe(Effect.forkChild);
+    yield* replyOnChild(s.child, "old child's final");
+    yield* endRun(s.child);
+    yield* TestClock.withLive(Deferred.await(finalizing).pipe(Effect.timeout("10 seconds")));
+    yield* TestClock.withLive(
+      Effect.raceFirst(Deferred.await(sawSettled), Effect.asVoid(Fiber.await(waiting))).pipe(
+        Effect.timeout("10 seconds"),
+      ),
+    );
+    return { ...s, waiting, releaseFinalize: Deferred.succeed(finalize, undefined) };
+  });
+
+it.layer(layerMcpTest)("delegated child handoff during the old child's finalization", (it) => {
+  it.effect(
+    "R2b-1a: a handoff after the old child settled, before its result, moves the wait",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* lateHandoffWindow("r2b-late");
+        // The wait saw C settle while P's task is still open; C's handoff wins P's lock.
+        const successor = (yield* handOff(s.predecessor, s.taskId, s.child, "r2b-late-a"))
+          .childThreadId!;
+        assert.notEqual(successor, s.child, "the handoff commits before finalization");
+        yield* s.releaseFinalize;
+        yield* replyOnChild(successor, "final from the successor");
+        const finalRun = yield* finishChild(successor);
+        const result = yield* joinWithin(s.waiting).pipe(Effect.ensuring(Effect.sync(resetProbe)));
+        assert.equal(result.threadId, successor, "the wait answers for the successor");
+        assert.equal(result.resultRun?.runId, finalRun);
+        assert.isFalse(result.timedOut);
+        assert.equal((yield* taskOf(s.predecessor, s.taskId)).result, "final from the successor");
+      }),
+  );
+
+  it.effect(
+    "R2b-1b: finalization winning the lock answers the wait, and the handoff is refused",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* lateHandoffWindow("r2b-final");
+        // Until P records the result, the wait has no answer.
+        assert.isUndefined(s.waiting.pollUnsafe(), "the wait stays open while the task is open");
+        yield* s.releaseFinalize;
+        const result = yield* joinWithin(s.waiting).pipe(Effect.ensuring(Effect.sync(resetProbe)));
+        assert.equal(result.threadId, s.child);
+        assert.isFalse(result.timedOut);
+        assert.equal(result.resultRun?.status, "completed");
+        const task = yield* handOff(s.predecessor, s.taskId, s.child, "r2b-final-a");
+        assert.equal(task.childThreadId, s.child, "a closed task is not handed off");
+        assert.equal(task.result, "old child's final");
+      }),
+  );
+});
+
 it.layer(layerTest)("delegated child handoff moves the old child's own children", (it) => {
   it.effect("R2-4: the successor takes over the old child's app-owned children", () =>
     Effect.gen(function* () {
@@ -4214,6 +4289,65 @@ it.layer(layerTest)("delegated child handoff moves the old child's own children"
       assert.equal(ownerOf(yield* thread(grandchild)), successor);
       // The task itself stays bound to the successor under the original parent.
       assert.equal((yield* taskOf(s.predecessor, s.taskId)).childThreadId, successor);
+    }),
+  );
+
+  it.effect("R2b-2: after an owner takeover, the successor still takes over the grandchild", () =>
+    Effect.gen(function* () {
+      // A (predecessor) owns C; C owns G. A -> B moves C to B, but C's lineage parent stays A.
+      const s = yield* setup("r2b-grand");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const childRun = (yield* orchestrator.getThreadProjection(s.child)).runs.toSorted(
+        (a, b) => b.ordinal - a.ordinal,
+      )[0]!;
+      yield* orchestrator.dispatch({
+        type: "delegated_task.request",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("r2b-grand-subtask"),
+        parentThreadId: s.child,
+        parentRunId: childRun.id,
+        parentNodeId: childRun.rootNodeId!,
+        task: "Check the schema.",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        completionWake: "always",
+      });
+      const grandTask = (yield* orchestrator.getThreadProjection(s.child)).subagents.find(
+        (task) => task.childThreadId !== null,
+      )!;
+      const grandchild = grandTask.childThreadId!;
+      const moved = yield* takeover(s.predecessor, s.successor);
+      assert.isTrue(moved.ok, moved.ok ? "" : moved.message);
+      assert.equal(ownerOf(yield* thread(s.child)), s.successor, "A -> B moved C to B");
+      // C hands its task (now B's, under a new anchor id) to a successor S, a subagent of B.
+      const onB = (yield* orchestrator.getThreadProjection(s.successor)).subagents.find(
+        (task) => task.childThreadId === s.child,
+      )!;
+      const successor = (yield* handOff(s.successor, onB.id, s.child, "r2b-grand-a"))
+        .childThreadId!;
+      assert.notEqual(successor, s.child, "the handoff under B rebinds");
+      assert.equal((yield* thread(successor)).lineage.parentThreadId, s.successor);
+      const outcome = yield* takeover(s.child, successor);
+      assert.isTrue(outcome.ok, outcome.ok ? "" : outcome.message);
+      assert.equal(ownerOf(yield* thread(grandchild)), successor);
+      // G's result lands once, on S's task; C's task was closed by the move, not by the result.
+      yield* replyOnChild(grandchild, "schema checked");
+      const runId = yield* finishChild(grandchild);
+      const onSuccessor = (yield* orchestrator.getThreadProjection(successor)).subagents.filter(
+        (task) => task.childThreadId === grandchild && task.result !== null,
+      );
+      assert.deepEqual(
+        onSuccessor.map((task) => task.result),
+        ["schema checked"],
+      );
+      assert.isTrue(notifiable(yield* recordedTask(successor, grandchild, runId)));
+      const onChild = (yield* orchestrator.getThreadProjection(s.child)).subagents.find(
+        (task) => task.id === grandTask.id,
+      )!;
+      assert.equal(onChild.transferredTo?.threadId, successor);
+      assert.equal(onChild.completionDelivery?.state, "disposed");
     }),
   );
 });

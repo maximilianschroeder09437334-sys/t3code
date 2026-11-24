@@ -67,6 +67,7 @@ import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
 import { threadPullRequestsOf } from "../sourceControl/threadPullRequests.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { ThreadTakeoverProbe } from "./ThreadTakeover.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
@@ -1187,22 +1188,39 @@ const make = Effect.gen(function* () {
         threadId: follow.parentThreadId,
         cause,
       });
-    const boundChild = orchestrator
+    const boundTask = orchestrator
       .getThreadRecords(follow.parentThreadId, ["subagents"], { subagentIds: [follow.taskId] })
       .pipe(
-        Effect.map(
-          ({ subagents }) =>
-            subagents.find((task) => task.id === follow.taskId)?.childThreadId ?? null,
-        ),
+        Effect.map(({ subagents }) => subagents.find((task) => task.id === follow.taskId)),
         Effect.mapError(loadError),
       );
+    const boundChild = Effect.map(boundTask, (task) => task?.childThreadId ?? null);
+    const parentSequence = orchestrator
+      .getThreadEventSequence(follow.parentThreadId)
+      .pipe(Effect.mapError(loadError));
+    /** The task's next update after `afterSequence`, if one comes within `timeoutMs`. */
+    const taskUpdated = (afterSequence: number, timeoutMs: number) =>
+      orchestrator
+        .streamStoredEventsFrom({
+          threadId: follow.parentThreadId,
+          afterSequence,
+          eventType: "subagent.updated",
+        })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" && stored.event.payload.id === follow.taskId,
+          ),
+          Stream.runHead,
+          Effect.mapError(loadError),
+          Effect.timeoutOption(Duration.millis(Math.max(1, timeoutMs))),
+        );
+    const probe = yield* ThreadTakeoverProbe;
     const deadline = (yield* Clock.currentTimeMillis) + Math.max(1, input.timeoutMs);
     let childThreadId = input.threadId;
     for (;;) {
       // Taken before the binding read, so a rebind after it still wakes this wait.
-      const afterSequence = yield* orchestrator
-        .getThreadEventSequence(follow.parentThreadId)
-        .pipe(Effect.mapError(loadError));
+      const afterSequence = yield* parentSequence;
       const bound = yield* boundChild;
       const remaining = deadline - (yield* Clock.currentTimeMillis);
       if (bound !== null && bound !== childThreadId && remaining > 0) {
@@ -1239,17 +1257,38 @@ const make = Effect.gen(function* () {
         ),
       );
       if (raced._tag === "rebound") continue;
-      // A rebind that committed while this child's run ended still moves the answer on.
-      const after = yield* boundChild;
-      if (
-        after !== null &&
-        after !== childThreadId &&
-        deadline > (yield* Clock.currentTimeMillis)
-      ) {
-        childThreadId = after;
-        continue;
+      const settled = raced.result;
+      // A child's settled work is the task's answer only once the task closed on it: until the
+      // parent records the result, an in-flight handoff can still rebind the task (it refuses a
+      // closed one). Both write the task row under the parent's lock, so the row decides.
+      const gated = input.untilDelegatedWorkSettled === true && !settled.timedOut;
+      if (gated) yield* probe.waitChildSettled(follow.taskId, childThreadId);
+      // Leaves only to follow a rebind; every other outcome answers.
+      for (;;) {
+        // Taken before the task read, so a task update after it still wakes this wait.
+        const taskSequence = yield* parentSequence;
+        const task = yield* boundTask;
+        const left = deadline - (yield* Clock.currentTimeMillis);
+        const after = task?.childThreadId ?? null;
+        // A rebind that committed while this child's run ended still moves the answer on.
+        if (after !== null && after !== childThreadId && left > 0) {
+          childThreadId = after;
+          break;
+        }
+        if (
+          !gated ||
+          task === undefined ||
+          after !== childThreadId ||
+          task.result !== null ||
+          task.completedAt !== null ||
+          task.cancelledRunId !== undefined ||
+          task.transferredTo !== undefined
+        )
+          return settled;
+        // Still open at the deadline: the task has no answer yet.
+        if (left <= 0 || Option.isNone(yield* taskUpdated(taskSequence, left)))
+          return { threadId: settled.threadId, run: settled.run, timedOut: true };
       }
-      return raced.result;
     }
   });
 

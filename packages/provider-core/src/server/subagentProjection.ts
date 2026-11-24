@@ -61,8 +61,16 @@ export function makeSubagentChildThread(input: {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }): OrchestrationV2AppThread {
-  // The remote parent delegated the parent thread, not its subagents.
-  const { delegatedFrom: _delegatedFrom, ...inherited } = input.parentThread;
+  // The remote parent delegated the parent thread, not its subagents. Takeover relations (launch
+  // proof, continues/continuedBy, a moved child's owner) belong to the parent alone.
+  const {
+    delegatedFrom: _delegatedFrom,
+    launchedBy: _launchedBy,
+    continuedBy: _continuedBy,
+    continues: _continues,
+    ownership: _ownership,
+    ...inherited
+  } = input.parentThread;
   return {
     ...inherited,
     createdBy: input.createdBy,
