@@ -303,21 +303,14 @@ it.effect.each(["none", "rejected", "mismatched", "accepted-bad-ack", "read-fail
     }).pipe(Effect.provide(storage)),
 );
 
-it("names the handoff tool explicitly", () => {
+it("tells the agent to launch its own successor", () => {
   const instructions = contextRolloverInstructions("cap-run", "feature");
-  assert.include(instructions, 'contextLimitWork.capRunId="cap-run"');
-  assert.include(instructions, 'state.branch="feature"');
+  assert.include(instructions, 'branch "feature"');
   for (const notice of [contextRolloverLimitMessage, contextHandoffNudgeMessage]) {
-    assert.include(
-      notice,
-      "Before submitting, commit and push your work to GitHub where the project allows it, and record the pushed SHA in state.commits.",
-    );
+    assert.include(notice, "start the successor yourself with t3_thread_launch");
+    assert.include(notice, "Do not call t3_handoff_submit.");
+    assert.include(notice, "Delegated child: do not launch a successor");
   }
-  assert.include(contextHandoffNudgeMessage, "the successor starts automatically");
-  assert.include(
-    contextRolloverLimitMessage,
-    "call the t3_handoff_submit tool (not a thread message)",
-  );
 });
 it.effect("explains the expected handoff branch", () =>
   CoreHandoff.submitHandoff(sourceId, {
