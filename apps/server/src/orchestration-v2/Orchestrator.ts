@@ -90,6 +90,7 @@ import {
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import {
   admitTakeover,
+  AutomaticTakeover,
   AutoTakeoverSettings,
   SendOwnerFence,
   TakeoverReconcilerSettings,
@@ -18757,6 +18758,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const successor = yield* projectionStore
           .getThread(successorThreadId)
           .pipe(Effect.mapError(projectionError));
+        if (yield* AutomaticTakeover) {
+          const runs = yield* projectionStore
+            .getThreadRecords(successorThreadId, ["runs"], {
+              runStatuses: ["preparing", "starting", "running", "waiting"],
+            })
+            .pipe(Effect.mapError(projectionError));
+          if (
+            successor.launchedBy?.threadId !== predecessorThreadId ||
+            successor.settledAt !== null ||
+            successor.settledOverride === "settled" ||
+            successor.archivedAt !== null ||
+            successor.deletedAt !== null ||
+            !runs.runs.some((run) => run.rootNodeId !== null && isActiveRun(run)) ||
+            predecessor.continuedBy?.state === "effective" ||
+            (yield* readTakeoverTasks(predecessorThreadId).pipe(Effect.mapError(projectionError)))
+              .childThreadIds.length === 0
+          )
+            return {
+              _tag: "outcome",
+              outcome: takeoverFailure(
+                "takeover_invalid",
+                "Automatic successor is no longer eligible.",
+              ),
+            };
+        }
         const now = yield* DateTime.now;
         const admitted = admitTakeover({
           predecessor,
@@ -19002,7 +19028,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           log,
         );
       yield* Effect.logDebug("Auto takeover trying", { ...log, attempt });
-      const outcome = yield* takeoverThread({ predecessorThreadId, successorThreadId });
+      const outcome = yield* takeoverThread({ predecessorThreadId, successorThreadId }).pipe(
+        Effect.provideService(AutomaticTakeover, true),
+      );
       if (outcome.ok)
         return yield* Effect.logInfo("Auto takeover moved the predecessor's children", {
           ...log,
@@ -19059,11 +19087,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // A restart drops the retry fibers, and the stream above starts after the current sequence, so a
   // successor already running before the restart gets no new trigger. Startup recovery seeds each
   // launched thread with an active run; each starts with a fresh budget from AutoTakeoverSettings.
-  const recoverAutoTakeovers = projectionStore.getRecoveryThreadIds("launched-successors").pipe(
-    Effect.tap((threadIds) =>
-      Effect.annotateCurrentSpan("recovery.autoTakeoverSuccessors", threadIds.length),
-    ),
-    Effect.flatMap((threadIds) => Effect.forEach(threadIds, startAutoTakeover, { discard: true })),
+  const recoverAutoTakeovers = Effect.gen(function* () {
+    const settings = yield* AutoTakeoverSettings;
+    if (!settings.enabled) return;
+    const limit = Math.max(1, Math.floor(settings.seedBatchSize ?? 100));
+    for (const status of ["preparing", "starting", "running", "waiting"]) {
+      let after = "";
+      for (;;) {
+        const page = yield* projectionStore.getAutoTakeoverPage(status, after, limit);
+        for (const row of page) if (row.eligible) yield* startAutoTakeover(row.threadId);
+        if (page.length < limit) break;
+        after = page[page.length - 1]!.threadId;
+        yield* Effect.yieldNow;
+      }
+    }
+  }).pipe(
     Effect.catchCause((cause) => Effect.logWarning("Failed to recover auto takeovers", { cause })),
   );
   /** Test seam: the successors whose auto takeover is running now. */
@@ -19076,7 +19114,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   return OrchestratorV2.of({
     resumeQueuedRuns,
-    recoverDelegatedTasks: recoverDelegatedTasks.pipe(Effect.andThen(recoverAutoTakeovers)),
+    recoverDelegatedTasks: recoverDelegatedTasks.pipe(
+      Effect.andThen(recoverAutoTakeovers.pipe(Effect.forkIn(autoTakeoverScope), Effect.asVoid)),
+    ),
     autoTakeoversInFlight,
     recoverDelegatedTask,
     cancelDelegatedTask,

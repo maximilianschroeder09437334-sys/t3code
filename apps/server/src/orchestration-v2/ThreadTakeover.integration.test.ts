@@ -98,7 +98,13 @@ const modelSelection = {
 } satisfies ModelSelection;
 const driver = ProviderDriverKind.make("codex");
 /** A test that starts a real provider turn sets `open`; any other session open dies. */
-const testSessions: { open?: ProviderAdapter.ProviderAdapterV2["Service"]["openSession"] } = {};
+const TestSession = Context.Reference<
+  ProviderAdapter.ProviderAdapterV2["Service"]["openSession"] | undefined
+>("test/TakeoverSession", { defaultValue: () => undefined });
+const FixtureThreads = Context.Reference<ReadonlyArray<ThreadId> | undefined>(
+  "test/TakeoverFixture",
+  { defaultValue: () => undefined },
+);
 
 const providerInstance = {
   instanceId: modelSelection.instanceId,
@@ -113,7 +119,10 @@ const providerInstance = {
     getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (input) =>
-      testSessions.open?.(input) ?? Effect.die("sessions are not used by takeover tests"),
+      Effect.flatMap(
+        TestSession,
+        (open) => open?.(input) ?? Effect.die("sessions are not used by takeover tests"),
+      ),
   } as ProviderAdapter.ProviderAdapterV2["Service"],
   textGeneration: {} as ProviderInstance["textGeneration"],
 } satisfies ProviderInstance;
@@ -123,6 +132,7 @@ type AutoTakeover = {
   readonly enabled: boolean;
   readonly attempts: number;
   readonly retrySpacingMs: number;
+  readonly seedBatchSize?: number;
 };
 const autoTakeoverOff: AutoTakeover = { enabled: false, attempts: 1, retrySpacingMs: 0 };
 const AutoTakeoverSettings = Context.Reference<AutoTakeover>(
@@ -971,13 +981,15 @@ const endChildRun = (
  * Settles every other effect as if the server had run it (the provider stubs here cannot), so
  * the worker runs only forwards. A child's earlier rows would otherwise block its lane.
  */
-const parkOtherEffects = Effect.flatMap(
-  SqlClient.SqlClient,
-  (sql) => sql`
+const parkOtherEffects = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const threads = yield* FixtureThreads;
+  yield* sql`
     UPDATE orchestration_v2_effect_outbox SET status = 'cancelled', lease_owner = NULL
     WHERE status IN ('pending', 'running') AND effect_type != 'takeover.forward'
-  `,
-);
+      ${threads === undefined ? sql`` : sql`AND ${sql.in("thread_id", threads)}`}
+  `;
+});
 
 /** The effect worker, as the daemon runs it: drain, then wait (fake clock) for the next retry. */
 const runEffects = Effect.gen(function* () {
@@ -2763,10 +2775,11 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
         const followUp = (yield* runOf)!;
         assert.equal(followUp.status, "starting");
         assert.isDefined(followUp.delegatedTaskId, "P's follow-up is bound to its task");
-        yield* parkOtherEffects;
+        yield* parkOtherEffects.pipe(
+          Effect.provideService(FixtureThreads, [predecessor, successor, child]),
+        );
 
         const session = yield* makeHeldSession(variant === "fails to open" ? "fail" : "open");
-        testSessions.open = session.open;
         const start = yield* executor
           .execute(
             {
@@ -2776,7 +2789,10 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
             } as never,
             { willRetry: false },
           )
-          .pipe(Effect.forkChild({ startImmediately: true }));
+          .pipe(
+            Effect.provideService(TestSession, session.open),
+            Effect.forkChild({ startImmediately: true }),
+          );
         assert.isTrue(
           Option.isSome(
             yield* TestClock.withLive(
@@ -2814,6 +2830,7 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
           yield* sql`
             UPDATE orchestration_v2_effect_outbox SET status = 'cancelled', lease_owner = NULL
             WHERE status IN ('pending', 'running') AND effect_id != ${captureId}
+              AND ${sql.in("thread_id", [predecessor, successor, child])}
           `;
           yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
           const capture = yield* sql<{ readonly status: string }>`
@@ -2821,7 +2838,9 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
           `;
           assert.equal(capture[0]?.status, "succeeded", "the run's checkpoint capture ran");
         }
-        yield* runEffects;
+        yield* runEffects.pipe(
+          Effect.provideService(FixtureThreads, [predecessor, successor, child]),
+        );
 
         // [F] the start's and executor's writes keep the anchor binding.
         const ended = (yield* runOf)!;
@@ -2859,13 +2878,7 @@ it.layer(layerTest)("thread takeover display (WP4)", (it) => {
           );
           assert.notEqual(shell.waitPhase, "waiting", `${read}: S's phase`);
         }
-      }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            delete testSessions.open;
-          }),
-        ),
-      ),
+      }),
   );
 });
 
@@ -3532,6 +3545,8 @@ it.layer(layerAutoTest)("automatic takeover keeps only in-flight successors in m
 /** Every auto-takeover server process over one database file; the probe stays the test's. */
 const layerAutoFile = (dbPath: string, autoTakeover: AutoTakeover) =>
   makeLayerTest(SqlitePersistence.layerFromPath(dbPath), autoTakeover).pipe(
+    Layer.provideMerge(Logger.layer([autoLogger], { mergeWithExisting: true })),
+    Layer.provideMerge(Layer.succeed(References.MinimumLogLevel, "Debug")),
     Layer.provideMerge(layerProbe),
   );
 
@@ -3567,6 +3582,121 @@ it.layer(NodeServices.layer)("automatic takeover after a restart", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("startup returns while seeding is blocked and shutdown interrupts it", () =>
+    Effect.gen(function* () {
+      const dbPath = yield* databaseFile;
+      const interrupted = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const store = (yield* ProjectionStore.ProjectionStoreV2) as {
+          -readonly [
+            K in keyof ProjectionStore.ProjectionStoreV2["Service"]
+          ]: ProjectionStore.ProjectionStoreV2["Service"][K];
+        };
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        store.getAutoTakeoverPage = () =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as([]),
+            Effect.ensuring(Deferred.succeed(interrupted, undefined)),
+          );
+        yield* orchestrator.recoverDelegatedTasks.pipe(Effect.timeout("5 seconds"));
+        yield* Deferred.await(entered);
+        assert.isFalse(yield* Deferred.isDone(release));
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(layerAutoFile(dbPath, { enabled: true, attempts: 1, retrySpacingMs: 0 })),
+        ),
+      );
+      assert.isTrue(yield* Deferred.isDone(interrupted), "scope closure interrupted seeding");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "bounded indexed pages exclude settled and archived active successors; automatic admission revalidates",
+    () =>
+      Effect.gen(function* () {
+        const dbPath = yield* databaseFile;
+        yield* Effect.gen(function* () {
+          const settled = yield* setupAuto("seed-settled");
+          const archived = yield* setupAuto("seed-archived");
+          const live = yield* setupAuto("seed-live");
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          // Persist the historical state under review: active runs can survive a settlement/restart.
+          const mark = (id: ThreadId, archived = false) =>
+            Effect.gen(function* () {
+              const now = yield* DateTime.now;
+              yield* (yield* EventSink.EventSinkV2).write({
+                events: [
+                  {
+                    id: EventId.make(`mark:${id}`),
+                    type: "thread.metadata-updated",
+                    threadId: id,
+                    occurredAt: now,
+                    payload: {
+                      ...(yield* thread(id)),
+                      ...(archived
+                        ? { archivedAt: now }
+                        : { settledAt: now, settledOverride: "settled" as const }),
+                    },
+                  },
+                ],
+              });
+            });
+          yield* mark(settled.successor);
+          yield* mark(archived.successor, true);
+          const store = (yield* ProjectionStore.ProjectionStoreV2) as {
+            -readonly [
+              K in keyof ProjectionStore.ProjectionStoreV2["Service"]
+            ]: ProjectionStore.ProjectionStoreV2["Service"][K];
+          };
+          const eligible: ThreadId[] = [];
+          let after = "";
+          for (;;) {
+            const page = yield* store.getAutoTakeoverPage("running", after, 1);
+            assert.isAtMost(page.length, 1);
+            if (page.length === 0) break;
+            after = page[0]!.threadId;
+            if (page[0]!.eligible) eligible.push(page[0]!.threadId);
+          }
+          assert.include(eligible, live.successor);
+          assert.notInclude(eligible, settled.successor);
+          assert.notInclude(eligible, archived.successor);
+          const sql = yield* SqlClient.SqlClient;
+          const plan =
+            yield* sql`EXPLAIN QUERY PLAN SELECT DISTINCT thread_id FROM orchestration_v2_projection_runs
+          INDEXED BY orchestration_v2_projection_runs_recovery_idx
+          WHERE status IN ('queued','preparing','starting','running','waiting') AND status = 'running'
+            AND thread_id > '' ORDER BY thread_id LIMIT 1`;
+          assert.include(JSON.stringify(plan), "orchestration_v2_projection_runs_recovery_idx");
+          yield* Effect.log("auto takeover seed plan", JSON.stringify(plan));
+          // Schedule while live, then settle while the attempt waits for P's admission lock.
+          const release = yield* holdLocks([live.predecessor]);
+          const trying = yield* autoLogged("Auto takeover trying");
+          const ended = yield* autoTakeoverEnded(live.successor);
+          yield* orchestrator.recoverDelegatedTasks.pipe(
+            Effect.provideService(AutoTakeoverSettings, {
+              enabled: true,
+              attempts: 1,
+              retrySpacingMs: 0,
+              seedBatchSize: 1,
+            }),
+          );
+          yield* trying;
+          yield* mark(live.successor);
+          yield* release;
+          yield* ended;
+          // Manual takeover of both settled successors remains allowed.
+          assert.isTrue((yield* takeover(settled.predecessor, settled.successor)).ok);
+          yield* Effect.yieldNow;
+          assert.isUndefined((yield* thread(live.predecessor)).continuedBy);
+          assert.equal(ownerOf(yield* thread(live.child!)), live.predecessor);
+          assert.isTrue((yield* takeover(live.predecessor, live.successor)).ok);
+        }).pipe(Effect.provide(Layer.fresh(layerAutoFile(dbPath, autoTakeoverOff))));
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("startup recovery does nothing while the feature is off", () =>
     Effect.gen(function* () {
       const dbPath = yield* databaseFile;
@@ -3578,7 +3708,21 @@ it.layer(NodeServices.layer)("automatic takeover after a restart", (it) => {
       yield* inProcess(
         Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const store = (yield* ProjectionStore.ProjectionStoreV2) as {
+            -readonly [
+              K in keyof ProjectionStore.ProjectionStoreV2["Service"]
+            ]: ProjectionStore.ProjectionStoreV2["Service"][K];
+          };
+          const original = store.getAutoTakeoverPage;
+          let queries = 0;
+          store.getAutoTakeoverPage = (...args) => {
+            queries++;
+            return original(...args);
+          };
           yield* orchestrator.recoverDelegatedTasks;
+          yield* Effect.yieldNow;
+          assert.equal(queries, 0, "disabled recovery never queries candidates");
+          store.getAutoTakeoverPage = original;
           assert.deepEqual(yield* orchestrator.autoTakeoversInFlight, []);
           assert.isUndefined((yield* thread(predecessor)).continuedBy);
           assert.equal(ownerOf(yield* thread(child)), predecessor);

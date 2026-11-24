@@ -113,11 +113,20 @@ export interface AutoTakeoverSettingsValue {
   readonly attempts: number;
   /** Pause between those tries, holding no lock. */
   readonly retrySpacingMs: number;
+  /** Maximum active threads read per startup recovery page. */
+  readonly seedBatchSize?: number;
 }
 
 export const AutoTakeoverSettings = Context.Reference<AutoTakeoverSettingsValue>(
   "t3/orchestration-v2/AutoTakeoverSettings",
-  { defaultValue: () => ({ enabled: true, attempts: 5, retrySpacingMs: 15_000 }) },
+  {
+    defaultValue: () => ({
+      enabled: true,
+      attempts: 5,
+      retrySpacingMs: 15_000,
+      seedBatchSize: 100,
+    }),
+  },
 );
 
 /**
@@ -203,3 +212,8 @@ export const ThreadTakeoverProbe = Context.Reference<ThreadTakeoverProbeValue>(
     }),
   },
 );
+
+/** Internal automatic admission fence; manual takeover keeps its existing rules. */
+export const AutomaticTakeover = Context.Reference<boolean>("t3/AutomaticTakeover", {
+  defaultValue: () => false,
+});

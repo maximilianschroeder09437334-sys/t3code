@@ -193,9 +193,7 @@ export type ProjectionRecoveryKind =
   | "subagent-results"
   /** `subagent-results` restricted to children a takeover moved: the live reconciler's scan. */
   | "owned-subagent-results"
-  | "delegated-completions"
-  /** Threads started by t3_thread_launch with an active run: auto takeover after a restart. */
-  | "launched-successors";
+  | "delegated-completions";
 
 /** A migrated child's result attempt owed to its current owner (plan-b-r6 §5a). */
 export interface ProjectionTakeoverObligation {
@@ -831,6 +829,14 @@ export interface ProjectionStoreV2Shape {
   readonly getHeldQueuedRuns: (
     threadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2Run>, ProjectionStoreV2Error>;
+  readonly getAutoTakeoverPage: (
+    status: string,
+    after: string,
+    limit: number,
+  ) => Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly eligible: boolean }>,
+    ProjectionStoreV2Error
+  >;
   readonly getRecoveryThreadIds: (
     kind: ProjectionRecoveryKind,
     projects?: {
@@ -5198,6 +5204,39 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
 
+    // Materialize a bounded index range before reading any thread JSON. Each status has its own
+    // keyset cursor, so even ineligible rows advance recovery without a full-history scan.
+    const getAutoTakeoverPage = Effect.fn("ProjectionStore.getAutoTakeoverPage")(
+      function* (status: string, after: string, limit: number) {
+        const rows = yield* sql<{ readonly thread_id: string; readonly eligible: number }>`
+          WITH active AS MATERIALIZED (
+            SELECT DISTINCT thread_id FROM orchestration_v2_projection_runs
+            INDEXED BY orchestration_v2_projection_runs_recovery_idx
+            WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+              AND status = ${status} AND thread_id > ${after}
+            ORDER BY thread_id LIMIT ${limit}
+          )
+          SELECT active.thread_id, COALESCE(CASE WHEN json_valid(launched.payload_json) THEN
+            launched.deleted_at IS NULL AND launched.archived_at IS NULL
+            AND json_extract(launched.payload_json, '$.launchedBy.threadId') IS NOT NULL
+            AND json_extract(launched.payload_json, '$.settledAt') IS NULL
+            AND json_extract(launched.payload_json, '$.settledOverride') IS NOT 'settled'
+            AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run
+              WHERE run.thread_id = active.thread_id AND run.status = ${status}
+                AND CASE WHEN json_valid(run.payload_json) THEN json_extract(run.payload_json, '$.rootNodeId') IS NOT NULL ELSE 0 END)
+            ELSE 0 END, 0) AS eligible
+          FROM active LEFT JOIN orchestration_v2_projection_threads AS launched
+            ON launched.thread_id = active.thread_id
+          ORDER BY active.thread_id
+        `;
+        return rows.map((row) => ({
+          threadId: ThreadId.make(row.thread_id),
+          eligible: row.eligible === 1,
+        }));
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
     const getRecoveryThreadIds = Effect.fn("ProjectionStore.getRecoveryThreadIds")(
       function* (
         kind: ProjectionRecoveryKind,
@@ -5224,21 +5263,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE CASE WHEN json_valid(payload_json)
                   THEN json_type(payload_json, '$.delegatedCompletion.delivery') = 'object'
                   ELSE 0 END
-              `;
-            case "launched-successors":
-              return sql`
-                SELECT launched.thread_id FROM orchestration_v2_projection_threads AS launched
-                WHERE CASE WHEN json_valid(launched.payload_json)
-                    THEN json_extract(launched.payload_json, '$.launchedBy.threadId') IS NOT NULL
-                    ELSE 0 END
-                  AND EXISTS (
-                    SELECT 1 FROM orchestration_v2_projection_runs AS run
-                    WHERE run.thread_id = launched.thread_id
-                      AND run.status IN ('preparing', 'starting', 'running', 'waiting')
-                      AND CASE WHEN json_valid(run.payload_json)
-                        THEN json_extract(run.payload_json, '$.rootNodeId') IS NOT NULL
-                        ELSE 0 END
-                  )
               `;
             case "subagent-results":
             case "owned-subagent-results":
@@ -10203,6 +10227,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getProviderControlContext: readOnReader(getProviderControlContext),
       getLimitRecoveryCandidates: readOnReader(getLimitRecoveryCandidates),
       getLimitRecoveryWakeAt: readOnReader(getLimitRecoveryWakeAt),
+      getAutoTakeoverPage: readOnReader(getAutoTakeoverPage),
       getRecoveryThreadIds: readOnReader(getRecoveryThreadIds),
       getTakeoverObligations: readOnReader(getTakeoverObligations),
       getUnreadableThreadIds: readOnReader(getUnreadableThreadIds),
