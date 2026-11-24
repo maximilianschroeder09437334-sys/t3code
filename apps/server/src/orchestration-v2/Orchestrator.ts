@@ -234,6 +234,7 @@ import {
   contextRolloverFollowupId,
   contextRolloverNoticeId,
   contextNoticeSteerCommandId,
+  contextNoticeOfSteerMessage,
   contextNoticeSteerMessageId,
   isContextRolloverNotice,
 } from "./ContextRollover.ts";
@@ -6486,6 +6487,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         forceRestart: input.forceRestart || selectionMustApplyNow || attachmentsNeedRestart,
       }),
     );
+    // An automatic context notice never restarts the turn; the next run start inlines it instead.
+    if (
+      steeringPolicy !== "active_steering" &&
+      contextNoticeOfSteerMessage(input.messageId) !== undefined
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: input.command.commandId,
+        commandType: input.command.type,
+        cause: `A context notice cannot restart run ${targetRun.id}.`,
+      });
+    }
 
     if (steeringPolicy === "active_steering") {
       const instanceChanged =
@@ -6992,6 +7004,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return thread;
   });
 
+  const contextNoticeSteerIsLive = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+    projection: OrchestrationV2ThreadProjection,
+    noticeId: TurnItemId,
+  ) {
+    if (command.dispatchMode.type !== "steer_active") return false;
+    if (projection.messages.some((message) => message.id === command.messageId)) return false;
+    const targetRunId = command.dispatchMode.targetRunId;
+    const target = projection.runs.find((run) => run.id === targetRunId);
+    if (target === undefined || target.status !== "running" || target.rootNodeId === null)
+      return false;
+    const notice = yield* projectionStore
+      .getTurnItem({ threadId: command.threadId, itemId: noticeId })
+      .pipe(mapDispatchError(command));
+    const turn = latestProviderTurnForAttempt(
+      projection.providerTurns.filter((candidate) => candidate.nodeId === target.rootNodeId),
+      target.activeAttemptId,
+    );
+    return (
+      notice?.type === "system_notice" &&
+      notice.runId === target.id &&
+      turn !== undefined &&
+      turn.id === notice.providerTurnId &&
+      turn.runAttemptId === target.activeAttemptId &&
+      turn.status === "running" &&
+      !(yield* stopReachedRun(command, command.threadId, target.id))
+    );
+  });
+
   const dispatchMessage = Effect.fn("Orchestrator.dispatchMessage")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -7250,6 +7291,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         return;
       }
+    }
+    // An automatic context notice joins only the exact running turn it was recorded for. A stale
+    // one (its turn completed, stopped or was replaced, or it was already sent) is dropped here,
+    // inside the serialized dispatch, and never becomes a run of its own: the next run start
+    // inlines the notice instead, so the agent reads it exactly once.
+    const steeredNotice = contextNoticeOfSteerMessage(command.messageId);
+    if (
+      steeredNotice !== undefined &&
+      !(yield* contextNoticeSteerIsLive(command, projection, steeredNotice))
+    ) {
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        occurredAt: yield* DateTime.now,
+        payload: projection.thread,
+      });
+      return;
     }
     if (yield* isStaleQuestionWake(projection, command.messageId, command.notification)) {
       yield* emit(

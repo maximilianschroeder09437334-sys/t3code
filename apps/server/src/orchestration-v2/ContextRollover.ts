@@ -32,8 +32,17 @@ export function isContextRolloverNotice(itemId: TurnItemId) {
 }
 
 /** The notice steered into the running turn it was recorded for; one id per notice keeps it once. */
+const steerMessagePrefix = "context-steer:";
+
 export function contextNoticeSteerMessageId(noticeId: TurnItemId) {
-  return MessageId.make(`context-steer:${noticeId}`);
+  return MessageId.make(`${steerMessagePrefix}${noticeId}`);
+}
+
+/** The notice a context steer message carries, or undefined for any other message. */
+export function contextNoticeOfSteerMessage(messageId: string) {
+  if (!messageId.startsWith(steerMessagePrefix)) return undefined;
+  const noticeId = TurnItemId.make(messageId.slice(steerMessagePrefix.length));
+  return isContextRolloverNotice(noticeId) ? noticeId : undefined;
 }
 
 export function contextNoticeSteerCommandId(noticeId: TurnItemId) {

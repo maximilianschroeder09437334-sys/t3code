@@ -2031,20 +2031,33 @@ export const layer: Layer.Layer<
             previous.providerThreadId === runningProviderThread.id &&
             previous.startedAt !== null,
         );
-        // A notice already steered into the run it was recorded for is not inlined again there.
+        // A notice the provider took into the run it was recorded for is not inlined again. Any
+        // other steer (offered but unread, cancelled, declined, failed or dropped as stale) leaves
+        // the inline as its only delivery, so the agent reads the notice exactly once.
         const steeredBefore = Effect.fnUntraced(function* (
           notice: { readonly id: TurnItemId; readonly runId: RunId | null } | null,
         ) {
-          if (notice === null || notice.runId === null || notice.runId !== previousRun?.id)
+          if (
+            notice === null ||
+            notice.runId === null ||
+            notice.runId !== previousRun?.id ||
+            Option.isNone(effectOutbox)
+          )
             return false;
-          const messageId = contextNoticeSteerMessageId(notice.id);
-          const message = (yield* projectionStore.getThreadRecords(input.threadId, ["messages"], {
-            messageIds: [messageId],
-          })).messages.find((candidate) => candidate.id === messageId);
-          if (message === undefined) return false;
-          // A steer too late for its turn runs on its own and delivers the text itself.
-          if (message.runId !== notice.runId) return true;
-          if (Option.isNone(effectOutbox)) return false;
+          const item = yield* projectionStore.getTurnItem({
+            threadId: input.threadId,
+            itemId: idAllocator.derive.userTurnItem({
+              messageId: contextNoticeSteerMessageId(notice.id),
+            }),
+          });
+          // Claude reports an offered steer pending until its turn reads it, and cancelled when
+          // the turn stops first; providers that steer synchronously leave it completed.
+          if (
+            item?.type !== "user_message" ||
+            item.runId !== notice.runId ||
+            item.status !== "completed"
+          )
+            return false;
           const effects = yield* effectOutbox.value
             .listByCommandId(contextNoticeSteerCommandId(notice.id))
             .pipe(Effect.orElseSucceed(() => []));

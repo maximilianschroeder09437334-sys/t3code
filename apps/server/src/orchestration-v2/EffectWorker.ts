@@ -34,6 +34,7 @@ import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationServic
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
+import { contextNoticeOfSteerMessage } from "./ContextRollover.ts";
 import { continueHookRun } from "./HookContinuation.ts";
 import * as CoreHandoff from "./CoreHandoff.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
@@ -455,6 +456,14 @@ export const layerExecutor: Layer.Layer<
                 ),
                 Effect.catch((error) =>
                   Effect.gen(function* () {
+                    // A context notice that misses its turn is never sent as a run of its own;
+                    // the next run start inlines it, so the agent reads it exactly once.
+                    if (
+                      effect.request.type === "provider-turn.steer" &&
+                      contextNoticeOfSteerMessage(effect.request.messageId) !== undefined
+                    ) {
+                      return yield* error;
+                    }
                     if (
                       !isProviderTurnControlError(error) ||
                       (!error.turnCompleted && !error.steerDeclined) ||
@@ -1078,6 +1087,11 @@ export const layerWithOptions = (
 
           const error = Cause.pretty(exit.cause);
           const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
+          // A context notice steer is not retried: a failed one settles at once, so the next run
+          // start finds it undelivered and inlines the notice as its one delivery.
+          const contextNoticeSteer =
+            effect.request.type === "provider-turn.steer" &&
+            contextNoticeOfSteerMessage(effect.request.messageId) !== undefined;
           yield* Effect.logWarning("Orchestration effect execution failed", {
             effectId: effect.id,
             effectType: effect.request.type,
@@ -1097,6 +1111,7 @@ export const layerWithOptions = (
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
             : parkedHandoff ||
+                contextNoticeSteer ||
                 (effect.attemptCount >= maxAttempts &&
                   (!ownsStartingRun(effect.request.type) || cannotSettleRun(exit.cause)))
               ? yield* outbox

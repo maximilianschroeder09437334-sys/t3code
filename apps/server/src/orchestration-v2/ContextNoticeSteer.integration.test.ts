@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
+  type RunId,
   ThreadId,
   type TurnItemId,
   type OrchestrationV2DomainEvent,
@@ -23,6 +24,7 @@ import {
   CONTEXT_HANDOFF_NUDGE,
   CONTEXT_ROLLOVER_LIMIT,
   contextHandoffNudgeMessage,
+  contextNoticeSteerCommandId,
   contextNoticeSteerMessageId,
   contextRolloverLimitMessage,
   contextRolloverNoticeId,
@@ -34,13 +36,18 @@ import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import {
   ProviderAdapterSteerDeclinedError,
+  ProviderAdapterSteerRunError,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2SteerInput,
   type ProviderAdapterV2TurnInput,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
-type SteerMode = "ok" | "unsupported" | "declined";
+// ok: the provider takes the steer in. unsupported: no active steering, so the next run inlines.
+// declined/failed: the steer call fails. cancelled: Claude offers it, reports it pending, then drops
+// it unread when the turn ends. stale: the reaction's steer arrives after its turn completed and
+// the next run started. stop: Stop reached the run before the notice.
+type SteerMode = "ok" | "unsupported" | "declined" | "failed" | "cancelled" | "stale" | "stop";
 
 const contextNoticeScenario = (input: {
   readonly driverName: "codex" | "claudeAgent";
@@ -54,7 +61,7 @@ const contextNoticeScenario = (input: {
     const base =
       input.driverName === "codex" ? CodexProviderCapabilitiesV2 : ClaudeProviderCapabilitiesV2;
     const capabilities =
-      input.steer === "unsupported"
+      input.steer === "unsupported" || input.steer === "stale"
         ? { ...base, turns: { ...base.turns, supportsActiveSteering: false } }
         : base;
     const cwd = yield* checkpointWorkspace(`context-notice-steer-${input.driverName}`);
@@ -62,6 +69,17 @@ const contextNoticeScenario = (input: {
     const started: ProviderAdapterV2TurnInput[] = [];
     const turns: OrchestrationV2ProviderTurn[] = [];
     const steers: ProviderAdapterV2SteerInput[] = [];
+    const steerStatus = (
+      steer: ProviderAdapterV2SteerInput,
+      status: "pending" | "cancelled",
+    ): ProviderAdapterV2Event => ({
+      type: "steer.updated",
+      driver,
+      threadId: steer.threadId,
+      runId: steer.runId,
+      messageId: steer.message.messageId,
+      status,
+    });
     const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
       instanceId,
       driver,
@@ -136,9 +154,19 @@ const contextNoticeScenario = (input: {
                       providerTurnId: steer.providerTurnId,
                     }),
                   )
-                : Effect.sync(() => {
-                    steers.push(steer);
-                  }),
+                : input.steer === "failed"
+                  ? Effect.fail(
+                      new ProviderAdapterSteerRunError({
+                        driver,
+                        providerThreadId: steer.providerThread.id,
+                        providerTurnId: steer.providerTurnId,
+                      }),
+                    )
+                  : Effect.gen(function* () {
+                      steers.push(steer);
+                      if (input.steer === "cancelled")
+                        yield* Queue.offer(events, steerStatus(steer, "pending"));
+                    }),
             interruptTurn: () => Effect.void,
             respondToRuntimeRequest: () => Effect.die("unused"),
             readThreadSnapshot: () => Effect.die("unused"),
@@ -158,6 +186,8 @@ const contextNoticeScenario = (input: {
           Stream.runDrain,
           Effect.forkScoped,
         );
+      // Stop's interrupt waits for a provider stop this fake never sends, so it is left queued.
+      const drain = input.steer === "stop" ? Effect.void : worker.drain();
       const send = (id: string) =>
         Effect.gen(function* () {
           const known = new Set(turns.map((turn) => turn.id));
@@ -193,7 +223,10 @@ const contextNoticeScenario = (input: {
               event.payload.tokenUsage?.usedTokens === usedTokens,
           );
           const steerId =
-            notice === undefined || input.steer === "unsupported"
+            notice === undefined ||
+            input.steer === "unsupported" ||
+            input.steer === "stale" ||
+            input.steer === "stop"
               ? undefined
               : contextNoticeSteerMessageId(notice);
           const steered =
@@ -212,7 +245,7 @@ const contextNoticeScenario = (input: {
           });
           yield* Fiber.join(seen);
           if (steered !== undefined) yield* Fiber.join(steered);
-          yield* worker.drain();
+          yield* drain;
         });
       const complete = Effect.gen(function* () {
         const turn = turns.at(-1)!;
@@ -220,6 +253,9 @@ const contextNoticeScenario = (input: {
         const done = yield* watch(
           (event) => event.type === "run.updated" && event.payload.status === "completed",
         );
+        // Claude drops a steer it never read when the turn ends.
+        if (input.steer === "cancelled")
+          for (const steer of steers) yield* Queue.offer(events, steerStatus(steer, "cancelled"));
         yield* Queue.offer(events, {
           type: "provider_turn.updated",
           driver,
@@ -251,9 +287,35 @@ const contextNoticeScenario = (input: {
         createdBy: "user",
         creationSource: "web",
       });
+      // The steer a reaction would send for a notice, here sent late or to another run.
+      const lateSteer = (notice: TurnItemId, targetRunId: RunId, attempt: string) =>
+        Effect.gen(function* () {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${contextNoticeSteerCommandId(notice)}:${attempt}`),
+            threadId,
+            messageId: contextNoticeSteerMessageId(notice),
+            createdBy: "agent",
+            creationSource: "server",
+            text: contextHandoffNudgeMessage,
+            attachments: [],
+            dispatchMode: { type: "steer_active", targetRunId },
+          });
+          yield* drain;
+        });
+      const occurrences = (text: string, part: string) => text.split(part).length - 1;
       yield* send("Build it");
       const provider = (yield* orchestrator.getThreadProjection(threadId)).providerThreads[0]!;
       const nudgeId = contextRolloverNoticeId(provider, CONTEXT_HANDOFF_NUDGE)!;
+      const firstRunId = started[0]!.runId;
+      if (input.steer === "stop") {
+        yield* orchestrator.dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make("stop"),
+          threadId,
+          runId: firstRunId,
+        });
+      }
       yield* usage(160_000, nudgeId);
       // Repeated usage above the threshold does not steer again.
       yield* usage(170_000);
@@ -261,34 +323,59 @@ const contextNoticeScenario = (input: {
         yield* usage(260_000, contextRolloverNoticeId(provider, CONTEXT_ROLLOVER_LIMIT)!);
         yield* usage(270_000);
       }
+      const offered = input.steer === "ok" || input.steer === "cancelled";
+      const reachedDispatch = offered || input.steer === "declined" || input.steer === "failed";
+      if (input.steer === "stop") {
+        // Neither the reaction nor a late steer joins a run that Stop reached.
+        yield* lateSteer(nudgeId, firstRunId, "after-stop");
+        assert.lengthOf(steers, 0);
+        const stopped = yield* orchestrator.getThreadProjection(threadId);
+        assert.isFalse(
+          stopped.messages.some((message) => message.id === contextNoticeSteerMessageId(nudgeId)),
+        );
+        return;
+      }
+      // A reaction replayed after a restart finds the notice already sent and does nothing.
+      if (input.steer === "ok") yield* lateSteer(nudgeId, firstRunId, "replayed");
       const steered = steers.map((steer) => steer.message.text);
-      assert.lengthOf(steered, input.steer === "ok" ? (input.cap ? 2 : 1) : 0);
-      if (input.steer === "ok") assert.equal(steered[0], contextHandoffNudgeMessage);
-      if (input.cap && input.steer === "ok")
-        assert.include(steered[1], contextRolloverLimitMessage);
+      assert.lengthOf(steered, offered ? (input.cap ? 2 : 1) : 0);
+      if (offered) assert.equal(steered[0], contextHandoffNudgeMessage);
+      if (input.cap && offered) assert.include(steered[1], contextRolloverLimitMessage);
       const projection = yield* orchestrator.getThreadProjection(threadId);
       const steerMessage = projection.messages.find(
         (message) => message.id === contextNoticeSteerMessageId(nudgeId),
       );
-      assert.equal(steerMessage !== undefined, input.steer !== "unsupported");
+      assert.equal(steerMessage !== undefined, reachedDispatch);
       yield* complete;
       yield* send("Next step");
+      if (input.steer === "stale") {
+        // The reaction read turn A as running, then A completed and run B inlined the notice.
+        // Its delayed steer, to A or to B, is dropped instead of becoming another run.
+        yield* lateSteer(nudgeId, firstRunId, "stale");
+        yield* lateSteer(nudgeId, started.at(-1)!.runId, "wrong-run");
+        assert.lengthOf(steers, 0);
+      }
+      // No notice ever becomes a run of its own, started or queued, and a steer that missed its
+      // turn stays in that turn instead of moving to a later run.
+      assert.lengthOf(started, 2);
+      const settled = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(settled.runs, 2);
+      assert.deepEqual(
+        settled.messages
+          .filter((message) => message.id === contextNoticeSteerMessageId(nudgeId))
+          .map((message) => message.runId),
+        reachedDispatch ? [firstRunId] : [],
+      );
       const next = started.at(-1)!;
-      assert.notEqual(next.runId, started[0]!.runId);
+      assert.notEqual(next.runId, firstRunId);
       const text = next.message.text;
+      // Only a steer the provider took in replaces the inline; otherwise it is inlined once.
+      const accepted = input.steer === "ok";
       if (input.cap) {
-        // The cap is inlined into the next run only when it was not steered into this one.
-        assert.equal(text.includes(contextRolloverLimitMessage), input.steer !== "ok");
+        assert.equal(occurrences(text, contextRolloverLimitMessage), accepted ? 0 : 1);
         assert.isFalse(text.includes(contextHandoffNudgeMessage));
-      } else if (input.steer === "declined") {
-        // A declined steer runs as its own message after the turn; it is not inlined again.
-        const messages = started.slice(1).map((turn) => turn.message.text);
-        assert.equal(
-          messages.filter((message) => message.includes(contextHandoffNudgeMessage)).length,
-          1,
-        );
       } else {
-        assert.equal(text.includes(contextHandoffNudgeMessage), input.steer === "unsupported");
+        assert.equal(occurrences(text, contextHandoffNudgeMessage), accepted ? 0 : 1);
       }
     }).pipe(
       Effect.provide(
@@ -319,6 +406,30 @@ it.effect("inlines the 250k cap as before when the provider cannot steer", () =>
   contextNoticeScenario({ driverName: "claudeAgent", steer: "unsupported", cap: true }),
 );
 
-it.effect("delivers a declined 150k steer exactly once as its own follow-up", () =>
+it.effect("inlines a declined 150k steer once at the next run without a follow-up run", () =>
   contextNoticeScenario({ driverName: "codex", steer: "declined" }),
+);
+
+it.effect("inlines the 150k notice once at the next run after a generic steer failure", () =>
+  contextNoticeScenario({ driverName: "codex", steer: "failed" }),
+);
+
+it.effect("inlines the 250k cap once at the next run after a generic steer failure", () =>
+  contextNoticeScenario({ driverName: "codex", steer: "failed", cap: true }),
+);
+
+it.effect("inlines a Claude steer that stayed pending and was cancelled when its turn ended", () =>
+  contextNoticeScenario({ driverName: "claudeAgent", steer: "cancelled" }),
+);
+
+it.effect("inlines a cancelled Claude 250k steer once at the next run", () =>
+  contextNoticeScenario({ driverName: "claudeAgent", steer: "cancelled", cap: true }),
+);
+
+it.effect("drops a stale or wrong-run notice steer after the next run inlined it", () =>
+  contextNoticeScenario({ driverName: "codex", steer: "stale" }),
+);
+
+it.effect("never steers a notice into a run that Stop reached", () =>
+  contextNoticeScenario({ driverName: "codex", steer: "stop" }),
 );
