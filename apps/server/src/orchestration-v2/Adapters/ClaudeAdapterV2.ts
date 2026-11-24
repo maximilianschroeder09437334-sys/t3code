@@ -13778,6 +13778,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           getModelContextWindow: (selection) => claudeContextWindow(selection) ?? undefined,
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
+          steerAcknowledgedByEvent: true,
           handoffReadinessCoverage: {
             scope: "all-app-owned-work",
             nativeSubagents: true,

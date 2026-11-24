@@ -6411,6 +6411,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           createdAt: now,
           updatedAt: now,
         };
+        // A context notice steer stays pending until the provider takes it (see
+        // ProviderTurnControlService); a crash before that leaves it for the next-run inline.
+        const unaccepted = contextNoticeOfSteerMessage(input.messageId) !== undefined;
         const turnItem: OrchestrationV2TurnItem = {
           createdBy: input.createdBy,
           creationSource: input.creationSource,
@@ -6429,10 +6432,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           nativeItemRef: null,
           parentItemId: null,
           ordinal: yield* nextTurnItemOrdinal(input.projection),
-          status: "completed",
+          status: unaccepted ? "pending" : "completed",
           title: null,
           startedAt: now,
-          completedAt: now,
+          completedAt: unaccepted ? null : now,
           updatedAt: now,
           type: "user_message",
           messageId: input.messageId,

@@ -725,6 +725,11 @@ export interface ProviderAdapterV2SessionRuntime {
    * must keep Waiting.
    */
   readonly backgroundTasksEndWithProcess?: true;
+  /**
+   * Set when `steerTurn` only offers the steer and the provider later reports whether the agent
+   * read it with `steer.updated`. Otherwise a successful `steerTurn` means the provider took it.
+   */
+  readonly steerAcknowledgedByEvent?: true;
   readonly getModelContextWindow?: (
     modelSelection: ModelSelection,
     cwd?: string | null,

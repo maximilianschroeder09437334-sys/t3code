@@ -9,15 +9,18 @@ import {
   RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
-import type * as DateTime from "effect/DateTime";
+import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { contextNoticeOfSteerMessage } from "./ContextRollover.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -121,6 +124,38 @@ export const layer: Layer.Layer<
     const eventSink = yield* EventSink.EventSinkV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+
+    // A context notice steer is persisted pending. Only a provider that took it moves it to
+    // completed; a skipped or failed steer is cancelled. Anything short of completed leaves the
+    // notice to the next run start's inline, so a lost acknowledgement never drops the notice.
+    const settleContextNoticeSteer = (
+      input: { readonly threadId: ThreadId; readonly messageId: MessageId },
+      status: "completed" | "cancelled" | null,
+    ) =>
+      status === null || contextNoticeOfSteerMessage(input.messageId) === undefined
+        ? Effect.void
+        : Effect.gen(function* () {
+            const item = yield* projections.getTurnItem({
+              threadId: input.threadId,
+              itemId: idAllocator.derive.userTurnItem({ messageId: input.messageId }),
+            });
+            if (item?.type !== "user_message" || item.status !== "pending") return;
+            const occurredAt = yield* DateTime.now;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: yield* idAllocator.allocate.event({ threadId: input.threadId }),
+                  type: "turn-item.updated",
+                  threadId: item.threadId,
+                  ...(item.runId === null ? {} : { runId: item.runId }),
+                  ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+                  occurredAt,
+                  payload: { ...item, status, completedAt: occurredAt, updatedAt: occurredAt },
+                },
+              ],
+            });
+          }).pipe(Effect.ignore);
 
     const load = Effect.fn("ProviderTurnControlService.load")(function* (input: {
       readonly threadId: ThreadId;
@@ -431,10 +466,10 @@ export const layer: Layer.Layer<
               cohort.delivery.generation !== ownership.generation ||
               cohort.delivery.taskIds.length === 0
             )
-              return;
+              return "cancelled" as const;
           }
           const loaded = yield* load({ ...input, operation: "steer" });
-          if (Option.isNone(loaded.session)) return;
+          if (Option.isNone(loaded.session)) return "cancelled" as const;
           const { message, run } = loaded.context;
           if (message === undefined || run === undefined) {
             return yield* new ProviderTurnControlError({
@@ -501,9 +536,17 @@ export const layer: Layer.Layer<
                 }),
               ),
             );
+          // An adapter that reports reads by event settles the item itself.
+          return loaded.session.value.steerAcknowledgedByEvent === true
+            ? null
+            : ("completed" as const);
         },
         (effect, input) =>
           effect.pipe(
+            Effect.onExit((exit) =>
+              settleContextNoticeSteer(input, Exit.isSuccess(exit) ? exit.value : "cancelled"),
+            ),
+            Effect.asVoid,
             Effect.mapError((cause) =>
               isProviderTurnControlError(cause)
                 ? cause
@@ -518,4 +561,5 @@ export const layer: Layer.Layer<
       ),
     });
   }),
-);
+  // Stateless; the derived turn item id must match the Orchestrator's.
+).pipe(Layer.provide(IdAllocator.layer));
