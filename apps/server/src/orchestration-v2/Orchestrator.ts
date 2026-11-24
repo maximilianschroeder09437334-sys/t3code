@@ -828,6 +828,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "provider.switch":
       return command.threadId;
     case "delegated_task.request":
+    case "delegated_task.handoff":
     case "delegated_task.remote.request":
     case "delegated_task.remote.complete":
     case "delegated_task.remote.stop":
@@ -10185,6 +10186,150 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  /**
+   * Rebinds an open delegated task from the child that launched a successor to that successor,
+   * created as a child of the same parent. Under the parent's lock, so it serializes with the
+   * old child's result write: whichever commits first wins, and the other finds the task taken.
+   * A task that ended, was cancelled or was already handed off records nothing.
+   */
+  const dispatchDelegatedTaskHandoff = Effect.fn("orchestrationV2.dispatch.delegatedTaskHandoff")(
+    function* (
+      command: Extract<OrchestrationV2ServerCommand, { readonly type: "delegated_task.handoff" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+      effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    ) {
+      const successorThreadId = idAllocator.derive.delegatedTaskThread({
+        commandId: command.commandId,
+      });
+      const parentProjection = yield* projectionStore
+        .getThreadRecords(command.parentThreadId, ["subagents", "nodes", "turnItems"], {
+          subagentIds: [command.taskId],
+          nodeIds: [command.taskId],
+          turnItemNodeIds: [command.taskId],
+          turnItemTypes: ["subagent"],
+        })
+        .pipe(mapDispatchError(command));
+      const task = parentProjection.subagents.find((row) => row.id === command.taskId);
+      if (
+        task === undefined ||
+        task.origin !== "app_owned" ||
+        task.childThreadId !== command.fromChildThreadId ||
+        task.result !== null ||
+        task.cancelledRunId !== undefined ||
+        task.transferredTo !== undefined ||
+        task.completedAt !== null
+      )
+        return;
+      const from = yield* projectionStore
+        .getThread(command.fromChildThreadId)
+        .pipe(mapDispatchError(command));
+      if (currentOwnerThreadId(from) !== command.parentThreadId) return;
+      const targetAdapter = yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorProviderAdapterError({
+              commandId: command.commandId,
+              providerInstanceId: command.modelSelection.instanceId,
+              cause,
+            }),
+        ),
+      );
+      const now = command.createdAt ?? (yield* DateTime.now);
+      const title =
+        command.title ??
+        subagentThreadTitle({
+          parentTitle: parentProjection.thread.title,
+          prompt: command.message.length > 0 ? command.message : (task.title ?? task.prompt),
+          ordinal: (yield* subagentCount(command.parentThreadId)) + 1,
+        });
+      const successor: OrchestrationV2AppThread = {
+        ...makeSubagentChildThread({
+          parentThread: parentProjection.thread,
+          childThreadId: successorThreadId,
+          parentNodeId: task.id,
+          activeProviderThreadId: null,
+          providerInstanceId: command.modelSelection.instanceId,
+          modelSelection: command.modelSelection,
+          title,
+          now,
+          createdBy: command.createdBy,
+          creationSource: command.creationSource,
+        }),
+        runtimeMode: command.runtimeMode,
+        interactionMode: command.interactionMode,
+        ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
+      };
+      const scope = {
+        threadId: command.parentThreadId,
+        ...(task.runId === null ? {} : { runId: task.runId }),
+        nodeId: task.id,
+        driver: targetAdapter.driver,
+        providerInstanceId: command.modelSelection.instanceId,
+        occurredAt: now,
+      };
+      const emitEvent = emit(events, command);
+      yield* emitEvent({
+        type: "thread.created",
+        threadId: successorThreadId,
+        driver: targetAdapter.driver,
+        providerInstanceId: command.modelSelection.instanceId,
+        occurredAt: now,
+        payload: successor,
+      });
+      yield* emitEvent({
+        ...scope,
+        type: "subagent.updated",
+        payload: {
+          ...task,
+          childThreadId: successorThreadId,
+          driver: targetAdapter.driver,
+          providerInstanceId: command.modelSelection.instanceId,
+          providerThreadId: null,
+          model: command.modelSelection.model,
+          modelSelection: command.modelSelection,
+          handedOffFrom: [...(task.handedOffFrom ?? []), command.fromChildThreadId],
+          updatedAt: now,
+        },
+      });
+      const item = parentProjection.turnItems.find(
+        (row) => row.type === "subagent" && row.subagentId === task.id,
+      );
+      if (item?.type === "subagent")
+        yield* emitEvent({
+          ...scope,
+          type: "turn-item.updated",
+          payload: {
+            ...item,
+            childThreadId: successorThreadId,
+            driver: targetAdapter.driver,
+            providerInstanceId: command.modelSelection.instanceId,
+            progress: `Handed off to successor "${title}" (${successorThreadId}).`,
+            updatedAt: now,
+          },
+        });
+      yield* dispatchMessage(
+        {
+          type: "message.dispatch",
+          createdBy: command.createdBy,
+          creationSource: command.creationSource,
+          commandId: command.commandId,
+          threadId: successorThreadId,
+          senderThreadId: command.fromChildThreadId,
+          messageId: idAllocator.derive.delegatedTaskMessage({ commandId: command.commandId }),
+          text: command.message,
+          attachments: [],
+          modelSelection: command.modelSelection,
+          dispatchMode:
+            command.workspaceStrategy === undefined
+              ? { type: "start_immediately" }
+              : { type: "defer_start", workspaceStrategy: command.workspaceStrategy },
+        },
+        events,
+        effects,
+      );
+    },
+  );
+
   const recordSubagentFollowup = Effect.fnUntraced(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -17388,6 +17533,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "delegated_task.request":
         yield* dispatchDelegatedTaskRequest(command, events, effects);
+        break;
+      case "delegated_task.handoff":
+        yield* dispatchDelegatedTaskHandoff(command, events, effects);
         break;
       case "delegated_task.remote.request":
         yield* dispatchRemoteDelegatedTaskRequest(command, events);

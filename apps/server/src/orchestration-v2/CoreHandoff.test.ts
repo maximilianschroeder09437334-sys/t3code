@@ -309,7 +309,10 @@ it("tells the agent to launch its own successor", () => {
   for (const notice of [contextRolloverLimitMessage, contextHandoffNudgeMessage]) {
     assert.include(notice, "start the successor yourself with t3_thread_launch");
     assert.include(notice, "Do not call t3_handoff_submit.");
-    assert.include(notice, "Delegated child: do not launch a successor");
+    assert.include(
+      notice,
+      "Delegated child: hand off with t3_thread_launch; T3 makes the successor a sibling under your parent",
+    );
   }
 });
 it.effect("explains the expected handoff branch", () =>

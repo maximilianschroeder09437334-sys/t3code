@@ -45,7 +45,7 @@ export function isContextRolloverLimitNotice(itemId: TurnItemId) {
 }
 
 const handOffSteps =
-  "commit and push your work, update STATE, then start the successor yourself with t3_thread_launch (same project and model, explicit effort, full brief) and confirm it runs with t3_thread_list. Do not call t3_handoff_submit. Delegated child: do not launch a successor; save your result and report it to your parent.";
+  "commit and push your work, update STATE, then start the successor yourself with t3_thread_launch (same project and model, explicit effort, full brief) and confirm it runs with t3_thread_list. Do not call t3_handoff_submit. Delegated child: hand off with t3_thread_launch; T3 makes the successor a sibling under your parent and forwards its result there. Do not report a partial result as final.";
 
 export const contextRolloverLimitMessage = `This thread reached 250,000 context tokens. Do not compact or start another delegate. Hand off now: ${handOffSteps}`;
 

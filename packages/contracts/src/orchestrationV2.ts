@@ -1067,6 +1067,8 @@ export const OrchestrationV2Subagent = Schema.Struct({
   ),
   /** The child run this task's result came from; set on every result write for a migrated child. */
   resultRunId: Schema.optional(RunId),
+  /** Earlier children that handed this task to a successor with t3_thread_launch, oldest first. */
+  handedOffFrom: Schema.optional(Schema.Array(ThreadId)),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -3981,6 +3983,27 @@ const OrchestrationV2InternalCommand = Schema.Union([
         sections: Schema.optional(Schema.Array(PullRequestWakeSection)),
       }),
     ),
+  }),
+  /**
+   * A delegated child hands its open task to a successor it launches: the successor starts as a
+   * child of the same parent and the task is rebound to it, so the parent's status, wait, cancel
+   * and single final result follow the successor. The ids derive from `commandId`, so a retry
+   * creates nothing new; a task that ended or was already handed off is refused.
+   */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.handoff"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    fromChildThreadId: ThreadId,
+    title: Schema.optional(TrimmedNonEmptyString),
+    message: Schema.String,
+    modelSelection: ModelSelection,
+    runtimeMode: RuntimeMode,
+    interactionMode: ProviderInteractionMode,
+    workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
+    createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   /**
    * Records a delegated task that runs in a linked environment: the task, its
