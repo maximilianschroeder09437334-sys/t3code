@@ -90,6 +90,7 @@ import {
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import {
   admitTakeover,
+  AutoTakeoverSettings,
   TakeoverReconcilerSettings,
   takeoverRearmSpacingMs,
   ThreadTakeoverProbe,
@@ -18943,6 +18944,86 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     yield* (yield* ThreadTakeoverProbe).reconcilerPassed();
   }).pipe(Effect.forever, Effect.forkScoped);
+
+  // A successor launched with t3_thread_launch takes over its launcher's app-owned children once a
+  // run of it is active, so no agent has to call t3_thread_takeover. Forked per successor: neither
+  // its turn nor the other reactions wait on the predecessor's lock. A manual call afterwards
+  // returns the same effective result by transfer id.
+  const autoTakeoverScope = yield* Effect.scope;
+  const autoTakeoverSeen = new Set<ThreadId>();
+  const autoTakeover = Effect.fn("Orchestrator.autoTakeover")(function* (
+    successorThreadId: ThreadId,
+  ) {
+    const settings = yield* AutoTakeoverSettings;
+    const successor = yield* projectionStore.getThread(successorThreadId);
+    const predecessorThreadId = successor.launchedBy?.threadId;
+    if (predecessorThreadId === undefined)
+      return yield* Effect.logDebug("Auto takeover skipped: not launched by a thread", {
+        successorThreadId,
+      });
+    const log = { predecessorThreadId, successorThreadId };
+    for (let attempt = 1; attempt <= settings.attempts; attempt++) {
+      const predecessor = yield* projectionStore.getThread(predecessorThreadId);
+      if (
+        predecessor.continuedBy?.threadId === successorThreadId &&
+        predecessor.continuedBy.state === "effective"
+      )
+        return;
+      if ((yield* readTakeoverTasks(predecessorThreadId)).childThreadIds.length === 0)
+        return yield* Effect.logDebug(
+          "Auto takeover skipped: the predecessor owns no children",
+          log,
+        );
+      yield* Effect.logDebug("Auto takeover trying", { ...log, attempt });
+      const outcome = yield* takeoverThread({ predecessorThreadId, successorThreadId });
+      if (outcome.ok)
+        return yield* Effect.logInfo("Auto takeover moved the predecessor's children", {
+          ...log,
+          migrated: outcome.result.migrated.length,
+        });
+      if (outcome.code !== "takeover_in_progress" && outcome.code !== "takeover_timeout") {
+        // A later active run of the successor tries again.
+        if (outcome.code === "takeover_successor_not_running")
+          autoTakeoverSeen.delete(successorThreadId);
+        return yield* Effect.logDebug("Auto takeover skipped", { ...log, code: outcome.code });
+      }
+      if (attempt === settings.attempts) break;
+      yield* Effect.logDebug("Auto takeover retries while the predecessor is busy", {
+        ...log,
+        attempt,
+        code: outcome.code,
+      });
+      yield* Effect.sleep(settings.retrySpacingMs);
+    }
+    yield* Effect.logWarning("Auto takeover gave up while the predecessor stayed busy", {
+      ...log,
+      attempts: settings.attempts,
+    });
+  });
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "run.updated" })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "run.updated" &&
+          stored.event.payload.rootNodeId !== null &&
+          isActiveRun(stored.event.payload),
+      ),
+      Stream.runForEach((stored) =>
+        Effect.gen(function* () {
+          const threadId = stored.event.threadId;
+          if (!(yield* AutoTakeoverSettings).enabled || autoTakeoverSeen.has(threadId)) return;
+          autoTakeoverSeen.add(threadId);
+          yield* autoTakeover(threadId).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Auto takeover failed", { successorThreadId: threadId, cause }),
+            ),
+            Effect.forkIn(autoTakeoverScope),
+          );
+        }),
+      ),
+      Effect.forkScoped,
+    );
 
   const shellProjectionError = (cause: unknown) =>
     new OrchestratorProjectionError({ threadId: ThreadId.make("thread:shell"), cause });

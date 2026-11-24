@@ -9,6 +9,7 @@ import {
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   TurnItemId,
+  type OrchestrationV2AppThread,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -247,6 +248,24 @@ export class OrchestratorMcpService extends Context.Service<
 >()("t3/mcp/OrchestratorMcpService") {}
 
 const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
+
+/**
+ * A moved child (a subagent a takeover gave a new owner) sending to its lineage parent or a former
+ * owner: the current owner, which now holds its task. Every other send keeps its target.
+ */
+export function formerOwnerRedirect(
+  sender: Pick<OrchestrationV2AppThread, "lineage" | "ownership"> | undefined,
+  targetThreadId: ThreadId,
+): ThreadId | undefined {
+  const ownership = sender?.ownership;
+  if (sender?.lineage.relationshipToParent !== "subagent" || ownership === undefined)
+    return undefined;
+  if (ownership.ownerThreadId === targetThreadId) return undefined;
+  return targetThreadId === sender.lineage.parentThreadId ||
+    ownership.formerOwnerThreadIds?.includes(targetThreadId) === true
+    ? ownership.ownerThreadId
+    : undefined;
+}
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -3553,8 +3572,16 @@ const make = Effect.gen(function* () {
         earlierPosition: timeline.hasEarlier || start > 0 ? (items[0]?.position ?? null) : null,
       } satisfies OrchestratorMcpThreadReadResult;
     }),
-    sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, input) {
-      const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId, ["runs"]);
+    sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, rawInput) {
+      const scoped = yield* loadScopedThread(scope, rawInput.threadId, ["runs"]);
+      // After a takeover a moved child's report to its creator or an earlier owner goes to its owner.
+      const ownerThreadId = formerOwnerRedirect(scoped.parent?.thread, rawInput.threadId);
+      const { parent, limits, target } =
+        ownerThreadId === undefined
+          ? scoped
+          : yield* loadScopedThread(scope, ownerThreadId, ["runs"]);
+      const input =
+        ownerThreadId === undefined ? rawInput : { ...rawInput, threadId: ownerThreadId };
       yield* assertLiveCallerForOtherThread(scope, parent, target);
       yield* assertTargetWithinLimits(limits, target.thread);
 
@@ -3605,6 +3632,15 @@ const make = Effect.gen(function* () {
         ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
         status: result.run.status,
         delivery: result.delivery,
+        ...(ownerThreadId === undefined
+          ? {}
+          : {
+              redirected: {
+                fromThreadId: rawInput.threadId,
+                toThreadId: ownerThreadId,
+                reason: `Thread ${ownerThreadId} took over this task from ${rawInput.threadId}, so the message went to it.`,
+              },
+            }),
       } satisfies OrchestratorMcpThreadSendResult;
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {

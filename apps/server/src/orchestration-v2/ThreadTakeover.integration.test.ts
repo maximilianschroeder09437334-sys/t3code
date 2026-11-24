@@ -108,8 +108,23 @@ const providerInstance = {
   textGeneration: {} as ProviderInstance["textGeneration"],
 } satisfies ProviderInstance;
 
+/** Declared by its key, as the probe below is; off unless a test asks, so takeovers stay explicit. */
+type AutoTakeover = {
+  readonly enabled: boolean;
+  readonly attempts: number;
+  readonly retrySpacingMs: number;
+};
+const autoTakeoverOff: AutoTakeover = { enabled: false, attempts: 1, retrySpacingMs: 0 };
+const AutoTakeoverSettings = Context.Reference<AutoTakeover>(
+  "t3/orchestration-v2/AutoTakeoverSettings",
+  { defaultValue: () => autoTakeoverOff },
+);
+
 /** The server's layers over `persistence`: one in-memory database per test file, or a file. */
-const makeLayerTest = <ROut, E, R>(persistence: Layer.Layer<ROut, E, R>) =>
+const makeLayerTest = <ROut, E, R>(
+  persistence: Layer.Layer<ROut, E, R>,
+  autoTakeover: AutoTakeover = autoTakeoverOff,
+) =>
   Layer.mergeAll(
     RuntimeLayer.layer,
     RuntimeLayer.layerEventSink,
@@ -170,6 +185,7 @@ const makeLayerTest = <ROut, E, R>(persistence: Layer.Layer<ROut, E, R>) =>
       }),
     ),
     Layer.provide(layerPlatformTest),
+    Layer.provideMerge(Layer.succeed(AutoTakeoverSettings, autoTakeover)),
   );
 const layerTest = makeLayerTest(SqlitePersistence.layerMemory);
 
@@ -3282,5 +3298,163 @@ describe.runIf(compatStep === "read-24")("compat gate .23: baseline reads .24 st
         ".23 never completes a forward",
       );
     }).pipe(Effect.scoped),
+  );
+});
+
+/**
+ * Automatic takeover: a successor launched with t3_thread_launch takes over once its run is
+ * active, without calling t3_thread_takeover. Its debug lines mark each milestone.
+ */
+const autoLogListeners = new Set<(message: string) => void>();
+const autoLogger = Logger.make(({ message }) => {
+  const first = String((Array.isArray(message) ? message : [message])[0]);
+  if (first.startsWith("Auto takeover")) for (const listener of autoLogListeners) listener(first);
+});
+const layerAutoTest = makeLayerTest(SqlitePersistence.layerMemory, {
+  enabled: true,
+  attempts: 5,
+  retrySpacingMs: 1_000,
+}).pipe(
+  Layer.provideMerge(Logger.layer([autoLogger], { mergeWithExisting: false })),
+  Layer.provideMerge(Layer.succeed(References.MinimumLogLevel, "Debug")),
+);
+
+/** Started before an action: completes once the automatic takeover logs `line`. */
+const autoLogged = (line: string) =>
+  Effect.gen(function* () {
+    const seen = yield* Deferred.make<void>();
+    const listener = (message: string) => {
+      if (message === line) Deferred.doneUnsafe(seen, Effect.void);
+    };
+    autoLogListeners.add(listener);
+    return TestClock.withLive(Deferred.await(seen).pipe(Effect.timeoutOption("5 seconds"))).pipe(
+      Effect.map(Option.isSome),
+      Effect.ensuring(Effect.sync(() => autoLogListeners.delete(listener))),
+    );
+  });
+
+/** Started before an action: completes once P records S's takeover as effective. */
+const takeoverEffective = (predecessor: ThreadId, successor: ThreadId) =>
+  awaitStoredEvent(
+    (event) =>
+      event.type === "thread.metadata-updated" &&
+      event.threadId === predecessor &&
+      (event.payload as Thread).continuedBy?.threadId === successor &&
+      (event.payload as Thread).continuedBy?.state === "effective",
+  );
+
+/** P (with its app-owned child C unless told), then S (launched by P unless told) running. */
+const setupAuto = (
+  name: string,
+  options: {
+    readonly child?: boolean;
+    readonly launched?: boolean;
+    readonly holdPredecessor?: boolean;
+  } = {},
+) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projectId = ProjectId.make(`${name}-project`);
+    const predecessor = ThreadId.make(`${name}-p`);
+    const successor = ThreadId.make(`${name}-s`);
+    const parent = yield* seedThread({ threadId: predecessor, projectId, createProject: true });
+    let child: ThreadId | undefined;
+    if (options.child !== false) {
+      yield* orchestrator.dispatch({
+        type: "delegated_task.request",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make(`${name}-delegate`),
+        parentThreadId: predecessor,
+        parentRunId: parent.runId,
+        parentNodeId: parent.rootNodeId,
+        task: "Investigate the migration.",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        completionWake: "always",
+      });
+      child = (yield* orchestrator.getThreadProjection(predecessor)).subagents.find(
+        (candidate) => candidate.childThreadId !== null,
+      )!.childThreadId!;
+    }
+    const release =
+      options.holdPredecessor === true ? yield* holdLocks([predecessor]) : Effect.void;
+    yield* seedThread({
+      threadId: successor,
+      projectId,
+      ...(options.launched === false ? {} : { launchedBy: predecessor }),
+    });
+    return { predecessor, successor, child: child!, release };
+  });
+
+it.layer(layerAutoTest)("automatic takeover when a launched successor starts", (it) => {
+  it.effect("moves the children once the successor's run is active; a manual call agrees", () =>
+    Effect.gen(function* () {
+      const effective = yield* takeoverEffective(
+        ThreadId.make("auto1-p"),
+        ThreadId.make("auto1-s"),
+      );
+      const { predecessor, successor, child } = yield* setupAuto("auto1");
+      assert.isTrue(Option.isSome(yield* effective), "the takeover became effective by itself");
+      assert.equal(ownerOf(yield* thread(child)), successor);
+      const transferId = (yield* thread(predecessor)).continuedBy!.transferId;
+      // A later manual call returns the same effective transfer and moves nothing twice.
+      const manual = yield* takeover(predecessor, successor);
+      assert.isTrue(manual.ok);
+      if (manual.ok) {
+        assert.equal(manual.result.transferId, transferId);
+        assert.deepEqual(
+          manual.result.migrated.map((entry) => entry.childThreadId),
+          [child],
+        );
+      }
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const moved = (yield* orchestrator.getThreadProjection(predecessor)).subagents.filter(
+        (task) => task.transferredTo !== undefined,
+      );
+      assert.equal(moved.length, 1);
+      assert.equal((yield* thread(child)).ownership?.transferId, transferId);
+    }),
+  );
+
+  it.effect("records nothing when the predecessor owns no children", () =>
+    Effect.gen(function* () {
+      const skipped = yield* autoLogged("Auto takeover skipped: the predecessor owns no children");
+      const { predecessor } = yield* setupAuto("auto2", { child: false });
+      assert.isTrue(yield* skipped);
+      assert.isUndefined((yield* thread(predecessor)).continuedBy);
+    }),
+  );
+
+  it.effect("leaves the children of a thread that did not launch the starting one", () =>
+    Effect.gen(function* () {
+      const skipped = yield* autoLogged("Auto takeover skipped: not launched by a thread");
+      const { predecessor, child } = yield* setupAuto("auto3", { launched: false });
+      assert.isTrue(yield* skipped);
+      assert.isUndefined((yield* thread(predecessor)).continuedBy);
+      assert.equal(ownerOf(yield* thread(child)), predecessor);
+    }),
+  );
+
+  it.effect("retries while the predecessor stays busy, then takes over", () =>
+    Effect.gen(function* () {
+      const trying = yield* autoLogged("Auto takeover trying");
+      const retrying = yield* autoLogged("Auto takeover retries while the predecessor is busy");
+      const { predecessor, successor, child, release } = yield* setupAuto("auto4", {
+        holdPredecessor: true,
+      });
+      assert.isTrue(yield* trying);
+      // Past the try's deadline with the predecessor's lock held: it times out and waits to retry.
+      yield* TestClock.adjust("31 seconds");
+      assert.isTrue(yield* retrying);
+      assert.isUndefined((yield* thread(predecessor)).continuedBy);
+      assert.equal(ownerOf(yield* thread(child)), predecessor);
+      yield* release;
+      const effective = yield* takeoverEffective(predecessor, successor);
+      yield* TestClock.adjust("2 seconds");
+      assert.isTrue(Option.isSome(yield* effective), "the retry took over");
+      assert.equal(ownerOf(yield* thread(child)), successor);
+    }),
   );
 });

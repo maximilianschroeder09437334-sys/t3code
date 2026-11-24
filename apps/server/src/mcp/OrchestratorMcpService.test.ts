@@ -5485,3 +5485,43 @@ describe("OrchestratorMcpService thread stop", () => {
     }),
   );
 });
+
+describe("formerOwnerRedirect", () => {
+  const creator = ThreadId.make("thread:creator");
+  const middle = ThreadId.make("thread:middle");
+  const owner = ThreadId.make("thread:owner");
+  const other = ThreadId.make("thread:other");
+  const lineage = (relationshipToParent: "subagent" | "fork" | null) =>
+    ({ parentThreadId: creator, relationshipToParent }) as never;
+  const ownership = {
+    ownerThreadId: owner,
+    transferId: "transfer",
+    anchorTaskId: NodeId.make("node:anchor"),
+    at: DateTime.makeUnsafe("2026-11-24T10:00:00Z"),
+    formerOwnerThreadIds: [creator, middle],
+  };
+  const moved = { lineage: lineage("subagent"), ownership };
+
+  it("sends a moved child's report to its creator or a former owner to the current owner", () => {
+    assert.equal(OrchestratorMcpService.formerOwnerRedirect(moved, creator), owner);
+    assert.equal(OrchestratorMcpService.formerOwnerRedirect(moved, middle), owner);
+    // Ownership written before formerOwnerThreadIds existed still names the lineage parent.
+    const { formerOwnerThreadIds: _, ...legacy } = ownership;
+    assert.equal(
+      OrchestratorMcpService.formerOwnerRedirect({ ...moved, ownership: legacy }, creator),
+      owner,
+    );
+  });
+
+  it("keeps every other send's target", () => {
+    assert.isUndefined(OrchestratorMcpService.formerOwnerRedirect(moved, owner));
+    assert.isUndefined(OrchestratorMcpService.formerOwnerRedirect(moved, other));
+    assert.isUndefined(
+      OrchestratorMcpService.formerOwnerRedirect({ lineage: lineage("subagent") }, creator),
+    );
+    assert.isUndefined(
+      OrchestratorMcpService.formerOwnerRedirect({ lineage: lineage("fork"), ownership }, creator),
+    );
+    assert.isUndefined(OrchestratorMcpService.formerOwnerRedirect(undefined, creator));
+  });
+});

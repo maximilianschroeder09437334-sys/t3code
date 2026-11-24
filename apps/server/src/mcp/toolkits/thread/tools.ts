@@ -197,7 +197,7 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
 const ThreadTakeoverTool = Tool.make("t3_thread_takeover", {
   ...commandTool,
   description:
-    "Successor only: move the app-owned subagents of the thread that launched this one here, so their results reach this thread. Call before settling it. Native, PR-watch and command work stay there.",
+    "Successor only: move the app-owned subagents of the thread that launched this one here, so their results reach this thread. T3 runs this automatically when a launched successor starts; a manual call returns the same result. Native, PR-watch and command work stay there.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     predecessorThreadId: ThreadId,

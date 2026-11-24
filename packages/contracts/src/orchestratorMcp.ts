@@ -590,6 +590,10 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
   taskId: Schema.optional(NodeId),
   status: OrchestrationV2RunStatus,
   delivery: Schema.Literals(["started", "queued", "steered", "restarted"]),
+  /** A moved child's send to a former owner went to its current owner, `threadId`, instead. */
+  redirected: Schema.optional(
+    Schema.Struct({ fromThreadId: ThreadId, toThreadId: ThreadId, reason: Schema.String }),
+  ),
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
 

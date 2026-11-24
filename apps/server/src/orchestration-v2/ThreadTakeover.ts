@@ -106,6 +106,20 @@ export const ThreadTakeoverSettings = Context.Reference<ThreadTakeoverSettingsVa
   { defaultValue: () => ({ deadlineMs: 30_000, timeoutWriteMs: 2_000, retryPauseMs: [50, 400] }) },
 );
 
+/** The server's own takeover when a successor launched with t3_thread_launch starts a run. */
+export interface AutoTakeoverSettingsValue {
+  readonly enabled: boolean;
+  /** Tries per successor while the predecessor stays busy (`in_progress` or `timeout`). */
+  readonly attempts: number;
+  /** Pause between those tries, holding no lock. */
+  readonly retrySpacingMs: number;
+}
+
+export const AutoTakeoverSettings = Context.Reference<AutoTakeoverSettingsValue>(
+  "t3/orchestration-v2/AutoTakeoverSettings",
+  { defaultValue: () => ({ enabled: true, attempts: 5, retrySpacingMs: 15_000 }) },
+);
+
 export type ThreadTakeoverFailureCode =
   | TakeoverRejection["code"]
   | "takeover_in_progress"
