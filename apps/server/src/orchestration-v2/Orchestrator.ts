@@ -91,6 +91,7 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import {
   admitTakeover,
   AutoTakeoverSettings,
+  SendOwnerFence,
   TakeoverReconcilerSettings,
   takeoverRearmSpacingMs,
   ThreadTakeoverProbe,
@@ -420,7 +421,10 @@ export interface OrchestratorV2DispatchResult {
 
 export interface OrchestratorV2Shape {
   readonly resumeQueuedRuns: Effect.Effect<number, OrchestratorV2Error>;
+  /** Startup recovery; also re-seeds auto takeovers of successors that were already running. */
   readonly recoverDelegatedTasks: Effect.Effect<void>;
+  /** The successors whose auto takeover runs now; empty once each ended (success, skip, give-up). */
+  readonly autoTakeoversInFlight: Effect.Effect<ReadonlyArray<ThreadId>>;
   readonly recoverDelegatedTask: (
     threadId: ThreadId,
     options?: { readonly sourceRunId?: RunId; readonly completedRunId?: RunId },
@@ -17851,6 +17855,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
 
+  // A redirected send fixed its owner before dispatch; a takeover commit holds the target's lock,
+  // so re-reading the sender's owner here closes the gap. The sender retries on refusal.
+  const checkSendOwnerFence = Effect.fn("Orchestrator.checkSendOwnerFence")(function* (
+    command: OrchestrationV2ServerCommand,
+  ) {
+    const fence = yield* SendOwnerFence;
+    if (
+      fence === undefined ||
+      command.type !== "message.dispatch" ||
+      command.senderThreadId !== fence.childThreadId ||
+      command.threadId !== fence.ownerThreadId
+    )
+      return;
+    const child = yield* projectionStore
+      .getThread(fence.childThreadId)
+      .pipe(mapDispatchError(command));
+    if (child.ownership?.ownerThreadId === fence.ownerThreadId) return;
+    return yield* new OrchestratorDispatchError({
+      commandId: command.commandId,
+      commandType: command.type,
+      cause: `send_owner_moved: ${fence.ownerThreadId} no longer owns ${fence.childThreadId}.`,
+    });
+  });
+
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
     const target = yield* projectionStore
@@ -17911,7 +17939,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),
-      dispatchWithReceiptEffect(command),
+      checkSendOwnerFence(command).pipe(Effect.andThen(dispatchWithReceiptEffect(command))),
     );
     // A fork holds its source's lock, so a source deletion and its fork never interleave. A
     // parent's lock comes before its side chats' locks. A side chat fork from a side chat or a
@@ -18945,12 +18973,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* (yield* ThreadTakeoverProbe).reconcilerPassed();
   }).pipe(Effect.forever, Effect.forkScoped);
 
-  // A successor launched with t3_thread_launch takes over its launcher's app-owned children once a
-  // run of it is active, so no agent has to call t3_thread_takeover. Forked per successor: neither
-  // its turn nor the other reactions wait on the predecessor's lock. A manual call afterwards
-  // returns the same effective result by transfer id.
+  // A launched successor takes over its launcher's app-owned children once a run of it is active,
+  // forked so neither side waits on the other's lock; a manual call returns the same transfer.
+  // Memory holds only in-flight successors: `continuedBy` and the task list dedupe later runs.
   const autoTakeoverScope = yield* Effect.scope;
-  const autoTakeoverSeen = new Set<ThreadId>();
+  const autoTakeoverInFlight = new Set<ThreadId>();
   const autoTakeover = Effect.fn("Orchestrator.autoTakeover")(function* (
     successorThreadId: ThreadId,
   ) {
@@ -18981,12 +19008,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...log,
           migrated: outcome.result.migrated.length,
         });
-      if (outcome.code !== "takeover_in_progress" && outcome.code !== "takeover_timeout") {
-        // A later active run of the successor tries again.
-        if (outcome.code === "takeover_successor_not_running")
-          autoTakeoverSeen.delete(successorThreadId);
+      // Anything but a busy predecessor ends this try; a later active run of the successor
+      // starts a fresh one.
+      if (outcome.code !== "takeover_in_progress" && outcome.code !== "takeover_timeout")
         return yield* Effect.logDebug("Auto takeover skipped", { ...log, code: outcome.code });
-      }
       if (attempt === settings.attempts) break;
       yield* Effect.logDebug("Auto takeover retries while the predecessor is busy", {
         ...log,
@@ -19000,6 +19025,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       attempts: settings.attempts,
     });
   });
+  /** Starts one auto takeover per successor at a time; the entry leaves when the fiber ends. */
+  const startAutoTakeover = Effect.fn("Orchestrator.startAutoTakeover")(function* (
+    successorThreadId: ThreadId,
+  ) {
+    if (!(yield* AutoTakeoverSettings).enabled || autoTakeoverInFlight.has(successorThreadId))
+      return;
+    autoTakeoverInFlight.add(successorThreadId);
+    yield* autoTakeover(successorThreadId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Auto takeover failed", { successorThreadId, cause }),
+      ),
+      Effect.ensuring(
+        Effect.sync(() => autoTakeoverInFlight.delete(successorThreadId)).pipe(
+          Effect.andThen(Effect.logDebug("Auto takeover ended", { successorThreadId })),
+        ),
+      ),
+      Effect.forkIn(autoTakeoverScope),
+    );
+  });
   yield* eventSink
     .stream({ afterSequence: terminalEventsAfterSequence, eventType: "run.updated" })
     .pipe(
@@ -19009,28 +19053,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           stored.event.payload.rootNodeId !== null &&
           isActiveRun(stored.event.payload),
       ),
-      Stream.runForEach((stored) =>
-        Effect.gen(function* () {
-          const threadId = stored.event.threadId;
-          if (!(yield* AutoTakeoverSettings).enabled || autoTakeoverSeen.has(threadId)) return;
-          autoTakeoverSeen.add(threadId);
-          yield* autoTakeover(threadId).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Auto takeover failed", { successorThreadId: threadId, cause }),
-            ),
-            Effect.forkIn(autoTakeoverScope),
-          );
-        }),
-      ),
+      Stream.runForEach((stored) => startAutoTakeover(stored.event.threadId)),
       Effect.forkScoped,
     );
+  // A restart drops the retry fibers, and the stream above starts after the current sequence, so a
+  // successor already running before the restart gets no new trigger. Startup recovery seeds each
+  // launched thread with an active run; each starts with a fresh budget from AutoTakeoverSettings.
+  const recoverAutoTakeovers = projectionStore.getRecoveryThreadIds("launched-successors").pipe(
+    Effect.tap((threadIds) =>
+      Effect.annotateCurrentSpan("recovery.autoTakeoverSuccessors", threadIds.length),
+    ),
+    Effect.flatMap((threadIds) => Effect.forEach(threadIds, startAutoTakeover, { discard: true })),
+    Effect.catchCause((cause) => Effect.logWarning("Failed to recover auto takeovers", { cause })),
+  );
+  /** Test seam: the successors whose auto takeover is running now. */
+  const autoTakeoversInFlight = Effect.sync((): ReadonlyArray<ThreadId> => [
+    ...autoTakeoverInFlight,
+  ]);
 
   const shellProjectionError = (cause: unknown) =>
     new OrchestratorProjectionError({ threadId: ThreadId.make("thread:shell"), cause });
 
   return OrchestratorV2.of({
     resumeQueuedRuns,
-    recoverDelegatedTasks,
+    recoverDelegatedTasks: recoverDelegatedTasks.pipe(Effect.andThen(recoverAutoTakeovers)),
+    autoTakeoversInFlight,
     recoverDelegatedTask,
     cancelDelegatedTask,
     takeoverThread,

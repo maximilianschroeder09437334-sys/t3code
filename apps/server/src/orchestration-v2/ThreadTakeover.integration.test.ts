@@ -8,6 +8,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
   MessageId,
   type ModelSelection,
@@ -51,7 +52,16 @@ import * as TestClock from "effect/testing/TestClock";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
 import * as ServerConfig from "../config.ts";
+import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -3305,10 +3315,12 @@ describe.runIf(compatStep === "read-24")("compat gate .23: baseline reads .24 st
  * Automatic takeover: a successor launched with t3_thread_launch takes over once its run is
  * active, without calling t3_thread_takeover. Its debug lines mark each milestone.
  */
-const autoLogListeners = new Set<(message: string) => void>();
+const autoLogListeners = new Set<(message: string, fields: unknown) => void>();
 const autoLogger = Logger.make(({ message }) => {
-  const first = String((Array.isArray(message) ? message : [message])[0]);
-  if (first.startsWith("Auto takeover")) for (const listener of autoLogListeners) listener(first);
+  const parts = Array.isArray(message) ? message : [message];
+  const first = String(parts[0]);
+  if (first.startsWith("Auto takeover"))
+    for (const listener of autoLogListeners) listener(first, parts[1]);
 });
 const layerAutoTest = makeLayerTest(SqlitePersistence.layerMemory, {
   enabled: true,
@@ -3455,6 +3467,256 @@ it.layer(layerAutoTest)("automatic takeover when a launched successor starts", (
       yield* TestClock.adjust("2 seconds");
       assert.isTrue(Option.isSome(yield* effective), "the retry took over");
       assert.equal(ownerOf(yield* thread(child)), successor);
+    }),
+  );
+});
+
+/** Started before an action: once `successor`'s auto takeover ended, the successors still in flight. */
+const autoTakeoverEnded = (successor: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const ended = yield* Deferred.make<void>();
+    const listener = (message: string, fields: unknown) => {
+      if (
+        message === "Auto takeover ended" &&
+        (fields as { readonly successorThreadId?: unknown } | undefined)?.successorThreadId ===
+          successor
+      )
+        Deferred.doneUnsafe(ended, Effect.void);
+    };
+    autoLogListeners.add(listener);
+    return TestClock.withLive(Deferred.await(ended).pipe(Effect.timeout("5 seconds"))).pipe(
+      Effect.andThen(orchestrator.autoTakeoversInFlight),
+      Effect.ensuring(Effect.sync(() => autoLogListeners.delete(listener))),
+    );
+  });
+
+it.layer(layerAutoTest)("automatic takeover keeps only in-flight successors in memory", (it) => {
+  it.effect("is empty after a success and after each skip", () =>
+    Effect.gen(function* () {
+      const succeeded = yield* autoTakeoverEnded(ThreadId.make("mem1-s"));
+      const { predecessor, successor } = yield* setupAuto("mem1");
+      assert.deepEqual(yield* succeeded, [], "after success");
+      assert.equal((yield* thread(predecessor)).continuedBy?.threadId, successor);
+      const noChildren = yield* autoTakeoverEnded(ThreadId.make("mem2-s"));
+      yield* setupAuto("mem2", { child: false });
+      assert.deepEqual(yield* noChildren, [], "after a skip");
+      const notLaunched = yield* autoTakeoverEnded(ThreadId.make("mem3-s"));
+      yield* setupAuto("mem3", { launched: false });
+      assert.deepEqual(yield* notLaunched, [], "after an unlaunched thread");
+    }),
+  );
+
+  it.effect("is empty after the retries are exhausted", () =>
+    Effect.gen(function* () {
+      const gaveUp = yield* autoLogged("Auto takeover gave up while the predecessor stayed busy");
+      const ended = yield* autoTakeoverEnded(ThreadId.make("mem4-s"));
+      const trying = yield* autoLogged("Auto takeover trying");
+      const { predecessor, child, release } = yield* setupAuto("mem4", {
+        holdPredecessor: true,
+      });
+      assert.isTrue(yield* trying);
+      // Five tries, each past its 30 s deadline, with 1 s spacing between them.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        yield* TestClock.adjust("31 seconds");
+        yield* TestClock.adjust("1 second");
+      }
+      assert.isTrue(yield* gaveUp);
+      assert.deepEqual(yield* ended, [], "after exhaustion");
+      assert.equal(ownerOf(yield* thread(child)), predecessor);
+      yield* release;
+    }),
+  );
+});
+
+/** Every auto-takeover server process over one database file; the probe stays the test's. */
+const layerAutoFile = (dbPath: string, autoTakeover: AutoTakeover) =>
+  makeLayerTest(SqlitePersistence.layerFromPath(dbPath), autoTakeover).pipe(
+    Layer.provideMerge(layerProbe),
+  );
+
+it.layer(NodeServices.layer)("automatic takeover after a restart", (it) => {
+  it.effect("startup recovery takes over for a successor that was already running", () =>
+    Effect.gen(function* () {
+      const dbPath = yield* databaseFile;
+      const name = "restart-auto";
+      const predecessor = ThreadId.make(`${name}-p`);
+      const successor = ThreadId.make(`${name}-s`);
+      // Process 1 dies before its auto takeover ran: modelled with the feature off there.
+      const child = yield* setupAuto(name).pipe(
+        Effect.map((setup) => setup.child),
+        Effect.provide(Layer.fresh(layerAutoFile(dbPath, autoTakeoverOff))),
+      );
+      // Process 2: no run of S updates; only startup recovery can trigger the takeover.
+      yield* Effect.gen(function* () {
+        assert.isUndefined((yield* thread(predecessor)).continuedBy);
+        const effective = yield* takeoverEffective(predecessor, successor);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.isTrue(Option.isSome(yield* effective), "startup recovery took over");
+        assert.equal(ownerOf(yield* thread(child)), successor);
+        // A manual call afterwards agrees and moves nothing twice.
+        const transferId = (yield* thread(predecessor)).continuedBy!.transferId;
+        const manual = yield* takeover(predecessor, successor);
+        assert.isTrue(manual.ok && manual.result.transferId === transferId);
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(layerAutoFile(dbPath, { enabled: true, attempts: 5, retrySpacingMs: 1_000 })),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("startup recovery does nothing while the feature is off", () =>
+    Effect.gen(function* () {
+      const dbPath = yield* databaseFile;
+      const name = "restart-off";
+      const predecessor = ThreadId.make(`${name}-p`);
+      const inProcess = <A, E>(body: Effect.Effect<A, E, ProcessServices>) =>
+        body.pipe(Effect.provide(Layer.fresh(layerAutoFile(dbPath, autoTakeoverOff))));
+      const child = yield* inProcess(Effect.map(setupAuto(name), (setup) => setup.child));
+      yield* inProcess(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          yield* orchestrator.recoverDelegatedTasks;
+          assert.deepEqual(yield* orchestrator.autoTakeoversInFlight, []);
+          assert.isUndefined((yield* thread(predecessor)).continuedBy);
+          assert.equal(ownerOf(yield* thread(child)), predecessor);
+        }),
+      );
+    }).pipe(Effect.scoped),
+  );
+});
+
+/**
+ * t3_thread_send from a moved child, through the real MCP service over these layers: a send to a
+ * former owner reaches the current owner, also when a takeover commits mid-send.
+ */
+const layerMcpTest = OrchestratorMcpService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+      Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({}),
+      Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+      ServerSettings.layerTest(),
+      NodeCrypto.layer,
+    ),
+  ),
+  Layer.provideMerge(layerForwardTest),
+);
+
+/** A delegated child D of A, moved A -> B by a takeover; C is B's launched successor, E a bystander. */
+const setupMovedChild = (name: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projectId = ProjectId.make(`${name}-project`);
+    const a = ThreadId.make(`${name}-a`);
+    const b = ThreadId.make(`${name}-b`);
+    const c = ThreadId.make(`${name}-c`);
+    const e = ThreadId.make(`${name}-e`);
+    const parent = yield* seedThread({ threadId: a, projectId, createProject: true });
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: CommandId.make(`${name}-delegate`),
+      parentThreadId: a,
+      parentRunId: parent.runId,
+      parentNodeId: parent.rootNodeId,
+      task: "Investigate the migration.",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      completionWake: "always",
+    });
+    const d = (yield* orchestrator.getThreadProjection(a)).subagents.find(
+      (candidate) => candidate.childThreadId !== null,
+    )!.childThreadId!;
+    yield* seedThread({ threadId: b, projectId, launchedBy: a });
+    assert.isTrue((yield* takeover(a, b)).ok, "A -> B");
+    yield* seedThread({ threadId: c, projectId, launchedBy: b });
+    yield* seedThread({ threadId: e, projectId });
+    const scope: McpInvocationScope = {
+      environmentId: EnvironmentId.make(`environment:${name}`),
+      requestNamespace: `provider-session:${d}`,
+      thread: {
+        threadId: d,
+        providerSessionId: `provider-session:${d}`,
+        providerInstanceId: modelSelection.instanceId,
+      },
+      client: undefined,
+      capabilities: new Set(["orchestration"]),
+      issuedAt: 1,
+    };
+    const send = (threadId: ThreadId, tag: string) =>
+      Effect.flatMap(OrchestratorMcpService.OrchestratorMcpService, (service) =>
+        service.sendToThread(scope, {
+          environmentId: "local",
+          threadId,
+          message: `Report ${tag}`,
+          freshContext: true,
+          clientRequestId: `${name}-${tag}`,
+        } as never),
+      );
+    /** D's messages on `threadId`, by text. */
+    const messagesFromD = (threadId: ThreadId) =>
+      Effect.map(orchestrator.getThreadProjection(threadId), (projection) =>
+        projection.messages
+          .filter((message) => message.senderThreadId === d)
+          .map((message) => message.text),
+      );
+    return { a, b, c, d, e, send, messagesFromD };
+  });
+
+it.layer(layerMcpTest)("t3_thread_send from a moved child", (it) => {
+  it.effect("a send to a former owner lands once on the current owner, others keep theirs", () =>
+    Effect.gen(function* () {
+      const { a, b, c, d, e, send, messagesFromD } = yield* setupMovedChild("mcp-redirect");
+      assert.isTrue((yield* takeover(b, c)).ok, "B -> C");
+      assert.equal(ownerOf(yield* thread(d)), c);
+      const toA = yield* send(a, "to-a");
+      assert.equal(toA.threadId, c);
+      assert.equal(toA.redirected?.fromThreadId, a);
+      assert.equal(toA.redirected?.toThreadId, c);
+      const toB = yield* send(b, "to-b");
+      assert.equal(toB.threadId, c);
+      assert.equal(toB.redirected?.fromThreadId, b);
+      assert.equal(toB.redirected?.toThreadId, c);
+      const toE = yield* send(e, "to-e");
+      assert.equal(toE.threadId, e);
+      assert.isUndefined(toE.redirected);
+      assert.deepEqual(yield* messagesFromD(c), ["Report to-a", "Report to-b"]);
+      assert.deepEqual(yield* messagesFromD(e), ["Report to-e"]);
+      assert.deepEqual(yield* messagesFromD(a), []);
+      assert.deepEqual(yield* messagesFromD(b), []);
+    }),
+  );
+
+  it.effect("a takeover between the owner read and the dispatch sends to the new owner", () =>
+    Effect.gen(function* () {
+      const { a, b, c, d, send, messagesFromD } = yield* setupMovedChild("mcp-race");
+      const reached = yield* Deferred.make<void>();
+      const proceed = yield* Deferred.make<void>();
+      let reads = 0;
+      probe.ownerRead = (child, owner) =>
+        child === d && owner === b && reads++ === 0
+          ? Deferred.succeed(reached, undefined).pipe(Effect.andThen(Deferred.await(proceed)))
+          : Effect.void;
+      const sending = yield* send(a, "raced").pipe(Effect.forkChild);
+      yield* Deferred.await(reached);
+      // D's owner read B; B -> C commits before the send reaches B's lock.
+      assert.isTrue((yield* takeover(b, c)).ok, "B -> C");
+      yield* Deferred.succeed(proceed, undefined);
+      const sent = yield* Fiber.join(sending).pipe(Effect.ensuring(Effect.sync(resetProbe)));
+      assert.equal(sent.threadId, c);
+      assert.equal(sent.redirected?.fromThreadId, a);
+      assert.equal(sent.redirected?.toThreadId, c);
+      assert.deepEqual(yield* messagesFromD(c), ["Report raced"]);
+      assert.deepEqual(yield* messagesFromD(b), []);
     }),
   );
 });

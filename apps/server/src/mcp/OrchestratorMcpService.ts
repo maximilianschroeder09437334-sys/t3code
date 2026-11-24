@@ -93,6 +93,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -116,6 +117,7 @@ import {
   runOutcome,
 } from "../orchestration-v2/RestartBackgroundNote.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { SendOwnerFence, ThreadTakeoverProbe } from "../orchestration-v2/ThreadTakeover.ts";
 import { placeholderThreadTitle } from "../orchestration-v2/placeholderThreadTitle.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -248,6 +250,9 @@ export class OrchestratorMcpService extends Context.Service<
 >()("t3/mcp/OrchestratorMcpService") {}
 
 const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
+
+/** Sends to a moved child's owner; each try after the first follows a takeover that moved it. */
+const SEND_REDIRECT_TRIES = 8;
 
 /**
  * A moved child (a subagent a takeover gave a new owner) sending to its lineage parent or a former
@@ -1462,6 +1467,76 @@ const make = Effect.gen(function* () {
     parent === undefined || target.thread.id === parent.thread.id
       ? Effect.void
       : assertLiveCaller(scope, parent);
+
+  /** One send to a resolved target; `redirectedFrom` names the former owner the sender addressed. */
+  const sendResolved = Effect.fn("OrchestratorMcpService.sendResolved")(function* (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadSendInput,
+    scoped: Effect.Success<ReturnType<typeof loadScopedThread<"runs">>>,
+    redirectedFrom: ThreadId | undefined,
+  ) {
+    const { parent, limits, target } = scoped;
+    yield* assertLiveCallerForOtherThread(scope, parent, target);
+    yield* assertTargetWithinLimits(limits, target.thread);
+
+    const mode = input.mode ?? "auto";
+    const key = yield* requestKey(input.clientRequestId);
+    const messageId = stableOperationMessageId({
+      scope,
+      requestKey: key,
+      operation: "thread-send",
+    });
+    const result = yield* threadManagement
+      .sendToThread({
+        projectId: target.thread.projectId,
+        commandId: stableCommandId({
+          scope,
+          requestKey: key,
+          operation: "thread-send",
+        }),
+        threadId: input.threadId,
+        ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
+        // A linked environment's agent has no thread here; the link names it.
+        ...(parent === undefined && scope.client?.senderThread !== undefined
+          ? { linkedSender: scope.client.senderThread }
+          : {}),
+        messageId,
+        text: input.message,
+        attachments: [],
+        mode,
+        ...(input.freshContext ? { freshContext: true } : {}),
+        createdBy: "agent",
+        creationSource: "mcp",
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          isThreadManagementError(error)
+            ? threadManagementFailure(error)
+            : failure(
+                "orchestration_error",
+                `Unable to send to thread ${input.threadId}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
+              ),
+        ),
+      );
+    return {
+      threadId: input.threadId,
+      link: threadLinkFor(scope, input.threadId, target.thread.title),
+      messageId,
+      runId: result.run.id,
+      ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
+      status: result.run.status,
+      delivery: result.delivery,
+      ...(redirectedFrom === undefined
+        ? {}
+        : {
+            redirected: {
+              fromThreadId: redirectedFrom,
+              toThreadId: input.threadId,
+              reason: `Thread ${input.threadId} took over this task from ${redirectedFrom}, so the message went to it.`,
+            },
+          }),
+    } satisfies OrchestratorMcpThreadSendResult;
+  });
 
   const assertLiveCallerForOtherProject = (
     scope: McpInvocationScope,
@@ -3573,75 +3648,35 @@ const make = Effect.gen(function* () {
       } satisfies OrchestratorMcpThreadReadResult;
     }),
     sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, rawInput) {
-      const scoped = yield* loadScopedThread(scope, rawInput.threadId, ["runs"]);
-      // After a takeover a moved child's report to its creator or an earlier owner goes to its owner.
-      const ownerThreadId = formerOwnerRedirect(scoped.parent?.thread, rawInput.threadId);
-      const { parent, limits, target } =
-        ownerThreadId === undefined
-          ? scoped
-          : yield* loadScopedThread(scope, ownerThreadId, ["runs"]);
-      const input =
-        ownerThreadId === undefined ? rawInput : { ...rawInput, threadId: ownerThreadId };
-      yield* assertLiveCallerForOtherThread(scope, parent, target);
-      yield* assertTargetWithinLimits(limits, target.thread);
-
-      const mode = input.mode ?? "auto";
-      const key = yield* requestKey(input.clientRequestId);
-      const messageId = stableOperationMessageId({
-        scope,
-        requestKey: key,
-        operation: "thread-send",
-      });
-      const result = yield* threadManagement
-        .sendToThread({
-          projectId: target.thread.projectId,
-          commandId: stableCommandId({
-            scope,
-            requestKey: key,
-            operation: "thread-send",
-          }),
-          threadId: input.threadId,
-          ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
-          // A linked environment's agent has no thread here; the link names it.
-          ...(parent === undefined && scope.client?.senderThread !== undefined
-            ? { linkedSender: scope.client.senderThread }
-            : {}),
-          messageId,
-          text: input.message,
-          attachments: [],
-          mode,
-          ...(input.freshContext ? { freshContext: true } : {}),
-          createdBy: "agent",
-          creationSource: "mcp",
-        })
-        .pipe(
-          Effect.mapError((error) =>
-            isThreadManagementError(error)
-              ? threadManagementFailure(error)
-              : failure(
-                  "orchestration_error",
-                  `Unable to send to thread ${input.threadId}: ${userFacingDispatchErrorMessage(error) ?? errorMessage(error)}`,
-                ),
-          ),
+      const probe = yield* ThreadTakeoverProbe;
+      for (let attempt = 1; ; attempt++) {
+        const scoped = yield* loadScopedThread(scope, rawInput.threadId, ["runs"]);
+        const sender = scoped.parent?.thread;
+        // After a takeover a moved child's report to its creator or an earlier owner goes to its
+        // owner. The owner read here is re-checked under the owner's lock at dispatch.
+        const ownerThreadId = formerOwnerRedirect(sender, rawInput.threadId);
+        if (sender === undefined || ownerThreadId === undefined)
+          return yield* sendResolved(scope, rawInput, scoped, undefined);
+        yield* probe.ownerRead(sender.id, ownerThreadId);
+        const sent = yield* sendResolved(
+          scope,
+          { ...rawInput, threadId: ownerThreadId },
+          yield* loadScopedThread(scope, ownerThreadId, ["runs"]),
+          rawInput.threadId,
+        ).pipe(
+          Effect.provideService(SendOwnerFence, { childThreadId: sender.id, ownerThreadId }),
+          Effect.result,
         );
-      return {
-        threadId: input.threadId,
-        link: threadLinkFor(scope, input.threadId, target.thread.title),
-        messageId,
-        runId: result.run.id,
-        ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
-        status: result.run.status,
-        delivery: result.delivery,
-        ...(ownerThreadId === undefined
-          ? {}
-          : {
-              redirected: {
-                fromThreadId: rawInput.threadId,
-                toThreadId: ownerThreadId,
-                reason: `Thread ${ownerThreadId} took over this task from ${rawInput.threadId}, so the message went to it.`,
-              },
-            }),
-      } satisfies OrchestratorMcpThreadSendResult;
+        if (Result.isSuccess(sent)) return sent.success;
+        // A takeover moved the sender between the read and the dispatch: resend to the new owner.
+        const moved =
+          attempt < SEND_REDIRECT_TRIES &&
+          formerOwnerRedirect(
+            (yield* loadScopedThread(scope, rawInput.threadId, ["runs"])).parent?.thread,
+            rawInput.threadId,
+          ) !== ownerThreadId;
+        if (!moved) return yield* sent.failure;
+      }
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {
       const { parent, target } = yield* loadScopedThread(scope, input.threadId, []);

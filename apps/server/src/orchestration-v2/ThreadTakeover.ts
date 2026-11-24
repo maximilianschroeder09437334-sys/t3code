@@ -120,6 +120,21 @@ export const AutoTakeoverSettings = Context.Reference<AutoTakeoverSettingsValue>
   { defaultValue: () => ({ enabled: true, attempts: 5, retrySpacingMs: 15_000 }) },
 );
 
+/**
+ * Set by a send redirected from a former owner: the sending child and the owner it now goes to.
+ * Dispatch re-reads the child's owner under the target's thread lock, which a takeover's commit
+ * also holds, and refuses the message (nothing recorded) when the owner moved in between.
+ */
+export interface SendOwnerFenceValue {
+  readonly childThreadId: ThreadId;
+  readonly ownerThreadId: ThreadId;
+}
+
+export const SendOwnerFence = Context.Reference<SendOwnerFenceValue | undefined>(
+  "t3/orchestration-v2/SendOwnerFence",
+  { defaultValue: () => undefined },
+);
+
 export type ThreadTakeoverFailureCode =
   | TakeoverRejection["code"]
   | "takeover_in_progress"

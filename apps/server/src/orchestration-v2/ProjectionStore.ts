@@ -193,7 +193,9 @@ export type ProjectionRecoveryKind =
   | "subagent-results"
   /** `subagent-results` restricted to children a takeover moved: the live reconciler's scan. */
   | "owned-subagent-results"
-  | "delegated-completions";
+  | "delegated-completions"
+  /** Threads started by t3_thread_launch with an active run: auto takeover after a restart. */
+  | "launched-successors";
 
 /** A migrated child's result attempt owed to its current owner (plan-b-r6 §5a). */
 export interface ProjectionTakeoverObligation {
@@ -5222,6 +5224,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE CASE WHEN json_valid(payload_json)
                   THEN json_type(payload_json, '$.delegatedCompletion.delivery') = 'object'
                   ELSE 0 END
+              `;
+            case "launched-successors":
+              return sql`
+                SELECT launched.thread_id FROM orchestration_v2_projection_threads AS launched
+                WHERE CASE WHEN json_valid(launched.payload_json)
+                    THEN json_extract(launched.payload_json, '$.launchedBy.threadId') IS NOT NULL
+                    ELSE 0 END
+                  AND EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_runs AS run
+                    WHERE run.thread_id = launched.thread_id
+                      AND run.status IN ('preparing', 'starting', 'running', 'waiting')
+                      AND CASE WHEN json_valid(run.payload_json)
+                        THEN json_extract(run.payload_json, '$.rootNodeId') IS NOT NULL
+                        ELSE 0 END
+                  )
               `;
             case "subagent-results":
             case "owned-subagent-results":
