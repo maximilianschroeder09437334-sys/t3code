@@ -21,6 +21,7 @@ import {
   type OrchestrationV2ForceStopThreadInput,
   type OrchestrationV2ForceStopThreadResult,
   type ModelSelection,
+  type NodeId,
   type OrchestrationV2Actor,
   type OrchestrationV2Command,
   type OrchestrationV2GetTurnItemResult,
@@ -196,6 +197,12 @@ export interface ThreadManagementWaitInput {
    * completion delivery will wake it again, as a delegated task's result does.
    */
   readonly untilDelegatedWorkSettled?: boolean;
+  /**
+   * The waiter's own delegated task on `threadId`: the wait follows the task's current child
+   * across handoffs and answers for the last successor. `runId` names a run of `threadId` only;
+   * once the task moved on, the wait follows the successor's latest run instead.
+   */
+  readonly followTask?: { readonly parentThreadId: ThreadId; readonly taskId: NodeId };
 }
 
 export interface ThreadManagementWaitResult {
@@ -1028,8 +1035,8 @@ const make = Effect.gen(function* () {
     return { dispatch: dispatched, projection, message, run, turnItem, delivery };
   });
 
-  const waitForThread: ThreadManagementServiceShape["waitForThread"] = Effect.fn(
-    "ThreadManagementService.waitForThread",
+  const waitForOneThread: ThreadManagementServiceShape["waitForThread"] = Effect.fn(
+    "ThreadManagementService.waitForOneThread",
   )(function* (input) {
     const loadError = (cause: unknown) =>
       new ThreadManagementProjectionLoadError({
@@ -1163,6 +1170,87 @@ const make = Effect.gen(function* () {
     // winning the race; the final projection read decides what actually
     // happened, so only a still-active run counts as timed out.
     return settledResult(yield* evaluate((yield* getProjectThreadRecords(input, ["runs"])).runs));
+  });
+
+  /**
+   * Waits on the child a delegated task is bound to now. A handoff that rebinds the task while
+   * waiting moves the wait to the successor, with the time left; the answer is the last child's.
+   */
+  const waitForThread: ThreadManagementServiceShape["waitForThread"] = Effect.fn(
+    "ThreadManagementService.waitForThread",
+  )(function* (input) {
+    const follow = input.followTask;
+    if (follow === undefined) return yield* waitForOneThread(input);
+    const loadError = (cause: unknown) =>
+      new ThreadManagementProjectionLoadError({
+        projectId: input.projectId,
+        threadId: follow.parentThreadId,
+        cause,
+      });
+    const boundChild = orchestrator
+      .getThreadRecords(follow.parentThreadId, ["subagents"], { subagentIds: [follow.taskId] })
+      .pipe(
+        Effect.map(
+          ({ subagents }) =>
+            subagents.find((task) => task.id === follow.taskId)?.childThreadId ?? null,
+        ),
+        Effect.mapError(loadError),
+      );
+    const deadline = (yield* Clock.currentTimeMillis) + Math.max(1, input.timeoutMs);
+    let childThreadId = input.threadId;
+    for (;;) {
+      // Taken before the binding read, so a rebind after it still wakes this wait.
+      const afterSequence = yield* orchestrator
+        .getThreadEventSequence(follow.parentThreadId)
+        .pipe(Effect.mapError(loadError));
+      const bound = yield* boundChild;
+      const remaining = deadline - (yield* Clock.currentTimeMillis);
+      if (bound !== null && bound !== childThreadId && remaining > 0) {
+        childThreadId = bound;
+        continue;
+      }
+      const { runId: _runId, ...anyRun } = input;
+      const onChild = {
+        ...(childThreadId === input.threadId ? input : anyRun),
+        threadId: childThreadId,
+        timeoutMs: Math.max(1, remaining),
+      };
+      const rebound = orchestrator
+        .streamStoredEventsFrom({
+          threadId: follow.parentThreadId,
+          afterSequence,
+          eventType: "subagent.updated",
+        })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" &&
+              stored.event.payload.id === follow.taskId &&
+              stored.event.payload.childThreadId !== null &&
+              stored.event.payload.childThreadId !== childThreadId,
+          ),
+          Stream.runHead,
+          Effect.mapError(loadError),
+        );
+      const raced = yield* Effect.raceFirst(
+        Effect.map(waitForOneThread(onChild), (result) => ({ _tag: "settled" as const, result })),
+        Effect.flatMap(rebound, (event) =>
+          Option.isSome(event) ? Effect.succeed({ _tag: "rebound" as const }) : Effect.never,
+        ),
+      );
+      if (raced._tag === "rebound") continue;
+      // A rebind that committed while this child's run ended still moves the answer on.
+      const after = yield* boundChild;
+      if (
+        after !== null &&
+        after !== childThreadId &&
+        deadline > (yield* Clock.currentTimeMillis)
+      ) {
+        childThreadId = after;
+        continue;
+      }
+      return raced.result;
+    }
   });
 
   const settleAfterRun: ThreadManagementServiceShape["settleAfterRun"] = Effect.fn(

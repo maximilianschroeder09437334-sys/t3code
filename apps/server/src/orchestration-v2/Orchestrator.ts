@@ -757,6 +757,9 @@ function takeoverAnchorKey(transferId: string, childThreadId: ThreadId): string 
   return `takeover:${transferId.slice(0, 24)}:${childThreadId}`;
 }
 
+/** Cancel refused: the task now runs on a successor of the child the caller named. */
+const DELEGATED_TASK_REBOUND = "rebound: the task moved to a successor child; cancel it there.";
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.takeover.begin":
@@ -10319,6 +10322,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
         ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
+        // Proves the launch, so the successor can take over the old child's own children.
+        launchedBy: { threadId: command.fromChildThreadId, commandId: command.commandId, at: now },
       };
       const scope = {
         threadId: command.parentThreadId,
@@ -18770,6 +18775,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandId: command.commandId,
             commandType: command.type,
             cause: "transferred: the task moved to the successor thread; cancel it there.",
+          });
+        // The child handed the task to a successor after the caller read the binding: stop
+        // nothing, so the caller retries against the task's current child.
+        if (
+          subagents.some(
+            (task) =>
+              task.id === input.taskId &&
+              task.childThreadId !== command.threadId &&
+              task.handedOffFrom?.includes(command.threadId) === true,
+          )
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: DELEGATED_TASK_REBOUND,
           });
         const task = subagents.find(
           (candidate) =>

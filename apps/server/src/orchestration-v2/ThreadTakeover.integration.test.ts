@@ -912,12 +912,14 @@ const probe = {
     readonly childThreadId: ThreadId;
   }): Effect.Effect<void, string> => Effect.void,
   reconcilerPassed: (): Effect.Effect<void> => Effect.void,
+  taskBindingRead: (_taskId: string, _childThreadId: ThreadId): Effect.Effect<void> => Effect.void,
 };
 const resetProbe = () => {
   probe.ownerRead = () => Effect.void;
   probe.ownerLocked = () => Effect.succeed("check");
   probe.beforeForwardCommit = () => Effect.void;
   probe.reconcilerPassed = () => Effect.void;
+  probe.taskBindingRead = () => Effect.void;
 };
 const TakeoverProbe = Context.Reference<typeof probe>("t3/orchestration-v2/ThreadTakeoverProbe", {
   defaultValue: () => probe,
@@ -928,6 +930,7 @@ const layerProbe = Layer.succeed(TakeoverProbe, {
   ownerLocked: (child, owner) => Effect.suspend(() => probe.ownerLocked(child, owner)),
   beforeForwardCommit: (input) => Effect.suspend(() => probe.beforeForwardCommit(input)),
   reconcilerPassed: () => Effect.suspend(() => probe.reconcilerPassed()),
+  taskBindingRead: (taskId, child) => Effect.suspend(() => probe.taskBindingRead(taskId, child)),
 });
 const layerForwardTest = layerTest.pipe(Layer.provideMerge(layerProbe));
 
@@ -4023,5 +4026,273 @@ it.layer(layerTest)("delegated child handoff", (it) => {
       yield* finishChild(successor);
       assert.equal((yield* taskOf(s.predecessor, s.taskId)).result, "after restart");
     }),
+  );
+});
+
+/** Ends `child`'s latest run as the provider would, without waiting for any result write. */
+const endRun = (child: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(child)).runs.toSorted(
+      (a, b) => b.ordinal - a.ordinal,
+    )[0]!;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`end:${run.id}`),
+          type: "run.updated",
+          threadId: child,
+          runId: run.id,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: { ...run, status: "completed", completedAt: now },
+        },
+      ],
+    });
+  });
+
+/** The parent's own MCP session, as delegate_task's caller. */
+const parentScope = (parent: ThreadId): McpInvocationScope => ({
+  environmentId: EnvironmentId.make(`environment:${parent}`),
+  requestNamespace: `provider-session:${parent}`,
+  thread: {
+    threadId: parent,
+    providerSessionId: `provider-session:${parent}`,
+    providerInstanceId: modelSelection.instanceId,
+  },
+  client: undefined,
+  capabilities: new Set(["orchestration"]),
+  issuedAt: 1,
+});
+
+/** The parent's t3_thread_wait on `child` until its delegated work settles. */
+const waitOn = (parent: ThreadId, child: ThreadId) =>
+  Effect.flatMap(OrchestratorMcpService.OrchestratorMcpService, (service) =>
+    service.waitForThread(parentScope(parent), {
+      threadId: child,
+      timeoutMs: 60_000,
+      untilDelegatedWorkSettled: true,
+    } as never),
+  );
+/** Joins within real time, so a wait that never follows fails instead of hanging. */
+const joinWithin = <A, E>(fiber: Fiber.Fiber<A, E>) =>
+  TestClock.withLive(Fiber.join(fiber).pipe(Effect.timeout("10 seconds")));
+const settleLive = TestClock.withLive(Effect.sleep("150 millis"));
+
+it.layer(layerMcpTest)("delegated child handoff over MCP", (it) => {
+  it.effect("R2-1: a handoff between task_cancel's read and its stop cancels the successor", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r2-cancel");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const reached = yield* Deferred.make<void>();
+      const proceed = yield* Deferred.make<void>();
+      let reads = 0;
+      probe.taskBindingRead = (_taskId, child) =>
+        child === s.child && reads++ === 0
+          ? Deferred.succeed(reached, undefined).pipe(Effect.andThen(Deferred.await(proceed)))
+          : Effect.void;
+      const cancelling = yield* service
+        .cancelTask(parentScope(s.predecessor), {
+          taskId: s.taskId,
+          clientRequestId: "r2-cancel-key",
+        } as never)
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(reached);
+      // task_cancel read C; C's handoff commits before cancellation takes the parent's lock.
+      const successor = (yield* handOff(s.predecessor, s.taskId, s.child, "r2-cancel-a"))
+        .childThreadId!;
+      assert.notEqual(successor, s.child);
+      yield* Deferred.succeed(proceed, undefined);
+      const cancelled = yield* joinWithin(cancelling).pipe(
+        Effect.ensuring(Effect.sync(resetProbe)),
+      );
+      assert.equal(cancelled.status, "cancel_requested");
+      const task = yield* taskOf(s.predecessor, s.taskId);
+      assert.equal(task.childThreadId, successor, "the binding stays the successor's");
+      assert.isDefined(task.cancelledRunId, "the task is cancelled");
+      const successorRuns = (yield* orchestrator.getThreadProjection(successor)).runs;
+      assert.isTrue(
+        successorRuns.some((run) => run.id === task.cancelledRunId),
+        "the successor's run is the cancelled one",
+      );
+    }),
+  );
+
+  it.effect("R2-2a: a wait started before the handoff answers with the successor's result", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r2-wait-before");
+      const waiting = yield* waitOn(s.predecessor, s.child).pipe(Effect.forkChild);
+      yield* settleLive;
+      const successor = (yield* handOff(s.predecessor, s.taskId, s.child, "r2-wb-a"))
+        .childThreadId!;
+      // The old child's end is not the answer.
+      yield* replyOnChild(s.child, "partial from the old child");
+      yield* endRun(s.child);
+      yield* settleLive;
+      yield* replyOnChild(successor, "final from the successor");
+      const finalRun = yield* finishChild(successor);
+      const result = yield* joinWithin(waiting);
+      assert.equal(result.threadId, successor);
+      assert.equal(result.resultRun?.runId, finalRun);
+      assert.equal(result.resultRun?.status, "completed");
+    }),
+  );
+
+  it.effect("R2-2b: a wait started after the handoff with the original child id follows it", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r2-wait-after");
+      const successor = (yield* handOff(s.predecessor, s.taskId, s.child, "r2-wa-a"))
+        .childThreadId!;
+      yield* endRun(s.child);
+      const waiting = yield* waitOn(s.predecessor, s.child).pipe(Effect.forkChild);
+      yield* settleLive;
+      yield* replyOnChild(successor, "final from the successor");
+      const finalRun = yield* finishChild(successor);
+      const result = yield* joinWithin(waiting);
+      assert.equal(result.threadId, successor);
+      assert.equal(result.resultRun?.runId, finalRun);
+    }),
+  );
+
+  it.effect("R2-2c: a wait follows a two-successor chain to the last result", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r2-wait-chain");
+      const waiting = yield* waitOn(s.predecessor, s.child).pipe(Effect.forkChild);
+      yield* settleLive;
+      const first = (yield* handOff(s.predecessor, s.taskId, s.child, "r2-wc-a")).childThreadId!;
+      yield* endRun(s.child);
+      const second = (yield* handOff(s.predecessor, s.taskId, first, "r2-wc-b")).childThreadId!;
+      yield* replyOnChild(first, "partial from the first successor");
+      yield* endRun(first);
+      yield* settleLive;
+      yield* replyOnChild(second, "final from the last successor");
+      const finalRun = yield* finishChild(second);
+      const result = yield* joinWithin(waiting);
+      assert.equal(result.threadId, second);
+      assert.equal(result.resultRun?.runId, finalRun);
+      assert.equal(
+        (yield* taskOf(s.predecessor, s.taskId)).result,
+        "final from the last successor",
+      );
+    }),
+  );
+});
+
+it.layer(layerTest)("delegated child handoff moves the old child's own children", (it) => {
+  it.effect("R2-4: the successor takes over the old child's app-owned children", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r2-grand");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const childRun = (yield* orchestrator.getThreadProjection(s.child)).runs.toSorted(
+        (a, b) => b.ordinal - a.ordinal,
+      )[0]!;
+      yield* orchestrator.dispatch({
+        type: "delegated_task.request",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("r2-grand-subtask"),
+        parentThreadId: s.child,
+        parentRunId: childRun.id,
+        parentNodeId: childRun.rootNodeId!,
+        task: "Check the schema.",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        completionWake: "always",
+      });
+      const grandchild = (yield* orchestrator.getThreadProjection(s.child)).subagents.find(
+        (task) => task.childThreadId !== null,
+      )!.childThreadId!;
+      const successor = (yield* handOff(s.predecessor, s.taskId, s.child, "r2-grand-a"))
+        .childThreadId!;
+      assert.equal((yield* thread(successor)).launchedBy?.threadId, s.child);
+      const outcome = yield* takeover(s.child, successor);
+      assert.isTrue(outcome.ok, outcome.ok ? "" : outcome.message);
+      assert.equal(ownerOf(yield* thread(grandchild)), successor);
+      // The task itself stays bound to the successor under the original parent.
+      assert.equal((yield* taskOf(s.predecessor, s.taskId)).childThreadId, successor);
+    }),
+  );
+});
+
+/** Every delegated-task child thread in the database (one test per database file). */
+const delegatedChildren = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ readonly threadId: string }>`
+    SELECT thread_id AS threadId FROM orchestration_v2_projection_threads
+    WHERE thread_id LIKE 'thread:delegated-task:%'`;
+  return rows.map((row) => row.threadId);
+});
+/** What the parent was told about the task: its result, delivery and the parent's messages. */
+const deliveredToParent = (parent: ThreadId, taskId: NodeId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projection = yield* orchestrator.getThreadProjection(parent);
+    const task = projection.subagents.find((row) => row.id === taskId)!;
+    return {
+      result: task.result,
+      resultRunId: task.resultRunId,
+      delivery: task.completionDelivery?.state,
+      parentMessages: projection.messages.length,
+    };
+  });
+
+it.layer(NodeServices.layer)("delegated child handoff across a real restart", (it) => {
+  it.effect("R2-3: a handoff committed before its start effect ran recovers to one result", () =>
+    Effect.gen(function* () {
+      const dbPath = yield* databaseFile;
+      const inProcess = processOver(dbPath);
+      // Process 1: the handoff commits, then the process dies before any effect runs.
+      const first = yield* inProcess(
+        Effect.gen(function* () {
+          const s = yield* setup("r2-restart");
+          const successor = (yield* handOff(s.predecessor, s.taskId, s.child, "r2-restart-a"))
+            .childThreadId!;
+          return { ...s, successor };
+        }),
+      );
+      // Process 2: fresh services over the same file; startup recovery runs the start effect.
+      const delivered = yield* inProcess(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          yield* startupAfterProcessLoss;
+          const task = yield* taskOf(first.predecessor, first.taskId);
+          assert.equal(task.childThreadId, first.successor, "the binding persisted");
+          assert.deepEqual(task.handedOffFrom, [first.child]);
+          const item = (yield* orchestrator.getThreadProjection(first.predecessor)).turnItems.find(
+            (row) => row.type === "subagent" && row.subagentId === first.taskId,
+          );
+          assert.equal(item?.type === "subagent" ? item.childThreadId : null, first.successor);
+          // A replay after the lost response makes nothing new.
+          const replay = yield* handOff(
+            first.predecessor,
+            first.taskId,
+            first.child,
+            "r2-restart-a",
+          );
+          assert.equal(replay.childThreadId, first.successor);
+          assert.sameMembers(yield* delegatedChildren, [first.child, first.successor]);
+          yield* replyOnChild(first.child, "old child's late message");
+          yield* endRun(first.child);
+          yield* replyOnChild(first.successor, "final after restart");
+          yield* finishChild(first.successor);
+          const delivered = yield* deliveredToParent(first.predecessor, first.taskId);
+          assert.equal(delivered.result, "final after restart");
+          assert.isTrue(notifiable(yield* taskOf(first.predecessor, first.taskId)));
+          return delivered;
+        }),
+      );
+      // Process 3: startup again adds no successor and no second result.
+      yield* inProcess(
+        Effect.gen(function* () {
+          yield* startupAfterProcessLoss;
+          assert.sameMembers(yield* delegatedChildren, [first.child, first.successor]);
+          assert.deepEqual(yield* deliveredToParent(first.predecessor, first.taskId), delivered);
+        }),
+      );
+    }).pipe(Effect.scoped),
   );
 });

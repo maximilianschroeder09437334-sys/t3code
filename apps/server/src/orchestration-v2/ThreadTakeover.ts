@@ -59,8 +59,13 @@ export const admitTakeover = (input: {
     );
   if (successor.id === predecessor.id)
     return rejected("takeover_invalid", "A thread cannot take over itself.");
+  // A delegated child's successor is a subagent of the same parent; it takes over that child's own.
+  const siblings =
+    predecessor.lineage.relationshipToParent === "subagent" &&
+    successor.lineage.relationshipToParent === "subagent" &&
+    predecessor.lineage.parentThreadId === successor.lineage.parentThreadId;
   for (const thread of [predecessor, successor]) {
-    if (!isListedThreadLineage(thread.lineage))
+    if (!siblings && !isListedThreadLineage(thread.lineage))
       return rejected(
         "takeover_invalid",
         `Thread ${thread.id} is a subagent or side chat; only top-level threads take over.`,
@@ -199,6 +204,8 @@ export interface ThreadTakeoverProbeValue {
   }) => Effect.Effect<void, string>;
   /** After each live reconciler pass. */
   readonly reconcilerPassed: () => Effect.Effect<void>;
+  /** After task_cancel read the task's child binding, before it stops anything. */
+  readonly taskBindingRead: (taskId: string, childThreadId: ThreadId) => Effect.Effect<void>;
 }
 
 export const ThreadTakeoverProbe = Context.Reference<ThreadTakeoverProbeValue>(
@@ -209,6 +216,7 @@ export const ThreadTakeoverProbe = Context.Reference<ThreadTakeoverProbeValue>(
       ownerLocked: () => Effect.succeed("check" as const),
       beforeForwardCommit: () => Effect.void,
       reconcilerPassed: () => Effect.void,
+      taskBindingRead: () => Effect.void,
     }),
   },
 );

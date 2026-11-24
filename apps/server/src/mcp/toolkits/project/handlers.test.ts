@@ -1,11 +1,13 @@
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   GitCommandError,
   ProjectId,
+  NodeId,
   ProviderInstanceId,
   ProviderDriverKind,
+  RunId,
   ThreadId,
   type ServerProvider,
   type Project as ProjectRecord,
@@ -47,6 +49,7 @@ import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -83,6 +86,17 @@ const fixtureProvider = {
   skills: [],
 } as unknown as ServerProvider;
 
+/** The task row fields a delegated child's launch reads. */
+interface HandoffTask {
+  readonly id: NodeId;
+  readonly origin: "app_owned";
+  childThreadId: ThreadId | null;
+  readonly result: string | null;
+  readonly completedAt: null;
+  readonly startedAt: null;
+  readonly cancelledRunId?: RunId;
+}
+
 const clientLaunchHarness = (input: {
   readonly runtimeModeCeiling: RuntimeMode;
   readonly defaultRuntimeMode?: RuntimeMode;
@@ -99,7 +113,13 @@ const clientLaunchHarness = (input: {
   readonly refusedByCeiling?: true;
   /** An agent thread bound to the MCP session makes the call instead of the client. */
   readonly callerThreadId?: ThreadId;
+  /** The calling thread's own fields, e.g. a delegated child's lineage. */
+  readonly callerShell?: Partial<OrchestrationV2ThreadShell>;
+  /** The owner's task rows a delegated caller's launch reads; its handoff rebinds them. */
+  readonly tasks?: Array<HandoffTask>;
+  readonly dispatched?: Array<{ readonly type: string }>;
 }) => {
+  const successors = new Map<ThreadId, OrchestrationV2ThreadShell>();
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = fixtureSelection;
   // The project's own default model, which a test can clear between launches.
@@ -148,27 +168,57 @@ const clientLaunchHarness = (input: {
       capabilities: new Set(["orchestration" as const]),
     }),
     Layer.mock(ThreadManagement.ThreadManagementService)({
-      // A thread exists once a launch started it.
-      getThreadShell: (threadId) => {
-        if (threadId === input.callerThreadId)
-          return Effect.succeed({
-            ...McpToolAccessTestkit.liveThreadShell(threadId, {
-              runtimeMode: input.runtimeModeCeiling,
-            }),
-            projectId,
-            modelSelection,
-          });
-        const launch = input.launched.find((candidate) => candidate.threadId === threadId);
-        return Effect.succeed(
-          launch === undefined
-            ? null
-            : ({
-                id: launch.threadId,
-                projectId: launch.projectId,
-                modelSelection: launch.modelSelection,
-                deletedAt: null,
-              } as unknown as OrchestrationV2ThreadShell),
-        );
+      // A thread exists once a launch or handoff started it; read when the effect runs.
+      getThreadShell: (threadId) =>
+        Effect.suspend(() => {
+          if (threadId === input.callerThreadId)
+            return Effect.succeed({
+              ...McpToolAccessTestkit.liveThreadShell(threadId, {
+                runtimeMode: input.runtimeModeCeiling,
+              }),
+              projectId,
+              modelSelection,
+              ...input.callerShell,
+            } as OrchestrationV2ThreadShell);
+          const successor = successors.get(threadId);
+          if (successor !== undefined) return Effect.succeed(successor);
+          const launch = input.launched.find((candidate) => candidate.threadId === threadId);
+          return Effect.succeed(
+            launch === undefined
+              ? null
+              : ({
+                  id: launch.threadId,
+                  projectId: launch.projectId,
+                  modelSelection: launch.modelSelection,
+                  deletedAt: null,
+                } as unknown as OrchestrationV2ThreadShell),
+          );
+        }),
+      getThreadRecords: () => Effect.succeed({ subagents: input.tasks ?? [] } as never),
+      // The orchestrator's handoff, reduced: an open task bound to the caller moves to the successor.
+      dispatch: (command) => {
+        input.dispatched?.push(command);
+        if (command.type === "delegated_task.handoff") {
+          const task = input.tasks?.find(
+            (row) =>
+              row.id === command.taskId &&
+              row.childThreadId === command.fromChildThreadId &&
+              row.result === null &&
+              row.cancelledRunId === undefined,
+          );
+          if (task !== undefined) {
+            const id = IdAllocator.derive.delegatedTaskThread({ commandId: command.commandId });
+            task.childThreadId = id;
+            successors.set(id, {
+              id,
+              projectId,
+              title: "Successor",
+              modelSelection,
+              deletedAt: null,
+            } as unknown as OrchestrationV2ThreadShell);
+          }
+        }
+        return Effect.succeed({ sequence: 1 } as never);
       },
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
@@ -1545,3 +1595,132 @@ it.effect.each([
     expect(launched).toHaveLength(0);
   }),
 );
+
+describe("t3_thread_launch from a delegated child", () => {
+  const parentThreadId = ThreadId.make("thread:parent");
+  const childThreadId = ThreadId.make("thread:predecessor");
+  const taskId = NodeId.make("node:task");
+  const childShell = {
+    lineage: { rootThreadId: parentThreadId, parentThreadId, relationshipToParent: "subagent" },
+    forkedFrom: { type: "node", nodeId: taskId },
+  } as unknown as Partial<OrchestrationV2ThreadShell>;
+  const openTask = (overrides: Partial<HandoffTask> = {}): HandoffTask => ({
+    id: taskId,
+    origin: "app_owned",
+    childThreadId,
+    result: null,
+    completedAt: null,
+    startedAt: null,
+    ...overrides,
+  });
+  const launchFrom = (input: {
+    readonly callerShell?: Partial<OrchestrationV2ThreadShell>;
+    readonly tasks: Array<HandoffTask>;
+    readonly keys: ReadonlyArray<string>;
+  }) =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const dispatched: Array<{ readonly type: string }> = [];
+      const { projectId, modelSelection, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "full-access",
+        launched,
+        callerThreadId: childThreadId,
+        ...(input.callerShell === undefined ? {} : { callerShell: input.callerShell }),
+        tasks: input.tasks,
+        dispatched,
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      for (const key of input.keys)
+        yield* toolkit
+          .handle("t3_thread_launch", {
+            projectId,
+            title: "Successor",
+            message: "Continue the migration.",
+            modelSelection,
+            clientRequestId: key,
+          })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      return {
+        launched,
+        handoffs: dispatched.filter((command) => command.type === "delegated_task.handoff"),
+      };
+    });
+
+  it.effect("an open task's child hands it off instead of launching a top-level thread", () =>
+    Effect.gen(function* () {
+      const tasks = [openTask()];
+      const { launched, handoffs } = yield* launchFrom({
+        callerShell: childShell,
+        tasks,
+        keys: ["one"],
+      });
+      expect(handoffs).toHaveLength(1);
+      expect(launched).toHaveLength(0);
+      expect(tasks[0]?.childThreadId).not.toBe(childThreadId);
+    }),
+  );
+
+  it.effect("a top-level caller gets a top-level thread", () =>
+    Effect.gen(function* () {
+      const { launched, handoffs } = yield* launchFrom({ tasks: [openTask()], keys: ["one"] });
+      expect(handoffs).toHaveLength(0);
+      expect(launched).toHaveLength(1);
+    }),
+  );
+
+  it.effect("a child whose parent is in another environment is not rebound", () =>
+    Effect.gen(function* () {
+      // A remotely delegated thread is top-level here: no subagent lineage and no task node.
+      const { launched, handoffs } = yield* launchFrom({
+        callerShell: {
+          lineage: {
+            rootThreadId: childThreadId,
+            parentThreadId: null,
+            relationshipToParent: null,
+          },
+          forkedFrom: null,
+        } as unknown as Partial<OrchestrationV2ThreadShell>,
+        tasks: [openTask()],
+        keys: ["one"],
+      });
+      expect(handoffs).toHaveLength(0);
+      expect(launched).toHaveLength(1);
+    }),
+  );
+
+  it.effect("a completed or cancelled child's launch is a plain top-level launch", () =>
+    Effect.gen(function* () {
+      for (const ended of [
+        openTask({ result: "done" }),
+        openTask({ cancelledRunId: RunId.make("run:cancelled") }),
+      ]) {
+        const { launched, handoffs } = yield* launchFrom({
+          callerShell: childShell,
+          tasks: [ended],
+          keys: ["one"],
+        });
+        expect(handoffs).toHaveLength(0);
+        expect(launched).toHaveLength(1);
+      }
+    }),
+  );
+
+  it.effect("a second launch from the same old child does not rebind again", () =>
+    Effect.gen(function* () {
+      const tasks = [openTask()];
+      const { launched, handoffs } = yield* launchFrom({
+        callerShell: childShell,
+        tasks,
+        keys: ["one", "two"],
+      });
+      expect(handoffs).toHaveLength(1);
+      expect(launched).toHaveLength(1);
+    }),
+  );
+});
