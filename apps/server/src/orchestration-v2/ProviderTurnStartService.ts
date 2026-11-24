@@ -24,6 +24,7 @@ import {
   isCompactionCommandMessage,
   parseGoalCommand,
   RunId,
+  type TurnItemId,
   RunAttemptId,
   NodeId,
   ThreadId,
@@ -72,12 +73,15 @@ import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDeliv
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import {
   CONTEXT_HANDOFF_NUDGE,
   CONTEXT_ROLLOVER_LIMIT,
   contextHandoffNudgeMessage,
   contextRolloverInstructions,
   contextRolloverNoticeId,
+  contextNoticeSteerCommandId,
+  contextNoticeSteerMessageId,
 } from "./ContextRollover.ts";
 import { unsentManualContinuationSource } from "./manualContinuation.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -249,6 +253,7 @@ export const layer: Layer.Layer<
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
     const providerRegistry = yield* ProviderTurnStartModels;
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+    const effectOutbox = yield* Effect.serviceOption(EffectOutbox.EffectOutboxV2);
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
@@ -2020,6 +2025,34 @@ export const layer: Layer.Layer<
         runningProviderThread.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId
       ) {
         const measured = latestNativeContextUsage(projection, runningProviderThread);
+        const previousRun = projection.runs.findLast(
+          (previous) =>
+            previous.ordinal < run.ordinal &&
+            previous.providerThreadId === runningProviderThread.id &&
+            previous.startedAt !== null,
+        );
+        // A notice already steered into the run it was recorded for is not inlined again there.
+        const steeredBefore = Effect.fnUntraced(function* (
+          notice: { readonly id: TurnItemId; readonly runId: RunId | null } | null,
+        ) {
+          if (notice === null || notice.runId === null || notice.runId !== previousRun?.id)
+            return false;
+          const messageId = contextNoticeSteerMessageId(notice.id);
+          const message = (yield* projectionStore.getThreadRecords(input.threadId, ["messages"], {
+            messageIds: [messageId],
+          })).messages.find((candidate) => candidate.id === messageId);
+          if (message === undefined) return false;
+          // A steer too late for its turn runs on its own and delivers the text itself.
+          if (message.runId !== notice.runId) return true;
+          if (Option.isNone(effectOutbox)) return false;
+          const effects = yield* effectOutbox.value
+            .listByCommandId(contextNoticeSteerCommandId(notice.id))
+            .pipe(Effect.orElseSucceed(() => []));
+          return effects.some(
+            (effect) =>
+              effect.request.type === "provider-turn.steer" && effect.status === "succeeded",
+          );
+        });
         const capId = contextRolloverNoticeId(runningProviderThread, CONTEXT_ROLLOVER_LIMIT);
         const cap =
           capId === undefined
@@ -2029,18 +2062,13 @@ export const layer: Layer.Layer<
                 itemId: capId,
               });
         if (cap !== null || (measured?.usage.usedTokens ?? 0) >= CONTEXT_ROLLOVER_LIMIT) {
-          rolloverContext = contextRolloverInstructions(
-            cap?.runId ?? run.id,
-            projection.thread.branch,
-          );
+          if (!(yield* steeredBefore(cap)))
+            rolloverContext = contextRolloverInstructions(
+              cap?.runId ?? run.id,
+              projection.thread.branch,
+            );
         } else {
           const nudgeId = contextRolloverNoticeId(runningProviderThread, CONTEXT_HANDOFF_NUDGE);
-          const previousRun = projection.runs.findLast(
-            (previous) =>
-              previous.ordinal < run.ordinal &&
-              previous.providerThreadId === runningProviderThread.id &&
-              previous.startedAt !== null,
-          );
           const nudge =
             nudgeId === undefined || previousRun === undefined
               ? null
@@ -2048,7 +2076,7 @@ export const layer: Layer.Layer<
                   threadId: input.threadId,
                   itemId: nudgeId,
                 });
-          if (nudge?.runId === previousRun?.id && nudge !== null)
+          if (nudge?.runId === previousRun?.id && nudge !== null && !(yield* steeredBefore(nudge)))
             rolloverContext = contextHandoffNudgeMessage;
         }
       }

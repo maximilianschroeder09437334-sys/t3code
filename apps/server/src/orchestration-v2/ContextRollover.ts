@@ -1,6 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Synchronous IDs are shared by projection reads and event creation.
 import * as NodeCrypto from "node:crypto";
-import { TurnItemId, type OrchestrationV2ProviderThread } from "@t3tools/contracts";
+import {
+  CommandId,
+  MessageId,
+  TurnItemId,
+  type OrchestrationV2ProviderThread,
+} from "@t3tools/contracts";
 
 export const CONTEXT_HANDOFF_NUDGE = 150_000;
 export const CONTEXT_ROLLOVER_LIMIT = 250_000;
@@ -17,6 +22,22 @@ export function contextRolloverNoticeId(
     .update(JSON.stringify([provider.id, nativeId]))
     .digest("hex");
   return TurnItemId.make(`${noticePrefix}${threshold}:${identity}`);
+}
+
+export function isContextRolloverNotice(itemId: TurnItemId) {
+  return (
+    itemId.startsWith(`${noticePrefix}${CONTEXT_HANDOFF_NUDGE}:`) ||
+    itemId.startsWith(`${noticePrefix}${CONTEXT_ROLLOVER_LIMIT}:`)
+  );
+}
+
+/** The notice steered into the running turn it was recorded for; one id per notice keeps it once. */
+export function contextNoticeSteerMessageId(noticeId: TurnItemId) {
+  return MessageId.make(`context-steer:${noticeId}`);
+}
+
+export function contextNoticeSteerCommandId(noticeId: TurnItemId) {
+  return CommandId.make(`command:context-steer:${noticeId}`);
 }
 
 export function isContextRolloverLimitNotice(itemId: TurnItemId) {

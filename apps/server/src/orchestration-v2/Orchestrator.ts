@@ -233,6 +233,9 @@ import {
   hasVoluntaryHandoffNudge,
   contextRolloverFollowupId,
   contextRolloverNoticeId,
+  contextNoticeSteerCommandId,
+  contextNoticeSteerMessageId,
+  isContextRolloverNotice,
 } from "./ContextRollover.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -18172,6 +18175,86 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (effect, stored) => threadDispatch.withLock(stored.event.threadId, effect),
           Effect.catchCause((cause) =>
             Effect.logWarning("Failed to deliver deferred steering", { cause }),
+          ),
+          (effect, stored) => threadReactions.run(stored.event.threadId, effect),
+        ),
+      ),
+      Effect.forkScoped,
+    );
+
+  // A delegated child often finishes its task in one long run, so a context notice that only
+  // reaches the next run start arrives too late. Steer it into the running turn once; the
+  // deterministic message id keeps repeats, replays and restarts from steering it again.
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "turn-item.updated" })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "turn-item.updated" &&
+          stored.event.payload.type === "system_notice" &&
+          isContextRolloverNotice(stored.event.payload.id),
+      ),
+      Stream.runForEach(
+        Effect.fn("Orchestrator.steerContextNotice")(
+          function* (stored) {
+            if (
+              stored.event.type !== "turn-item.updated" ||
+              stored.event.payload.type !== "system_notice"
+            )
+              return;
+            const threadId = stored.event.threadId;
+            const notice = stored.event.payload;
+            const { run, providerThread, providerTurn } =
+              yield* projectionStore.getRunningTurnContext(threadId);
+            // Only the root node's running turn of the run the notice was recorded for.
+            if (
+              run === undefined ||
+              providerTurn === undefined ||
+              run.id !== notice.runId ||
+              run.status !== "running" ||
+              providerTurn.status !== "running" ||
+              providerTurn.id !== notice.providerTurnId ||
+              providerTurn.nodeId !== run.rootNodeId ||
+              providerTurn.runAttemptId !== run.activeAttemptId ||
+              providerThread?.providerSessionId == null
+            )
+              return;
+            const messageId = contextNoticeSteerMessageId(notice.id);
+            const records = yield* projectionStore.getThreadRecords(threadId, ["messages"], {
+              messageIds: [messageId, run.userMessageId],
+            });
+            if (records.messages.some((message) => message.id === messageId)) return;
+            const runMessage = records.messages.find((message) => message.id === run.userMessageId);
+            // Like the next-run inline, never join a goal command or a compaction turn.
+            if (
+              runMessage !== undefined &&
+              (parseGoalCommand(runMessage) !== null || isNativeMaintenanceCommand(runMessage))
+            )
+              return;
+            const session = yield* providerSessions
+              .get(providerThread.providerSessionId)
+              .pipe(Effect.orElseSucceed(() => Option.none()));
+            // Without steering the next run start inlines the notice instead.
+            if (
+              Option.isNone(session) ||
+              !session.value.providerSession.capabilities.turns.supportsActiveSteering ||
+              (yield* projectionStore.hasRunInterruptRequest(threadId, run.id))
+            )
+              return;
+            yield* dispatchWithReceipt({
+              type: "message.dispatch",
+              commandId: contextNoticeSteerCommandId(notice.id),
+              threadId,
+              messageId,
+              createdBy: "agent",
+              creationSource: "server",
+              text: notice.message,
+              attachments: [],
+              dispatchMode: { type: "steer_active", targetRunId: run.id },
+            });
+          },
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to steer a context notice into the running turn", { cause }),
           ),
           (effect, stored) => threadReactions.run(stored.event.threadId, effect),
         ),
