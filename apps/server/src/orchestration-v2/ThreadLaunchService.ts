@@ -271,7 +271,7 @@ const make = Effect.gen(function* () {
       ? git.currentBranch(workspaceRoot).pipe(Effect.orElseSucceed(() => null))
       : Effect.succeed(strategy.branch ?? null);
   const preparationScope = yield* Scope.make("sequential");
-  const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
+  const scheduledLaunches = yield* Ref.make<ReadonlySet<string>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
 
   const mapError =
@@ -1112,18 +1112,25 @@ const make = Effect.gen(function* () {
             ),
           );
 
-  const reservePreparation = (commandId: CommandId) =>
+  // One preparation per command and per run: a launch replay and a retry of the same run come
+  // with different command ids, and both must not prepare that run at once.
+  const preparationKeys = (
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId | null,
+  ): ReadonlyArray<string> =>
+    runId === null ? [commandId] : [commandId, `run:${threadId}:${runId}`];
+
+  const reservePreparation = (keys: ReadonlyArray<string>) =>
     Ref.modify(scheduledLaunches, (scheduled) => {
-      if (scheduled.has(commandId)) return [false, scheduled] as const;
-      const next = new Set(scheduled);
-      next.add(commandId);
-      return [true, next] as const;
+      if (keys.some((key) => scheduled.has(key))) return [false, scheduled] as const;
+      return [true, new Set([...scheduled, ...keys])] as const;
     });
 
-  const releasePreparation = (commandId: CommandId) =>
+  const releasePreparation = (keys: ReadonlyArray<string>) =>
     Ref.update(scheduledLaunches, (scheduled) => {
       const next = new Set(scheduled);
-      next.delete(commandId);
+      for (const key of keys) next.delete(key);
       return next;
     });
 
@@ -1168,7 +1175,7 @@ const make = Effect.gen(function* () {
         ),
       ),
       Effect.ignoreCause,
-      Effect.ensuring(releasePreparation(input.commandId)),
+      Effect.ensuring(releasePreparation(preparationKeys(input.commandId, threadId, runId))),
       Effect.forkIn(preparationScope),
     );
   });
@@ -1414,7 +1421,8 @@ const make = Effect.gen(function* () {
 
         // Fork preparation before the full projection read; it is only part of the reply.
         const shouldSchedule = runId === null ? Option.isNone(launchReceipt) : true;
-        if (shouldSchedule && (yield* reservePreparation(input.commandId))) {
+        const reserved = preparationKeys(input.commandId, threadId, runId);
+        if (shouldSchedule && (yield* reservePreparation(reserved))) {
           yield* Effect.gen(function* () {
             const current =
               runId === null
@@ -1426,7 +1434,7 @@ const make = Effect.gen(function* () {
               current !== null &&
               !current.runs.some((run) => run.id === runId && run.status === "preparing")
             ) {
-              return yield* releasePreparation(input.commandId);
+              return yield* releasePreparation(reserved);
             }
             const boundWorktreePath = current?.thread.worktreePath ?? null;
             // A retry prepares the worktree the accepted launch asked for, not the
@@ -1449,7 +1457,7 @@ const make = Effect.gen(function* () {
               threadId,
               runId,
             );
-          }).pipe(Effect.onError(() => releasePreparation(input.commandId)));
+          }).pipe(Effect.onError(() => releasePreparation(reserved)));
         }
         const projection = yield* threads
           .getThreadProjection(threadId)
@@ -1481,9 +1489,10 @@ const make = Effect.gen(function* () {
       const run = runs.find((candidate) => candidate.id === input.runId);
       const workspacePreparation = run?.workspacePreparation;
       if (run?.status !== "preparing" || workspacePreparation === undefined) return;
-      if (!(yield* reservePreparation(input.commandId))) return;
+      const reserved = preparationKeys(input.commandId, input.threadId, input.runId);
+      if (!(yield* reservePreparation(reserved))) return;
       yield* scheduleRunPreparation(input, thread, run, workspacePreparation).pipe(
-        Effect.onError(() => releasePreparation(input.commandId)),
+        Effect.onError(() => releasePreparation(reserved)),
       );
     }).pipe(Effect.exit);
     if (Exit.isFailure(scheduled)) {

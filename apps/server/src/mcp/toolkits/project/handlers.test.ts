@@ -228,6 +228,9 @@ const clientLaunchHarness = (input: {
               successorRuns.set(id, [
                 {
                   id: RunId.make(`run:${id}`),
+                  userMessageId: IdAllocator.derive.delegatedTaskMessage({
+                    commandId: command.commandId,
+                  }),
                   status: "preparing",
                   workspacePreparation: command.workspaceStrategy,
                 },
