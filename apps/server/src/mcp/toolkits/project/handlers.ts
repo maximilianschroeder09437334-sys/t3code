@@ -187,8 +187,8 @@ const findDelegatedHandoff = Effect.fn("mcp.findDelegatedHandoff")(function* (
 /**
  * A delegated child that launches its successor hands its open task over: the successor starts as
  * a child of the same parent, in the caller's own project and checkout, and the parent's task,
- * wait, cancel and result follow it. Returns undefined when the task ended first, so the launch
- * makes a top-level thread.
+ * wait, cancel and result follow it. Fails when the task ended first; it never falls back to a
+ * top-level thread.
  */
 const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (
   handoff: NonNullable<Effect.Success<ReturnType<typeof findDelegatedHandoff>>>,
@@ -232,8 +232,15 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (
         Effect.logInfo("mcp.thread-launch.handoff-refused", { taskId: handoff.taskId, error }),
       ),
     );
-  // No successor: the task ended or was cancelled first, so the launch makes a top-level thread.
-  return yield* handoff.readSuccessor;
+  const successor = yield* handoff.readSuccessor;
+  if (successor !== undefined) return successor;
+  // No successor: the task ended or was cancelled first. A delegated child never starts a thread
+  // elsewhere, so the launch fails instead of making a top-level thread.
+  return yield* new OrchestratorMcpFailure({
+    code: "invalid_request",
+    message:
+      "Your delegated task ended before the handoff, so no successor was started. Report your result to your parent instead.",
+  });
 });
 
 const launchThread = McpToolAccess.startsThreads(
@@ -446,18 +453,17 @@ const launchThread = McpToolAccess.startsThreads(
           runtimeMode: startedRuntimeMode,
           interactionMode,
         });
-        if (successor !== undefined)
-          return {
-            threadId: successor.id,
-            link: McpInvocationContext.threadLinkFor(scope, successor.id, successor.title),
-            projectId: successor.projectId,
-            modelSelection: successor.modelSelection,
-            runId: null,
-            status: null,
-            ...(workspaceIgnored
-              ? { workspace: "same as caller; projectId/scratch/workspaceStrategy ignored" }
-              : {}),
-          };
+        return {
+          threadId: successor.id,
+          link: McpInvocationContext.threadLinkFor(scope, successor.id, successor.title),
+          projectId: successor.projectId,
+          modelSelection: successor.modelSelection,
+          runId: null,
+          status: null,
+          ...(workspaceIgnored
+            ? { workspace: "same as caller; projectId/scratch/workspaceStrategy ignored" }
+            : {}),
+        };
       }
       const result = yield* ThreadMessageIntake.launchThread({
         commandId,

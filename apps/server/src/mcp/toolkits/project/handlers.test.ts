@@ -120,6 +120,8 @@ const clientLaunchHarness = (input: {
   readonly dispatched?: Array<{ readonly type: string }>;
   /** The runs the launch asked ThreadLaunchService to prepare. */
   readonly prepared?: Array<ThreadLaunch.ThreadLaunchPreparationInput>;
+  /** The task ends between the launch's lookup and its handoff, so the orchestrator refuses it. */
+  readonly taskEndsBeforeHandoff?: true;
 }) => {
   const successors = new Map<ThreadId, OrchestrationV2ThreadShell>();
   /** A successor started with a workspace strategy waits in "preparing", as the orchestrator's does. */
@@ -204,6 +206,8 @@ const clientLaunchHarness = (input: {
       // The orchestrator's handoff, reduced: an open task bound to the caller moves to the successor.
       dispatch: (command) => {
         input.dispatched?.push(command);
+        if (command.type === "delegated_task.handoff" && input.taskEndsBeforeHandoff === true)
+          return Effect.fail({ _tag: "TaskEnded" } as const) as never;
         if (command.type === "delegated_task.handoff") {
           const task = input.tasks?.find(
             (row) =>
@@ -1624,6 +1628,7 @@ describe("t3_thread_launch from a delegated child", () => {
     readonly callerShell?: Partial<OrchestrationV2ThreadShell>;
     readonly tasks: Array<HandoffTask>;
     readonly keys: ReadonlyArray<string>;
+    readonly taskEndsBeforeHandoff?: true;
     /** Workspace fields a child's successor ignores. */
     readonly workspace?: {
       readonly projectId?: ProjectId;
@@ -1647,6 +1652,7 @@ describe("t3_thread_launch from a delegated child", () => {
         tasks: input.tasks,
         dispatched,
         prepared,
+        ...(input.taskEndsBeforeHandoff === undefined ? {} : { taskEndsBeforeHandoff: true }),
       });
       const toolkit = yield* ProjectToolkit.pipe(
         Effect.provide(
@@ -1719,6 +1725,25 @@ describe("t3_thread_launch from a delegated child", () => {
           threadId: tasks[0]?.childThreadId,
           workspace: "same as caller; projectId/scratch/workspaceStrategy ignored",
         });
+    }),
+  );
+
+  it.effect("R4: a refused handoff fails and never makes a top-level thread", () =>
+    Effect.gen(function* () {
+      const tasks = [openTask()];
+      const { results, launched, handoffs } = yield* launchFrom({
+        callerShell: childShell,
+        tasks,
+        keys: ["one"],
+        taskEndsBeforeHandoff: true,
+        workspace: {
+          workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: false },
+        },
+      });
+      expect(handoffs).toHaveLength(1);
+      expect(launched).toHaveLength(0);
+      expect(results[0]).toMatchObject({ code: "invalid_request" });
+      expect(tasks[0]?.childThreadId).toBe(childThreadId);
     }),
   );
 
