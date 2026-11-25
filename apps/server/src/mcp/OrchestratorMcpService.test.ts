@@ -2324,6 +2324,13 @@ describe("OrchestratorMcpService provider resolution", () => {
                     ),
                 }),
                 ServerSettings.layerTest({
+                  // Unconfigured opencode is off by default; capabilities lists only enabled instances.
+                  providerInstances: {
+                    [opencodeInstanceId]: {
+                      driver: ProviderDriverKind.make("opencode"),
+                      enabled: true,
+                    },
+                  },
                   favorites: [
                     { provider: codexInstanceId, model: "gpt-4" },
                     { provider: opencodeInstanceId, model: "oc/m10" },
