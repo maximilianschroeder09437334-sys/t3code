@@ -165,13 +165,9 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
     Effect.mapError(unavailable),
     Effect.map((shell) => (shell === null || shell.deletedAt !== null ? undefined : shell)),
   );
-  const handoffMessageId = IdAllocator.derive.delegatedTaskMessage({
-    commandId: handoffCommandId,
-  });
   // With a workspace strategy the successor's first run waits in "preparing" until someone
-  // prepares it, as delegate_task does after its dispatch. prepareRun prepares a run once at a
-  // time, even across a workspace-preparation retry, and skips a run that is no longer
-  // preparing, so a replay may call it again for the run its own handoff message started.
+  // prepares it, as delegate_task does after its dispatch. prepareRun runs once per command and
+  // skips a run that is no longer preparing, so a replay may call it again.
   const prepareSuccessor = Effect.fn("mcp.handOffDelegatedTask.prepareSuccessor")(function* () {
     if (input.workspaceStrategy === undefined) return;
     const { runs } = yield* threads
@@ -179,9 +175,7 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
       .pipe(Effect.mapError(unavailable));
     const run = runs.find(
       (candidate) =>
-        candidate.userMessageId === handoffMessageId &&
-        candidate.status === "preparing" &&
-        candidate.workspacePreparation !== undefined,
+        candidate.status === "preparing" && candidate.workspacePreparation !== undefined,
     );
     if (run === undefined) return;
     yield* (yield* ThreadLaunch.ThreadLaunchService).prepareRun({
