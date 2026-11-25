@@ -10324,6 +10324,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
+        ...(command.agentExecutionIntent === undefined
+          ? {}
+          : { agentExecutionIntent: command.agentExecutionIntent }),
         ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
         // Proves the launch, so the successor can take over the old child's own children.
         launchedBy: { threadId: command.fromChildThreadId, commandId: command.commandId, at: now },

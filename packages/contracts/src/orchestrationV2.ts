@@ -3993,6 +3993,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("delegated_task.handoff"),
     ...OrchestrationV2CreationFields,
+    /** The selection the launching agent chose; agent-started runs on the successor need it. */
+    agentExecutionIntent: Schema.optional(AgentExecutionIntent),
     commandId: CommandId,
     parentThreadId: ThreadId,
     taskId: NodeId,

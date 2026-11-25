@@ -73,6 +73,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import { agentSelectionMatchesRun } from "./AgentModelPolicy.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -3872,7 +3873,13 @@ it.layer(layerMcpTest)("t3_thread_send from a moved child", (it) => {
 });
 
 /** C hands its open task to a successor as t3_thread_launch does for a delegated child. */
-const handOff = (parent: ThreadId, taskId: NodeId, from: ThreadId, key: string) =>
+const handOff = (
+  parent: ThreadId,
+  taskId: NodeId,
+  from: ThreadId,
+  key: string,
+  agentExecutionIntent?: { readonly modelSelection: ModelSelection },
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     yield* orchestrator
@@ -3886,6 +3893,7 @@ const handOff = (parent: ThreadId, taskId: NodeId, from: ThreadId, key: string) 
         fromChildThreadId: from,
         message: "Continue the migration.",
         modelSelection,
+        ...(agentExecutionIntent === undefined ? {} : { agentExecutionIntent }),
         runtimeMode: "full-access",
         interactionMode: "default",
       })
@@ -4271,6 +4279,26 @@ it.layer(layerMcpTest)("delegated child handoff during the old child's finalizat
       const task = yield* taskOf(s.predecessor, s.taskId);
       assert.equal(task.childThreadId, s.child);
       assert.isNull(task.result, "the task stays open");
+    }),
+  );
+
+  it.effect("R2d: the successor carries the launch's model selection provenance", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r2d-provenance");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const intent = { modelSelection };
+      const task = yield* handOff(s.predecessor, s.taskId, s.child, "r2d-handoff", intent);
+      const projection = yield* orchestrator.getThreadProjection(task.childThreadId!);
+      assert.deepEqual(projection.thread.agentExecutionIntent, intent);
+      // The turn-start gate: an agent-started subagent run needs an intent matching its selection.
+      const run = projection.runs[0];
+      assert.isDefined(run, "the successor starts on the brief");
+      assert.isTrue(
+        agentSelectionMatchesRun(
+          projection.thread.agentExecutionIntent!.modelSelection,
+          run!.modelSelection,
+        ),
+      );
     }),
   );
 });

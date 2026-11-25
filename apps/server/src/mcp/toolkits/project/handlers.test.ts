@@ -118,8 +118,12 @@ const clientLaunchHarness = (input: {
   /** The owner's task rows a delegated caller's launch reads; its handoff rebinds them. */
   readonly tasks?: Array<HandoffTask>;
   readonly dispatched?: Array<{ readonly type: string }>;
+  /** The runs the launch asked ThreadLaunchService to prepare. */
+  readonly prepared?: Array<ThreadLaunch.ThreadLaunchPreparationInput>;
 }) => {
   const successors = new Map<ThreadId, OrchestrationV2ThreadShell>();
+  /** A successor started with a workspace strategy waits in "preparing", as the orchestrator's does. */
+  const successorRuns = new Map<ThreadId, ReadonlyArray<unknown>>();
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = fixtureSelection;
   // The project's own default model, which a test can clear between launches.
@@ -194,7 +198,11 @@ const clientLaunchHarness = (input: {
                 } as unknown as OrchestrationV2ThreadShell),
           );
         }),
-      getThreadRecords: () => Effect.succeed({ subagents: input.tasks ?? [] } as never),
+      getThreadRecords: (threadId) =>
+        Effect.succeed({
+          subagents: input.tasks ?? [],
+          runs: successorRuns.get(threadId) ?? [],
+        } as never),
       // The orchestrator's handoff, reduced: an open task bound to the caller moves to the successor.
       dispatch: (command) => {
         input.dispatched?.push(command);
@@ -216,6 +224,14 @@ const clientLaunchHarness = (input: {
               modelSelection,
               deletedAt: null,
             } as unknown as OrchestrationV2ThreadShell);
+            if (command.workspaceStrategy !== undefined)
+              successorRuns.set(id, [
+                {
+                  id: RunId.make(`run:${id}`),
+                  status: "preparing",
+                  workspacePreparation: command.workspaceStrategy,
+                },
+              ]);
           }
         }
         return Effect.succeed({ sequence: 1 } as never);
@@ -223,6 +239,7 @@ const clientLaunchHarness = (input: {
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
+      prepareRun: (prepared) => Effect.sync(() => input.prepared?.push(prepared)),
       launch: (launch) => {
         input.launched.push(launch);
         if (input.refusedByCeiling) {
@@ -1617,10 +1634,16 @@ describe("t3_thread_launch from a delegated child", () => {
     readonly callerShell?: Partial<OrchestrationV2ThreadShell>;
     readonly tasks: Array<HandoffTask>;
     readonly keys: ReadonlyArray<string>;
+    readonly workspaceStrategy?: {
+      readonly type: "worktree";
+      readonly baseRef: string;
+      readonly startFromOrigin: boolean;
+    };
   }) =>
     Effect.gen(function* () {
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const dispatched: Array<{ readonly type: string }> = [];
+      const prepared: Array<ThreadLaunch.ThreadLaunchPreparationInput> = [];
       const { projectId, modelSelection, dependencies } = clientLaunchHarness({
         runtimeModeCeiling: "full-access",
         launched,
@@ -1628,6 +1651,7 @@ describe("t3_thread_launch from a delegated child", () => {
         ...(input.callerShell === undefined ? {} : { callerShell: input.callerShell }),
         tasks: input.tasks,
         dispatched,
+        prepared,
       });
       const toolkit = yield* ProjectToolkit.pipe(
         Effect.provide(
@@ -1644,11 +1668,15 @@ describe("t3_thread_launch from a delegated child", () => {
             message: "Continue the migration.",
             modelSelection,
             clientRequestId: key,
+            ...(input.workspaceStrategy === undefined
+              ? {}
+              : { workspaceStrategy: input.workspaceStrategy }),
           })
           .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
       return {
         launched,
         handoffs: dispatched.filter((command) => command.type === "delegated_task.handoff"),
+        prepared,
       };
     });
 
@@ -1661,8 +1689,33 @@ describe("t3_thread_launch from a delegated child", () => {
         keys: ["one"],
       });
       expect(handoffs).toHaveLength(1);
+      // The successor's agent-started runs need the selection the launch chose.
+      expect(handoffs[0]).toMatchObject({
+        agentExecutionIntent: { modelSelection: fixtureSelection },
+      });
       expect(launched).toHaveLength(0);
       expect(tasks[0]?.childThreadId).not.toBe(childThreadId);
+    }),
+  );
+
+  it.effect("R2d: a successor with a workspace strategy has its preparing run prepared", () =>
+    Effect.gen(function* () {
+      const tasks = [openTask()];
+      const { launched, handoffs, prepared } = yield* launchFrom({
+        callerShell: childShell,
+        tasks,
+        // The same key twice: a replay asks again, and prepareRun runs once per command.
+        keys: ["one", "one"],
+        workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: false },
+      });
+      expect(handoffs).toHaveLength(1);
+      expect(launched).toHaveLength(0);
+      const successor = tasks[0]!.childThreadId!;
+      const handoffCommandId = (handoffs[0] as unknown as { readonly commandId: string }).commandId;
+      expect(prepared).toEqual([
+        { commandId: handoffCommandId, threadId: successor, runId: `run:${successor}` },
+        { commandId: handoffCommandId, threadId: successor, runId: `run:${successor}` },
+      ]);
     }),
   );
 

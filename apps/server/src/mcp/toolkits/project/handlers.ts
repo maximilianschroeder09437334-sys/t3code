@@ -7,6 +7,7 @@ import {
   OrchestratorMcpFailure,
   ProjectId,
   HOOK_EVENT_COVERAGE,
+  type AgentExecutionIntent,
   type ModelSelection,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type ProviderInteractionMode,
@@ -140,6 +141,8 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
   readonly message: string | undefined;
   readonly attachmentCount: number;
   readonly modelSelection: ModelSelection;
+  /** The selection the agent chose, as a launch stamps it; the successor's runs need it. */
+  readonly agentExecutionIntent: AgentExecutionIntent;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
@@ -162,9 +165,31 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
     Effect.mapError(unavailable),
     Effect.map((shell) => (shell === null || shell.deletedAt !== null ? undefined : shell)),
   );
+  // With a workspace strategy the successor's first run waits in "preparing" until someone
+  // prepares it, as delegate_task does after its dispatch. prepareRun runs once per command and
+  // skips a run that is no longer preparing, so a replay may call it again.
+  const prepareSuccessor = Effect.fn("mcp.handOffDelegatedTask.prepareSuccessor")(function* () {
+    if (input.workspaceStrategy === undefined) return;
+    const { runs } = yield* threads
+      .getThreadRecords(successorThreadId, ["runs"])
+      .pipe(Effect.mapError(unavailable));
+    const run = runs.find(
+      (candidate) =>
+        candidate.status === "preparing" && candidate.workspacePreparation !== undefined,
+    );
+    if (run === undefined) return;
+    yield* (yield* ThreadLaunch.ThreadLaunchService).prepareRun({
+      commandId: handoffCommandId,
+      threadId: successorThreadId,
+      runId: run.id,
+    });
+  });
   // A retry with the same key replays the handoff it already made.
   const replayed = yield* readSuccessor;
-  if (replayed !== undefined) return replayed;
+  if (replayed !== undefined) {
+    yield* prepareSuccessor();
+    return replayed;
+  }
   const { subagents } = yield* threads
     .getThreadRecords(ownerThreadId, ["subagents"], { subagentChildThreadIds: [caller.id] })
     .pipe(Effect.mapError(unavailable));
@@ -202,6 +227,7 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
       ...(input.title === undefined ? {} : { title: input.title }),
       message: input.message,
       modelSelection: input.modelSelection,
+      agentExecutionIntent: input.agentExecutionIntent,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       ...(input.workspaceStrategy === undefined
@@ -214,7 +240,9 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
       ),
     );
   // No successor: the task ended or was cancelled first, so the launch makes a top-level thread.
-  return yield* readSuccessor;
+  const successor = yield* readSuccessor;
+  if (successor !== undefined) yield* prepareSuccessor();
+  return successor;
 });
 
 const launchThread = McpToolAccess.startsThreads(
@@ -396,6 +424,11 @@ const launchThread = McpToolAccess.startsThreads(
           )?.supportedRuntimeModes,
         });
       }
+      const agentExecutionIntent: AgentExecutionIntent = {
+        modelSelection: input.modelSelection ?? modelSelection,
+        ...(input.interactionMode === "plan" ? { interactionMode: "plan" as const } : {}),
+        ...(input.planningPurpose === undefined ? {} : { planningPurpose: input.planningPurpose }),
+      };
       if (input.scratch !== true) {
         const successor = yield* handOffDelegatedTask({
           context,
@@ -405,6 +438,7 @@ const launchThread = McpToolAccess.startsThreads(
           message: input.message,
           attachmentCount: attachments.length,
           modelSelection,
+          agentExecutionIntent,
           runtimeMode: startedRuntimeMode,
           interactionMode,
           workspaceStrategy: input.workspaceStrategy === undefined ? undefined : strategy,
@@ -425,13 +459,7 @@ const launchThread = McpToolAccess.startsThreads(
         projectId,
         title: input.title,
         modelSelection,
-        agentExecutionIntent: {
-          modelSelection: input.modelSelection ?? modelSelection,
-          ...(input.interactionMode === "plan" ? { interactionMode: "plan" as const } : {}),
-          ...(input.planningPurpose === undefined
-            ? {}
-            : { planningPurpose: input.planningPurpose }),
-        },
+        agentExecutionIntent,
         runtimeMode: startedRuntimeMode,
         interactionMode,
         workspaceStrategy: strategy ?? { type: "root" },
