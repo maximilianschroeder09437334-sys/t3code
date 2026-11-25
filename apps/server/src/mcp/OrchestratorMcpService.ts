@@ -2717,6 +2717,18 @@ const make = Effect.gen(function* () {
       );
       const inherited = parent?.thread.modelSelection;
       const searchTerms = input.search?.toLowerCase().split(/\s+/).filter(Boolean) ?? [];
+      // Snapshots list instances any project enables; delegate_task checks the caller's project.
+      const isEnabled = (provider: ServerProvider) =>
+        provider.enabled &&
+        (parent === undefined ||
+          resolveProjectProviderInstanceEnabled(
+            settings,
+            parent.thread.projectId,
+            provider.instanceId,
+          ));
+      const disabledProviders = providers
+        .filter((provider) => !isEnabled(provider))
+        .map((provider) => provider.instanceId);
       return {
         parentThreadId: parent?.thread.id ?? null,
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
@@ -2731,17 +2743,10 @@ const make = Effect.gen(function* () {
           ) ?? [],
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
-        providers: providers.map((provider) => {
-          // Snapshots list instances any project enables; delegate_task checks the caller's project.
-          const enabledForCaller =
-            parent === undefined ||
-            resolveProjectProviderInstanceEnabled(
-              settings,
-              parent.thread.projectId,
-              provider.instanceId,
-            );
+        // A disabled instance is only its id: its snapshot holds placeholders.
+        providers: providers.filter(isEnabled).map((provider) => {
           const constraints = providerConstraints(
-            enabledForCaller ? provider : { ...provider, enabled: false },
+            provider,
             orchestrationCapableInstanceIds.has(provider.instanceId),
           );
           const { listed, omitted } = listCapabilityModels({
@@ -2780,6 +2785,7 @@ const make = Effect.gen(function* () {
             constraints: [...constraints],
           };
         }),
+        ...(disabledProviders.length === 0 ? {} : { disabledProviders }),
         features: {
           appOwnedSubagents: true,
           asyncPolling: true,

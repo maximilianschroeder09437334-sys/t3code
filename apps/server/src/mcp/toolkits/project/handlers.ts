@@ -9,7 +9,6 @@ import {
   HOOK_EVENT_COVERAGE,
   type AgentExecutionIntent,
   type ModelSelection,
-  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type ProviderInteractionMode,
   type RuntimeMode,
 } from "@t3tools/contracts";
@@ -129,35 +128,23 @@ const access = Effect.gen(function* () {
   return yield* Project.ProjectService;
 });
 /**
- * A delegated child that launches its successor hands its open task over: the successor starts as
- * a child of the same parent and the parent's task, wait, cancel and result follow it. Returns
- * undefined when the caller has no open task here, so the launch makes a top-level thread.
+ * A delegated child's open task here, or the successor a retry of its launch already made.
+ * Undefined when the caller has no open task here, so the launch makes a top-level thread.
  */
-const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (input: {
-  readonly context: Caller;
-  readonly commandId: CommandId;
-  readonly projectId: ProjectId;
-  readonly title: string | undefined;
-  readonly message: string | undefined;
-  readonly attachmentCount: number;
-  readonly modelSelection: ModelSelection;
-  /** The selection the agent chose, as a launch stamps it; the successor's runs need it. */
-  readonly agentExecutionIntent: AgentExecutionIntent;
-  readonly runtimeMode: RuntimeMode;
-  readonly interactionMode: ProviderInteractionMode;
-  readonly workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
-}) {
-  const { caller, threads } = input.context;
+const findDelegatedHandoff = Effect.fn("mcp.findDelegatedHandoff")(function* (
+  context: Caller,
+  commandId: CommandId,
+) {
+  const { caller, threads } = context;
   if (
     caller === undefined ||
     caller.lineage.relationshipToParent !== "subagent" ||
-    caller.forkedFrom?.type !== "node" ||
-    caller.projectId !== input.projectId
+    caller.forkedFrom?.type !== "node"
   )
     return undefined;
   const ownerThreadId = caller.ownerThreadId ?? caller.lineage.parentThreadId;
   if (ownerThreadId === null) return undefined;
-  const handoffCommandId = CommandId.make(`${input.commandId}:handoff`);
+  const handoffCommandId = CommandId.make(`${commandId}:handoff`);
   const successorThreadId = IdAllocator.derive.delegatedTaskThread({
     commandId: handoffCommandId,
   });
@@ -165,31 +152,9 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
     Effect.mapError(unavailable),
     Effect.map((shell) => (shell === null || shell.deletedAt !== null ? undefined : shell)),
   );
-  // With a workspace strategy the successor's first run waits in "preparing" until someone
-  // prepares it, as delegate_task does after its dispatch. prepareRun runs once per command and
-  // skips a run that is no longer preparing, so a replay may call it again.
-  const prepareSuccessor = Effect.fn("mcp.handOffDelegatedTask.prepareSuccessor")(function* () {
-    if (input.workspaceStrategy === undefined) return;
-    const { runs } = yield* threads
-      .getThreadRecords(successorThreadId, ["runs"])
-      .pipe(Effect.mapError(unavailable));
-    const run = runs.find(
-      (candidate) =>
-        candidate.status === "preparing" && candidate.workspacePreparation !== undefined,
-    );
-    if (run === undefined) return;
-    yield* (yield* ThreadLaunch.ThreadLaunchService).prepareRun({
-      commandId: handoffCommandId,
-      threadId: successorThreadId,
-      runId: run.id,
-    });
-  });
   // A retry with the same key replays the handoff it already made.
   const replayed = yield* readSuccessor;
-  if (replayed !== undefined) {
-    yield* prepareSuccessor();
-    return replayed;
-  }
+  if (replayed !== undefined) return { replayed, readSuccessor } as const;
   const { subagents } = yield* threads
     .getThreadRecords(ownerThreadId, ["subagents"], { subagentChildThreadIds: [caller.id] })
     .pipe(Effect.mapError(unavailable));
@@ -209,45 +174,71 @@ const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (in
         (a.startedAt === null ? 0 : DateTime.toEpochMillis(a.startedAt)),
     )[0];
   if (task === undefined) return undefined;
+  return {
+    replayed: undefined,
+    readSuccessor,
+    callerId: caller.id,
+    ownerThreadId,
+    handoffCommandId,
+    taskId: task.id,
+  } as const;
+});
+
+/**
+ * A delegated child that launches its successor hands its open task over: the successor starts as
+ * a child of the same parent, in the caller's own project and checkout, and the parent's task,
+ * wait, cancel and result follow it. Returns undefined when the task ended first, so the launch
+ * makes a top-level thread.
+ */
+const handOffDelegatedTask = Effect.fn("mcp.handOffDelegatedTask")(function* (
+  handoff: NonNullable<Effect.Success<ReturnType<typeof findDelegatedHandoff>>>,
+  input: {
+    readonly context: Caller;
+    readonly title: string | undefined;
+    readonly message: string | undefined;
+    readonly attachmentCount: number;
+    readonly modelSelection: ModelSelection;
+    /** The selection the agent chose, as a launch stamps it; the successor's runs need it. */
+    readonly agentExecutionIntent: AgentExecutionIntent;
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+  },
+) {
+  if (handoff.replayed !== undefined) return handoff.replayed;
   if (input.attachmentCount > 0 || input.message === undefined || input.message.trim() === "")
     return yield* new OrchestratorMcpFailure({
       code: "invalid_request",
       message:
         "A delegated child's successor needs a message and takes no attachments: it continues your task under your parent. Send attachments after it starts.",
     });
-  yield* threads
+  yield* input.context.threads
     .dispatch({
       type: "delegated_task.handoff",
-      commandId: handoffCommandId,
+      commandId: handoff.handoffCommandId,
       createdBy: "agent",
       creationSource: "mcp",
-      parentThreadId: ownerThreadId,
-      taskId: task.id,
-      fromChildThreadId: caller.id,
+      parentThreadId: handoff.ownerThreadId,
+      taskId: handoff.taskId,
+      fromChildThreadId: handoff.callerId,
       ...(input.title === undefined ? {} : { title: input.title }),
       message: input.message,
       modelSelection: input.modelSelection,
       agentExecutionIntent: input.agentExecutionIntent,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
-      ...(input.workspaceStrategy === undefined
-        ? {}
-        : { workspaceStrategy: input.workspaceStrategy }),
     })
     .pipe(
       Effect.catch((error) =>
-        Effect.logInfo("mcp.thread-launch.handoff-refused", { taskId: task.id, error }),
+        Effect.logInfo("mcp.thread-launch.handoff-refused", { taskId: handoff.taskId, error }),
       ),
     );
   // No successor: the task ended or was cancelled first, so the launch makes a top-level thread.
-  const successor = yield* readSuccessor;
-  if (successor !== undefined) yield* prepareSuccessor();
-  return successor;
+  return yield* handoff.readSuccessor;
 });
 
 const launchThread = McpToolAccess.startsThreads(
   (input: Tool.Parameters<typeof ProjectToolkit.tools.t3_thread_launch>) => input,
-  (input, { runtimeMode, interactionMode, linkOrigin }) =>
+  (request, { runtimeMode, interactionMode, linkOrigin }) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const context = yield* readCaller();
@@ -256,9 +247,24 @@ const launchThread = McpToolAccess.startsThreads(
       // from the caller and the key, and the launch service replays a
       // command it already accepted.
       const commandId =
-        input.clientRequestId === undefined
+        request.clientRequestId === undefined
           ? yield* newCommandId()
-          : yield* launchCommandId(scope.requestNamespace, input.clientRequestId);
+          : yield* launchCommandId(scope.requestNamespace, request.clientRequestId);
+      // A delegated child's successor stays in the child's project and checkout, so its result
+      // reaches the parent; another project, scratch or workspace would make a top-level thread.
+      const handoff = yield* findDelegatedHandoff(context, commandId);
+      const {
+        projectId: _projectId,
+        scratch: _scratch,
+        workspaceStrategy: _workspaceStrategy,
+        ...sameWorkspace
+      } = request;
+      const input: typeof request = handoff === undefined ? request : sameWorkspace;
+      const workspaceIgnored =
+        handoff !== undefined &&
+        (request.projectId !== undefined ||
+          request.scratch !== undefined ||
+          request.workspaceStrategy !== undefined);
       const threadId = ThreadId.make(commandId);
       const messageId = MessageId.make(commandId);
       const attachments = input.attachments ?? [];
@@ -429,11 +435,9 @@ const launchThread = McpToolAccess.startsThreads(
         ...(input.interactionMode === "plan" ? { interactionMode: "plan" as const } : {}),
         ...(input.planningPurpose === undefined ? {} : { planningPurpose: input.planningPurpose }),
       };
-      if (input.scratch !== true) {
-        const successor = yield* handOffDelegatedTask({
+      if (handoff !== undefined) {
+        const successor = yield* handOffDelegatedTask(handoff, {
           context,
-          commandId,
-          projectId,
           title: input.title,
           message: input.message,
           attachmentCount: attachments.length,
@@ -441,7 +445,6 @@ const launchThread = McpToolAccess.startsThreads(
           agentExecutionIntent,
           runtimeMode: startedRuntimeMode,
           interactionMode,
-          workspaceStrategy: input.workspaceStrategy === undefined ? undefined : strategy,
         });
         if (successor !== undefined)
           return {
@@ -451,6 +454,9 @@ const launchThread = McpToolAccess.startsThreads(
             modelSelection: successor.modelSelection,
             runId: null,
             status: null,
+            ...(workspaceIgnored
+              ? { workspace: "same as caller; projectId/scratch/workspaceStrategy ignored" }
+              : {}),
           };
       }
       const result = yield* ThreadMessageIntake.launchThread({

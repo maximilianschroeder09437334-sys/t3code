@@ -2306,12 +2306,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 ...entry,
                 frame: {
                   ...entry.frame,
-                  params: { ...entry.frame["params"], threadSource: "subagent" },
+                  params: {
+                    ...entry.frame["params"],
+                    threadSource: "subagent",
+                    config: {
+                      ...(entry.frame["params"]["config"] as object),
+                      "features.memories": false,
+                    },
+                  },
                 },
               }
             : entry,
         );
       const threadSources: Array<unknown> = [];
+      const memories: Array<unknown> = [];
       const harness = yield* makeCodexReplayHarness(
         makeCodexReplayTranscript({ scenario, entries: [...preamble, ...childStart] }),
         () => Effect.void,
@@ -2319,6 +2327,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           Effect.sync(() => {
             if (method === "thread/start" && Predicate.isObject(params)) {
               threadSources.push(params["threadSource"]);
+              memories.push(
+                Predicate.isObject(params["config"])
+                  ? params["config"]["features.memories"]
+                  : undefined,
+              );
             }
           }),
       );
@@ -2331,6 +2344,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
       });
       assert.deepEqual(threadSources, [undefined, "subagent"]);
+      // R4: owners keep Codex memories, delegated children start without them.
+      assert.deepEqual(memories, [undefined, false]);
     }).pipe(
       Effect.scoped,
       Effect.provide(

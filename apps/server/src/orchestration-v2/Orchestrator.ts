@@ -10327,7 +10327,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.agentExecutionIntent === undefined
           ? {}
           : { agentExecutionIntent: command.agentExecutionIntent }),
-        ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
+        // The successor continues in the old child's own project and checkout.
+        projectId: from.projectId,
+        branch: from.branch,
+        worktreePath: from.worktreePath,
         // Proves the launch, so the successor can take over the old child's own children.
         launchedBy: { threadId: command.fromChildThreadId, commandId: command.commandId, at: now },
       };
@@ -10391,10 +10394,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           text: command.message,
           attachments: [],
           modelSelection: command.modelSelection,
-          dispatchMode:
-            command.workspaceStrategy === undefined
-              ? { type: "start_immediately" }
-              : { type: "defer_start", workspaceStrategy: command.workspaceStrategy },
+          dispatchMode: { type: "start_immediately" },
         },
         events,
         effects,
@@ -16034,19 +16034,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return {
       transferId,
       state: "effective",
-      migrated: moved.map((task) => ({
-        childThreadId: task.childThreadId,
-        taskId: task.id,
-        anchorTaskId: task.transferredTo!.taskId,
+      migrated: [...current].map(([childThreadId, task]) => ({
+        childThreadId,
+        taskId: task.transferredTo!.taskId,
       })),
       // A task the move closed is disposed; only a result the predecessor received stays delivered.
-      alreadyDeliveredToPredecessor: [...current.values()].flatMap((task) =>
-        task.childThreadId !== null &&
-        (task.completionDelivery?.state === "delivered" ||
-          task.completionDelivery?.state === "acknowledged")
-          ? [task.childThreadId]
-          : [],
-      ),
+      alreadyDeliveredToPredecessor: [...current.values()].filter(
+        (task) =>
+          task.completionDelivery?.state === "delivered" ||
+          task.completionDelivery?.state === "acknowledged",
+      ).length,
       notMigrated,
     } satisfies OrchestratorMcpThreadTakeoverResult;
   });

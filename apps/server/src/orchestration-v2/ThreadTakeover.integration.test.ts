@@ -226,8 +226,11 @@ type TakeoverOutcome =
       readonly ok: true;
       readonly result: {
         readonly transferId: string;
-        readonly alreadyDeliveredToPredecessor: ReadonlyArray<ThreadId>;
-        readonly migrated: ReadonlyArray<{ readonly childThreadId: ThreadId }>;
+        readonly alreadyDeliveredToPredecessor: number;
+        readonly migrated: ReadonlyArray<{
+          readonly childThreadId: ThreadId;
+          readonly taskId: NodeId;
+        }>;
       };
     }
   | { readonly ok: false; readonly code: string; readonly message: string };
@@ -863,7 +866,8 @@ it.layer(layerTest)("thread takeover attempt and commit", (it) => {
         (task) => task.id === delivered.id,
       )!;
       assert.deepEqual(after.completionDelivery, before.completionDelivery);
-      assert.isTrue(outcome.ok && outcome.result.alreadyDeliveredToPredecessor.includes(child));
+      // R4: a count, no thread list.
+      assert.isTrue(outcome.ok && outcome.result.alreadyDeliveredToPredecessor === 1);
     }),
   );
 
@@ -1522,13 +1526,9 @@ it.layer(layerForwardTestWithQuestions)("thread takeover guard, forward and reco
       const s = yield* setup("t11-anchor-cancel");
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const outcome = yield* takeover(s.predecessor, s.successor);
-      const anchorTaskId = outcome.ok
-        ? (
-            outcome.result as unknown as {
-              readonly migrated: ReadonlyArray<{ readonly anchorTaskId: NodeId }>;
-            }
-          ).migrated[0]!.anchorTaskId
-        : s.taskId;
+      // R4: the migrated entry's taskId is the anchor, the id the successor cancels with.
+      assert.isTrue(outcome.ok && !("anchorTaskId" in outcome.result.migrated[0]!));
+      const anchorTaskId = outcome.ok ? outcome.result.migrated[0]!.taskId : s.taskId;
       yield* orchestrator
         .cancelDelegatedTask({
           parentThreadId: s.successor,
@@ -3927,6 +3927,31 @@ it.layer(layerTest)("delegated child handoff", (it) => {
       );
       assert.equal(item?.type === "subagent" ? item.childThreadId : null, successor);
       assert.include(item?.type === "subagent" ? item.progress : "", "Handed off to successor");
+    }),
+  );
+
+  it.effect("R4: the successor works in the old child's project and checkout", () =>
+    Effect.gen(function* () {
+      const s = yield* setup("r4-workspace");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("r4-workspace-child-worktree"),
+        threadId: s.child,
+        branch: "feature/child",
+        worktreePath: "/worktrees/child",
+      });
+      const task = yield* handOff(s.predecessor, s.taskId, s.child, "r4-workspace-handoff");
+      const child = (yield* orchestrator.getThreadProjection(s.child)).thread;
+      const successor = (yield* orchestrator.getThreadProjection(task.childThreadId!)).thread;
+      assert.equal(successor.projectId, child.projectId);
+      assert.equal(successor.branch, "feature/child");
+      assert.equal(successor.worktreePath, "/worktrees/child");
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(task.childThreadId!)).runs.length,
+        1,
+        "the successor starts at once, with no workspace to prepare",
+      );
     }),
   );
 

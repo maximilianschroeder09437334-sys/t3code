@@ -3985,10 +3985,10 @@ const OrchestrationV2InternalCommand = Schema.Union([
     ),
   }),
   /**
-   * A delegated child hands its open task to a successor it launches: the successor starts as a
-   * child of the same parent and the task is rebound to it, so the parent's status, wait, cancel
-   * and single final result follow the successor. The ids derive from `commandId`, so a retry
-   * creates nothing new; a task that ended or was already handed off is refused.
+   * A delegated child hands its open task to a successor it launches: a child of the same parent,
+   * in the old child's project and checkout, that the parent's status, wait, cancel and result
+   * follow. Ids derive from `commandId`, so a retry creates nothing new; a task that ended or was
+   * already handed off is refused.
    */
   Schema.Struct({
     type: Schema.Literal("delegated_task.handoff"),
@@ -4004,7 +4004,6 @@ const OrchestrationV2InternalCommand = Schema.Union([
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
-    workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   /**

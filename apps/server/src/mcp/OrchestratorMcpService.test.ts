@@ -2181,7 +2181,18 @@ describe("OrchestratorMcpService provider resolution", () => {
           const byId = new Map(
             capabilities.providers.map((provider) => [provider.providerInstanceId, provider]),
           );
-          for (const provider of providers) {
+          // R4: a disabled instance is only its id.
+          const disabledIds: ReadonlyArray<ProviderInstanceId> = [
+            projectDisabledInstanceId,
+            disabledAntigravityInstanceId,
+            disabledWithoutAdapterInstanceId,
+            forkOnlyInstanceId,
+          ];
+          assert.sameMembers([...(capabilities.disabledProviders ?? [])], [...disabledIds]);
+          for (const instanceId of disabledIds) assert.isUndefined(byId.get(instanceId));
+          const enabled = (provider: { readonly instanceId: ProviderInstanceId }) =>
+            !disabledIds.includes(provider.instanceId);
+          for (const provider of providers.filter(enabled)) {
             assert.deepEqual(
               byId.get(provider.instanceId)?.models.map((model) => model.id),
               provider.models.map((model) => model.slug),
@@ -2201,7 +2212,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             ],
           }));
           const refreshed = yield* service.capabilities(scope);
-          for (const provider of providers) {
+          for (const provider of providers.filter(enabled)) {
             assert.deepEqual(
               refreshed.providers
                 .find((entry) => entry.providerInstanceId === provider.instanceId)
@@ -2226,36 +2237,6 @@ describe("OrchestratorMcpService provider resolution", () => {
             assert.isTrue(entry!.canRunCrossProviderChildTask);
             assert.deepEqual(entry!.constraints, []);
           }
-
-          const disabled = byId.get(disabledAntigravityInstanceId);
-          assert.isDefined(disabled);
-          assert.isFalse(disabled!.canRunChildTask);
-          assert.isFalse(disabled!.canRunCrossProviderChildTask);
-          assert.deepEqual(disabled!.constraints, ["Provider instance is disabled."]);
-
-          const projectDisabled = byId.get(projectDisabledInstanceId);
-          assert.isDefined(projectDisabled);
-          assert.isFalse(projectDisabled!.canRunChildTask);
-          assert.deepEqual(projectDisabled!.constraints, ["Provider instance is disabled."]);
-
-          const disabledWithoutAdapter = byId.get(disabledWithoutAdapterInstanceId);
-          assert.isDefined(disabledWithoutAdapter);
-          assert.isFalse(disabledWithoutAdapter!.canRunChildTask);
-          assert.isFalse(disabledWithoutAdapter!.canRunCrossProviderChildTask);
-          assert.deepEqual(disabledWithoutAdapter!.constraints, [
-            "No V2 provider adapter is registered.",
-            "Provider instance is disabled.",
-          ]);
-
-          const fork = byId.get(forkOnlyInstanceId);
-          assert.isDefined(fork);
-          assert.isFalse(fork!.canRunChildTask);
-          assert.isFalse(fork!.canRunCrossProviderChildTask);
-          assert.deepEqual(fork!.constraints, [
-            "No V2 provider adapter is registered.",
-            "Driver 'forkOnly' is not registered in this build.",
-            "Provider instance is disabled.",
-          ]);
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
   );

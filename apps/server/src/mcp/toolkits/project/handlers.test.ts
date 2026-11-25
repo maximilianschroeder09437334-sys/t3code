@@ -123,7 +123,6 @@ const clientLaunchHarness = (input: {
 }) => {
   const successors = new Map<ThreadId, OrchestrationV2ThreadShell>();
   /** A successor started with a workspace strategy waits in "preparing", as the orchestrator's does. */
-  const successorRuns = new Map<ThreadId, ReadonlyArray<unknown>>();
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = fixtureSelection;
   // The project's own default model, which a test can clear between launches.
@@ -198,10 +197,9 @@ const clientLaunchHarness = (input: {
                 } as unknown as OrchestrationV2ThreadShell),
           );
         }),
-      getThreadRecords: (threadId) =>
+      getThreadRecords: () =>
         Effect.succeed({
           subagents: input.tasks ?? [],
-          runs: successorRuns.get(threadId) ?? [],
         } as never),
       // The orchestrator's handoff, reduced: an open task bound to the caller moves to the successor.
       dispatch: (command) => {
@@ -224,14 +222,6 @@ const clientLaunchHarness = (input: {
               modelSelection,
               deletedAt: null,
             } as unknown as OrchestrationV2ThreadShell);
-            if (command.workspaceStrategy !== undefined)
-              successorRuns.set(id, [
-                {
-                  id: RunId.make(`run:${id}`),
-                  status: "preparing",
-                  workspacePreparation: command.workspaceStrategy,
-                },
-              ]);
           }
         }
         return Effect.succeed({ sequence: 1 } as never);
@@ -1634,10 +1624,15 @@ describe("t3_thread_launch from a delegated child", () => {
     readonly callerShell?: Partial<OrchestrationV2ThreadShell>;
     readonly tasks: Array<HandoffTask>;
     readonly keys: ReadonlyArray<string>;
-    readonly workspaceStrategy?: {
-      readonly type: "worktree";
-      readonly baseRef: string;
-      readonly startFromOrigin: boolean;
+    /** Workspace fields a child's successor ignores. */
+    readonly workspace?: {
+      readonly projectId?: ProjectId;
+      readonly scratch?: boolean;
+      readonly workspaceStrategy?: {
+        readonly type: "worktree";
+        readonly baseRef: string;
+        readonly startFromOrigin: boolean;
+      };
     };
   }) =>
     Effect.gen(function* () {
@@ -1660,20 +1655,22 @@ describe("t3_thread_launch from a delegated child", () => {
           ),
         ),
       );
+      const results: Array<unknown> = [];
       for (const key of input.keys)
-        yield* toolkit
-          .handle("t3_thread_launch", {
-            projectId,
-            title: "Successor",
-            message: "Continue the migration.",
-            modelSelection,
-            clientRequestId: key,
-            ...(input.workspaceStrategy === undefined
-              ? {}
-              : { workspaceStrategy: input.workspaceStrategy }),
-          })
-          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        results.push(
+          (yield* toolkit
+            .handle("t3_thread_launch", {
+              projectId,
+              title: "Successor",
+              message: "Continue the migration.",
+              modelSelection,
+              clientRequestId: key,
+              ...input.workspace,
+            })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies))).at(-1)?.result,
+        );
       return {
+        results,
         launched,
         handoffs: dispatched.filter((command) => command.type === "delegated_task.handoff"),
         prepared,
@@ -1698,24 +1695,30 @@ describe("t3_thread_launch from a delegated child", () => {
     }),
   );
 
-  it.effect("R2d: a successor with a workspace strategy has its preparing run prepared", () =>
+  it.effect("R4: a successor ignores another project, scratch and workspace strategy", () =>
     Effect.gen(function* () {
       const tasks = [openTask()];
-      const { launched, handoffs, prepared } = yield* launchFrom({
+      const { results, launched, handoffs, prepared } = yield* launchFrom({
         callerShell: childShell,
         tasks,
-        // The same key twice: a replay asks again, and prepareRun runs once per command.
         keys: ["one", "one"],
-        workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: false },
+        workspace: {
+          projectId: ProjectId.make("project:other"),
+          scratch: true,
+          workspaceStrategy: { type: "worktree", baseRef: "main", startFromOrigin: false },
+        },
       });
+      // The successor stays in the caller's project and checkout, so the parent gets its result.
       expect(handoffs).toHaveLength(1);
+      expect(handoffs[0]).not.toHaveProperty("workspaceStrategy");
       expect(launched).toHaveLength(0);
-      const successor = tasks[0]!.childThreadId!;
-      const handoffCommandId = (handoffs[0] as unknown as { readonly commandId: string }).commandId;
-      expect(prepared).toEqual([
-        { commandId: handoffCommandId, threadId: successor, runId: `run:${successor}` },
-        { commandId: handoffCommandId, threadId: successor, runId: `run:${successor}` },
-      ]);
+      expect(prepared).toEqual([]);
+      expect(tasks[0]?.childThreadId).not.toBe(childThreadId);
+      for (const result of results)
+        expect(result).toMatchObject({
+          threadId: tasks[0]?.childThreadId,
+          workspace: "same as caller; projectId/scratch/workspaceStrategy ignored",
+        });
     }),
   );
 

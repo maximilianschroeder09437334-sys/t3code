@@ -715,6 +715,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   providers: Schema.Array(OrchestratorMcpProviderCapability),
+  /** Instances disabled here or for the caller's project; they cannot run a child task. */
+  disabledProviders: Schema.optional(Schema.Array(ProviderInstanceId)),
   features: Schema.Struct({
     appOwnedSubagents: Schema.Boolean,
     asyncPolling: Schema.Boolean,
@@ -734,11 +736,10 @@ export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabiliti
 export const OrchestratorMcpThreadTakeoverResult = Schema.Struct({
   transferId: Schema.String,
   state: Schema.Literals(["effective", "timed_out"]),
-  migrated: Schema.Array(
-    Schema.Struct({ childThreadId: ThreadId, taskId: NodeId, anchorTaskId: NodeId }),
-  ),
-  /** Children whose current result the predecessor already received; the successor records it without a wake. */
-  alreadyDeliveredToPredecessor: Schema.Array(ThreadId),
+  /** One per moved child; `taskId` is its task on the successor, for task_status and task_cancel. */
+  migrated: Schema.Array(Schema.Struct({ childThreadId: ThreadId, taskId: NodeId })),
+  /** How many moved children's current result the predecessor already received; no wake. */
+  alreadyDeliveredToPredecessor: NonNegativeInt,
   notMigrated: Schema.Array(
     Schema.Struct({
       taskId: NodeId,
