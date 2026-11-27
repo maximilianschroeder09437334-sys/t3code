@@ -433,7 +433,13 @@ export const layer: Layer.Layer<
       if (prior?.tokenUsage && usage.updatedAt < prior.tokenUsage.updatedAt) return [];
       const notices: Array<OrchestrationV2DomainEvent> = [];
       const now = yield* DateTime.now;
-      for (const threshold of [CONTEXT_HANDOFF_NUDGE, CONTEXT_ROLLOVER_LIMIT] as const) {
+      // Delegated and subagent threads finish their task instead of handing off at the
+      // 150k nudge; the 250k rollover still applies to them.
+      const thresholds =
+        records.thread.lineage.parentThreadId === null
+          ? ([CONTEXT_HANDOFF_NUDGE, CONTEXT_ROLLOVER_LIMIT] as const)
+          : ([CONTEXT_ROLLOVER_LIMIT] as const);
+      for (const threshold of thresholds) {
         if (usage.usedTokens < threshold) continue;
         const id = contextRolloverNoticeId(provider, threshold);
         if (
