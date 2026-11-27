@@ -1,4 +1,9 @@
-import type { EnvironmentId, ThreadId, ThreadNote, ThreadNotesListResult } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ThreadId,
+  ThreadNote,
+  ThreadNotesListResult,
+} from "@t3tools/contracts";
 
 import { useClientSettings } from "../../hooks/useSettings";
 import { orchestrationEnvironment } from "../../state/orchestration";

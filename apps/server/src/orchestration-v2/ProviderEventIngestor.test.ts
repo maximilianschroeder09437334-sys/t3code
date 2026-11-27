@@ -243,134 +243,142 @@ function threadCreatedEvent(
 const layer = it.layer(layerTest);
 
 const contextNoticeSampler = Effect.fn(function* (key: string, asSubagent: boolean) {
-      const now = yield* DateTime.now;
-      const sink = yield* EventSink.EventSinkV2;
-      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
-      const ids = yield* IdAllocator.IdAllocatorV2;
-      const nativeId = `${key}-native`;
-      const parent = asSubagent
-        ? yield* threadCreatedEvent(now, { nativeThreadId: `${key}-parent-native` })
-        : undefined;
-      const created = yield* threadCreatedEvent(now, {
-        nativeThreadId: nativeId,
-        ...(parent === undefined ? {} : { parentThreadId: parent.threadId }),
-      });
-      if (created.type !== "thread.created") throw new Error("Expected thread creation");
-      const threadId = created.threadId;
-      const providerThreadId = created.payload.activeProviderThreadId!;
-      const providerSessionId = ProviderSessionId.make(`${key}-session`);
-      const runId = RunId.make(`${key}-run`);
-      const attemptId = RunAttemptId.make(`${key}-attempt`);
-      const nodeId = NodeId.make(`${key}-root`);
-      const turnId = ProviderTurnId.make(`${key}-turn`);
-      yield* sink.write({
-        events: [
-          ...(parent === undefined ? [] : [parent]),
-          created,
-          {
-            id: yield* ids.allocate.event({ threadId }),
-            threadId,
-            occurredAt: now,
-            type: "provider-thread.updated",
-            payload: {
-              id: providerThreadId,
-              driver: CODEX_DRIVER,
-              providerInstanceId: modelSelection.instanceId,
-              providerSessionId,
-              appThreadId: threadId,
-              ownerNodeId: null,
-              nativeThreadRef: { driver: CODEX_DRIVER, nativeId, strength: "strong" },
-              nativeConversationHeadRef: null,
-              status: "active",
-              firstRunOrdinal: 1,
-              lastRunOrdinal: 1,
-              handoffIds: [],
-              forkedFrom: null,
-              createdAt: now,
-              updatedAt: now,
-            },
+  const now = yield* DateTime.now;
+  const sink = yield* EventSink.EventSinkV2;
+  const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+  const ids = yield* IdAllocator.IdAllocatorV2;
+  const nativeId = `${key}-native`;
+  const parent = asSubagent
+    ? yield* threadCreatedEvent(now, { nativeThreadId: `${key}-parent-native` })
+    : undefined;
+  if (parent !== undefined) {
+    if (parent.type !== "thread.created") throw new Error("Expected thread creation");
+    yield* sink.write({ events: [parent] });
+  }
+  const fresh = yield* threadCreatedEvent(now, {
+    nativeThreadId: nativeId,
+    ...(parent === undefined ? {} : { parentThreadId: parent.threadId }),
+  });
+  if (fresh.type !== "thread.created") throw new Error("Expected thread creation");
+  // A subagent lives in its parent's project.
+  const created =
+    parent?.type === "thread.created"
+      ? { ...fresh, payload: { ...fresh.payload, projectId: parent.payload.projectId } }
+      : fresh;
+  const threadId = created.threadId;
+  const providerThreadId = created.payload.activeProviderThreadId!;
+  const providerSessionId = ProviderSessionId.make(`${key}-session`);
+  const runId = RunId.make(`${key}-run`);
+  const attemptId = RunAttemptId.make(`${key}-attempt`);
+  const nodeId = NodeId.make(`${key}-root`);
+  const turnId = ProviderTurnId.make(`${key}-turn`);
+  yield* sink.write({
+    events: [
+      created,
+      {
+        id: yield* ids.allocate.event({ threadId }),
+        threadId,
+        occurredAt: now,
+        type: "provider-thread.updated",
+        payload: {
+          id: providerThreadId,
+          driver: CODEX_DRIVER,
+          providerInstanceId: modelSelection.instanceId,
+          providerSessionId,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: { driver: CODEX_DRIVER, nativeId, strength: "strong" },
+          nativeConversationHeadRef: null,
+          status: "active",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+      {
+        id: yield* ids.allocate.event({ threadId }),
+        threadId,
+        runId,
+        occurredAt: now,
+        type: "run.created",
+        payload: {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId: modelSelection.instanceId,
+          modelSelection,
+          providerThreadId,
+          userMessageId: MessageId.make(`${key}-message`),
+          rootNodeId: nodeId,
+          activeAttemptId: attemptId,
+          status: "running",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      },
+      {
+        id: yield* ids.allocate.event({ threadId }),
+        threadId,
+        runId,
+        occurredAt: now,
+        type: "run-attempt.created",
+        payload: {
+          id: attemptId,
+          nativeThreadId: nativeId,
+          runId,
+          attemptOrdinal: 1,
+          rootNodeId: nodeId,
+          providerInstanceId: modelSelection.instanceId,
+          providerThreadId,
+          providerTurnId: turnId,
+          reason: "initial",
+          status: "running",
+          startedAt: now,
+          completedAt: null,
+        },
+      },
+    ],
+  });
+  const sample = (usedTokens: number, runAttemptId = attemptId) =>
+    ingestor
+      .ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        runId,
+        event: {
+          type: "provider_turn.updated",
+          driver: CODEX_DRIVER,
+          providerTurn: {
+            id: turnId,
+            providerThreadId,
+            nodeId,
+            runAttemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+            tokenUsage: { usedTokens, updatedAt: DateTime.formatIso(now) },
           },
-          {
-            id: yield* ids.allocate.event({ threadId }),
-            threadId,
-            runId,
-            occurredAt: now,
-            type: "run.created",
-            payload: {
-              id: runId,
-              threadId,
-              ordinal: 1,
-              providerInstanceId: modelSelection.instanceId,
-              modelSelection,
-              providerThreadId,
-              userMessageId: MessageId.make(`${key}-message`),
-              rootNodeId: nodeId,
-              activeAttemptId: attemptId,
-              status: "running",
-              requestedAt: now,
-              startedAt: now,
-              completedAt: null,
-              checkpointId: null,
-              contextHandoffId: null,
-            },
-          },
-          {
-            id: yield* ids.allocate.event({ threadId }),
-            threadId,
-            runId,
-            occurredAt: now,
-            type: "run-attempt.created",
-            payload: {
-              id: attemptId,
-              nativeThreadId: nativeId,
-              runId,
-              attemptOrdinal: 1,
-              rootNodeId: nodeId,
-              providerInstanceId: modelSelection.instanceId,
-              providerThreadId,
-              providerTurnId: turnId,
-              reason: "initial",
-              status: "running",
-              startedAt: now,
-              completedAt: null,
-            },
-          },
-        ],
-      });
-      const sample = (usedTokens: number, runAttemptId = attemptId) =>
-        ingestor
-          .ingestNormalized({
-            providerSessionId,
-            providerInstanceId: modelSelection.instanceId,
-            threadId,
-            runId,
-            event: {
-              type: "provider_turn.updated",
-              driver: CODEX_DRIVER,
-              providerTurn: {
-                id: turnId,
-                providerThreadId,
-                nodeId,
-                runAttemptId,
-                nativeTurnRef: null,
-                ordinal: 1,
-                status: "running",
-                startedAt: now,
-                completedAt: null,
-                tokenUsage: { usedTokens, updatedAt: DateTime.formatIso(now) },
-              },
-            },
-          })
-          .pipe(
-            Effect.map((rows) =>
-              rows.flatMap(({ event }) =>
-                event.type === "turn-item.updated" && event.payload.type === "system_notice"
-                  ? [event.payload.title]
-                  : [],
-              ),
-            ),
-          );
-      return sample;
+        },
+      })
+      .pipe(
+        Effect.map((rows) =>
+          rows.flatMap(({ event }) =>
+            event.type === "turn-item.updated" && event.payload.type === "system_notice"
+              ? [event.payload.title]
+              : [],
+          ),
+        ),
+      );
+  return sample;
 });
 
 layer("running context thresholds", (it) => {
