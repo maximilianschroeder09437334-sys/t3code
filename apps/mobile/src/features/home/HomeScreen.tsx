@@ -8,6 +8,7 @@ import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { LegendListRef } from "@legendapp/list/react-native";
 import { AnimatedLegendList } from "@legendapp/list/reanimated";
 import { THREAD_SIDEBAR_ROW_LAYOUT } from "../threads/threadListAnimations";
+import { homeThreadListMaintainVisibleContentPosition } from "./home-thread-list-sizing";
 import {
   type EnvironmentProject,
   type EnvironmentThreadShell,
@@ -164,6 +165,9 @@ interface HomeScreenProps {
 }
 
 const ESTIMATED_THREAD_LIST_V2_ROW_HEIGHT = 72;
+const HOME_LIST_MAINTAIN_VISIBLE_CONTENT_POSITION = homeThreadListMaintainVisibleContentPosition(
+  Platform.OS,
+);
 // Rows away from the viewport skip their swipe actions (see
 // swipe-row-activation), so render further ahead: a fast fling then reaches
 // rows that are already built instead of rows still being rebuilt.
@@ -832,6 +836,7 @@ export function HomeScreen(props: HomeScreenProps) {
                 keyExtractor={v2KeyExtractor}
                 getItemType={(item) => item.type}
                 itemsAreEqual={threadListV2ListItemsAreEqual}
+                maintainVisibleContentPosition={HOME_LIST_MAINTAIN_VISIBLE_CONTENT_POSITION}
                 estimatedItemSize={ESTIMATED_THREAD_LIST_V2_ROW_HEIGHT}
                 drawDistance={THREAD_LIST_V2_DRAW_DISTANCE}
                 recycleItems
