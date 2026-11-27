@@ -68,7 +68,7 @@ const AttachmentSendTool = Tool.make("t3_thread_send_attachments", {
     messageId: MessageId,
     runId: RunId,
     status: OrchestrationV2RunStatus,
-    /** The target was idle, so the message waits for its next turn instead of waking it. */
+    /** The target was idle: the message runs after its next completed turn instead of waking it. */
     held: Schema.optional(Schema.Boolean),
   }),
 })

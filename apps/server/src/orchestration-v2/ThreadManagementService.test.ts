@@ -1173,7 +1173,7 @@ it.effect(
               ...(threadId === running ? [active(threadId)] : []),
               ...(threadId === holding ? [heldRun] : []),
             ],
-            messages: [{ id: heldRun.userMessageId, senderThreadId: peer, text: "urgent resend" }],
+            messages: [{ id: heldRun.userMessageId, senderThreadId: peer, text: "held notice" }],
             providerTurns:
               threadId === running
                 ? [{ runAttemptId: `attempt:${threadId}`, status: "running" }]
@@ -1193,11 +1193,15 @@ it.effect(
                 else promotions.push(command);
               }).pipe(
                 Effect.andThen(
-                  command.type === "message.dispatch" &&
-                    command.holdWhileIdle === true &&
-                    command.text === "refused hold"
-                    ? Effect.fail("hold refused" as never)
-                    : Effect.die("Fixture stops after observing the dispatch"),
+                  // The held copy's start is refused as if it had already left the queue.
+                  command.type === "queued-run.start" ||
+                    (command.type === "message.dispatch" &&
+                      command.holdWhileIdle === true &&
+                      command.text === "refused hold")
+                    ? Effect.fail("refused" as never)
+                    : command.type === "message.dispatch" && command.text === "urgent reworded"
+                      ? Effect.succeed({} as never)
+                      : Effect.die("Fixture stops after observing the dispatch"),
                 ),
               ),
           }),
@@ -1247,7 +1251,13 @@ it.effect(
         yield* send("launcher order", { createdBy: "agent", threadId: successor });
         yield* send("child report", { createdBy: "agent", senderThreadId: child });
         yield* send("refused hold", { createdBy: "agent" });
-        yield* send("urgent resend", {
+        yield* send("urgent retry", {
+          createdBy: "agent",
+          threadId: holding,
+          messageId: heldRun.userMessageId,
+          urgentReason: "blocking question",
+        });
+        yield* send("urgent reworded", {
           createdBy: "agent",
           threadId: holding,
           urgentReason: "blocking question",
@@ -1282,20 +1292,33 @@ it.effect(
         ["child report", starts, "auto", undefined],
         ["refused hold", held, undefined, true],
         ["refused hold", starts, "auto", undefined],
+        ["urgent retry", starts, "auto", undefined],
+        ["urgent reworded", starts, "auto", undefined],
         ["setting off", starts, "auto", undefined],
       ]);
-      // The fallback is a new command: the refused one already has a receipt.
+      // A refused hold delivers under a new command, since the refused one has a receipt. A
+      // refused urgent start resends under the send's own command, which replays the held copy.
       expect(
-        commands.filter((command) => command.text === "refused hold").map((c) => c.commandId),
+        commands
+          .filter((command) => ["refused hold", "urgent retry"].includes(command.text))
+          .map((c) => c.commandId),
       ).toEqual([
         "command:agent-queued-send:refused hold",
         "command:agent-queued-send:refused hold:deliver-now",
+        "command:agent-queued-send:urgent retry",
       ]);
-      // An urgent resend starts the held copy instead of sending a second message.
+      // An urgent retry starts only its held copy; reworded, the urgent send replaces it.
       expect(promotions).toEqual([
         {
           type: "queued-run.start",
-          commandId: "command:agent-queued-send:urgent resend:urgent",
+          commandId: "command:agent-queued-send:urgent retry:urgent",
+          threadId: holding,
+          runId: heldRun.id,
+          onlyThisRun: true,
+        },
+        {
+          type: "queued-run.cancel",
+          commandId: "command:agent-queued-send:urgent reworded:replaces",
           threadId: holding,
           runId: heldRun.id,
         },

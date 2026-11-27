@@ -17520,6 +17520,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
         const selectedRunId = command.type === "queued-run.start" ? command.runId : undefined;
+        const onlyThisRun = command.type === "queued-run.start" && command.onlyThisRun === true;
         const selectedRun =
           selectedRunId === undefined
             ? undefined
@@ -17533,7 +17534,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             selectedMessage === undefined ||
             selectedMessage.delegatedCompletion !== undefined ||
             selectedMessage.notification !== undefined ||
-            projection.runs.some(isActiveRun)
+            (!onlyThisRun && projection.runs.some(isActiveRun))
           ) {
             return yield* new OrchestratorDispatchError({
               commandId: command.commandId,
@@ -17565,7 +17566,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         }
         const now = yield* DateTime.now;
-        const queued = projection.runs.filter((run) => run.status === "queued");
+        const queued =
+          onlyThisRun && selectedRun !== undefined
+            ? [selectedRun]
+            : projection.runs.filter((run) => run.status === "queued");
         for (const run of queued) {
           yield* emit(
             events,

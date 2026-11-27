@@ -208,7 +208,7 @@ const OrchestratorMcpRunningTaskNext = Schema.String;
 
 // Set on a send held because its target was idle.
 export const ORCHESTRATOR_MCP_HELD_SEND_NEXT =
-  "Queued, target idle: it reads this at its next turn. Do not resend. If it must act now, resend with urgent: true and an urgentReason.";
+  "Held, target idle: it runs as its own turn after the target's next completed turn. Do not resend. To act now, resend with urgent: true and an urgentReason; that replaces it.";
 
 // Optional: linked environments on older versions omit it.
 const OrchestratorMcpExecutedModel = Schema.NullOr(Schema.String).annotate({
@@ -585,7 +585,7 @@ export const OrchestratorMcpThreadSendInput = Schema.Struct({
   urgent: Schema.optional(
     Schema.Boolean.annotate({
       description:
-        "Wake an idle target now. Without it, a message to an idle thread waits for its next turn. Requires urgentReason.",
+        "Wake an idle target now. Otherwise the message runs after the target's next completed turn. Needs urgentReason.",
     }),
   ),
   urgentReason: Schema.optional(
@@ -607,7 +607,7 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
   redirected: Schema.optional(
     Schema.Struct({ fromThreadId: ThreadId, toThreadId: ThreadId, reason: Schema.String }),
   ),
-  /** The target was idle, so the message waits for its next turn instead of waking it. */
+  /** The target was idle: the message runs after its next completed turn instead of waking it. */
   held: Schema.optional(
     Schema.Struct({ reason: Schema.Literal("target_idle"), next: OrchestratorMcpRunningTaskNext }),
   ),

@@ -1159,7 +1159,7 @@ it.effect("holds an agent notice on an idle thread and delivers it after its nex
           yield* Fiber.join(settled);
           yield* worker.drain();
         });
-      const send = (text: string, holdWhileIdle: boolean) =>
+      const hold = (text: string) =>
         orchestrator
           .dispatch({
             type: "message.dispatch",
@@ -1169,8 +1169,8 @@ it.effect("holds an agent notice on an idle thread and delivers it after its nex
             text,
             attachments: [],
             modelSelection: runSelection,
-            dispatchMode: { type: holdWhileIdle ? "queue_after_active" : "start_immediately" },
-            ...(holdWhileIdle ? { holdWhileIdle: true } : {}),
+            dispatchMode: { type: "queue_after_active" },
+            holdWhileIdle: true,
             createdBy: "agent",
             creationSource: "mcp",
           })
@@ -1188,20 +1188,21 @@ it.effect("holds an agent notice on an idle thread and delivers it after its nex
         threadId,
         snoozedUntil: "2099-07-25T09:00:00.000Z",
       });
-      yield* send("notice", true);
+      yield* hold("notice");
+      yield* hold("other");
+      yield* hold("third");
       const idle = yield* orchestrator.getThreadProjection(threadId);
+      const runFor = (projection: typeof idle, text: string) =>
+        projection.runs.find((run) => run.userMessageId === MessageId.make(`message:${text}`));
       assert.isNotNull(idle.thread.snoozedUntil);
-      assert.deepInclude(
-        idle.runs.find((run) => run.userMessageId === MessageId.make("message:notice")),
-        { status: "queued", queueHeld: true },
-      );
+      assert.deepInclude(runFor(idle, "notice"), { status: "queued", queueHeld: true });
       assert.equal(idle.thread.settledOverride, "settled");
       assert.deepEqual(
         started.map((turn) => turn.message.text),
         ["first"],
       );
 
-      const running = yield* orchestrator.streamDomainEvents.pipe(
+      const nextTurnRunning = orchestrator.streamDomainEvents.pipe(
         Stream.filter(
           (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
         ),
@@ -1209,16 +1210,40 @@ it.effect("holds an agent notice on an idle thread and delivers it after its nex
         Stream.runDrain,
         Effect.forkScoped,
       );
-      yield* send("urgent", false);
-      yield* Fiber.join(running);
+      const noticeRunning = yield* nextTurnRunning;
+      // An urgent send releases only its own held notice, and still does once the thread is busy.
+      const startOnly = (text: string) =>
+        orchestrator
+          .dispatch({
+            type: "queued-run.start",
+            commandId: CommandId.make(`urgent:${text}`),
+            threadId,
+            runId: runFor(idle, text)!.id,
+            onlyThisRun: true,
+          })
+          .pipe(Effect.andThen(worker.drain()));
+      yield* startOnly("notice");
+      yield* Fiber.join(noticeRunning);
+      yield* startOnly("other");
+      const busy = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepInclude(runFor(busy, "other"), { status: "queued", queueHeld: false });
+      assert.deepInclude(runFor(busy, "third"), { status: "queued", queueHeld: true });
       assert.deepEqual(
         started.map((turn) => turn.message.text),
-        ["first", "urgent"],
+        ["first", "notice"],
       );
+      const otherRunning = yield* nextTurnRunning;
       yield* finishTurn(started[1]!);
+      yield* Fiber.join(otherRunning);
       assert.deepEqual(
         started.map((turn) => turn.message.text),
-        ["first", "urgent", "notice"],
+        ["first", "notice", "other"],
+      );
+      // The completed run released the remaining held notice behind it.
+      yield* finishTurn(started[2]!);
+      assert.deepEqual(
+        started.map((turn) => turn.message.text),
+        ["first", "notice", "other", "third"],
       );
     }).pipe(Effect.provide(layer));
   }),

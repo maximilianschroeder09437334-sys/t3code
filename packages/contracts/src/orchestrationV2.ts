@@ -3725,6 +3725,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     runId: RunId,
+    /** Release only this run, leaving other holds in place; a busy thread runs it next. */
+    onlyThisRun: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("queued-run.reorder"),
