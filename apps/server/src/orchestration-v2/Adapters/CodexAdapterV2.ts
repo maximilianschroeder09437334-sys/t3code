@@ -1519,6 +1519,7 @@ const CODEX_T3_FULL_ACCESS_TOOLS = {
   t3_thread_wait: { approval_mode: "approve" },
   t3_thread_interrupt: { approval_mode: "approve" },
   t3_background_wait: { approval_mode: "approve" },
+  t3_run_commands: { approval_mode: "approve" },
   t3_preview_list: { approval_mode: "approve" },
   t3_preview_close: { approval_mode: "approve" },
   preview_status: { approval_mode: "approve" },

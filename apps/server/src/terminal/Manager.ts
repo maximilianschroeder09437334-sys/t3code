@@ -1551,7 +1551,7 @@ function toSessionKey(threadId: string, terminalId: string): string {
   return `${threadId}\u0000${terminalId}`;
 }
 
-function shouldExcludeTerminalEnvKey(key: string): boolean {
+export function shouldExcludeTerminalEnvKey(key: string): boolean {
   const normalizedKey = key.toUpperCase();
   if (normalizedKey.startsWith("T3CODE_")) {
     return true;

@@ -97,6 +97,9 @@ import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { MessageToolkit } from "./toolkits/message/tools.ts";
 import * as MessageHandlers from "./toolkits/message/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+import * as CommandsHandlers from "./toolkits/commands/handlers.ts";
+import { CommandsToolkit } from "./toolkits/commands/tools.ts";
+import * as BatchCommandRunner from "../commandRunner/BatchCommandRunner.ts";
 import { MCP_HTTP_PATH } from "../httpCors.ts";
 import { requestUrl } from "../requestUrl.ts";
 
@@ -1283,6 +1286,10 @@ export const layerActivityToolkit = toolkitRegistration(ActivityToolkit, Activit
 
 const layerMessageToolkit = toolkitRegistration(MessageToolkit, MessageHandlers.layer);
 
+const layerCommandsToolkit = toolkitRegistration(CommandsToolkit, CommandsHandlers.layer).pipe(
+  Layer.provide(BatchCommandRunner.layer),
+);
+
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,
   WorktreeHandlers.layer,
@@ -1380,6 +1387,7 @@ export const layerTools = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerMessageToolkit,
+  layerCommandsToolkit,
 );
 
 const layerToolExposure = Layer.effect(
