@@ -74,6 +74,7 @@ export function useComposerMenuItems({
   sideChatAvailable,
   sideChatDisabledReason,
   freshSessionAvailable,
+  threadNotesAvailable,
   compactSlashCommandAvailable,
   selectedProvider,
   selectedProviderSkills,
@@ -94,6 +95,7 @@ export function useComposerMenuItems({
   readonly sideChatAvailable: boolean;
   readonly sideChatDisabledReason: string | null;
   readonly freshSessionAvailable: boolean;
+  readonly threadNotesAvailable: boolean;
   readonly compactSlashCommandAvailable: boolean;
   readonly selectedProvider: ProviderDriverKind;
   readonly selectedProviderSkills: ServerProvider["skills"];
@@ -254,6 +256,17 @@ export function useComposerMenuItems({
           label: "/model",
           description: "Switch response model for this thread",
         },
+        ...(threadNotesAvailable
+          ? ([
+              {
+                id: "slash:notes",
+                type: "slash-command",
+                command: "notes",
+                label: "/notes",
+                description: "Show the notes agents saved on this thread",
+              },
+            ] as const)
+          : []),
         ...(sideChatAvailable
           ? ([
               {
