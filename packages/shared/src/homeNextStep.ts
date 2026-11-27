@@ -15,8 +15,11 @@ const NEXT_STEPS_HEADING =
   /^#{0,6}\s*(?:\*\*|__)?\s*next steps in order\s*:?\s*(?:\*\*|__)?\s*:?$/iu;
 const LIST_ITEM = /^(?:\d+[.)]|[-*+])\s+(\S.*)$/u;
 const OWNER_LINE = /^(?:\*\*|__)?(?:Maxi|T3)(?:\*\*|__)?:/iu;
-const OTHER_HEADING = /^(?:#{1,6}\s|(?:\*\*|__)[^*_].*(?:\*\*|__):?$)/u;
-const NOTHING_NEEDED = /^Maxi:\s*nothing needed(?: right now)?\.?$/iu;
+const MARKDOWN_HEADING = /^(#{1,6})\s/u;
+const BOLD_HEADING = /^(?:\*\*|__)[^*_].*(?:\*\*|__):?$/u;
+const CODE_FENCE = /^(?:```|~~~)/u;
+/** Any "nothing needed" wording is not an ask, whatever follows it. */
+const NOTHING_NEEDED = /^Maxi:\s*(?:\*\*|__)?nothing needed/iu;
 
 /** Parses only the first ordered item under Next steps in order in a completed report. */
 export function parseHomeNextStep(report: string): HomeNextStep {
@@ -50,8 +53,8 @@ function normalizeStep(step: string): string {
 
 /**
  * Ordered steps under the last "Next steps in order" heading of an agent report, or null when the
- * report has no such section. Tolerates bold/plain/`#` headings, `1.`/`1)`/bullet markers and
- * unnumbered `Maxi:`/`T3:` lines; wrapped lines join their step and the next heading ends the list.
+ * report has no such section. Only a heading at step indent and outside code fences ends the list
+ * (a deeper `#` sub-heading does not); wrapped lines join their step, fenced code is skipped.
  */
 export function parseNextSteps(markdown: string): ReadonlyArray<string> | null {
   const lines = markdown.split(/\r?\n/u);
@@ -63,11 +66,24 @@ export function parseNextSteps(markdown: string): ReadonlyArray<string> | null {
     }
   }
   if (start < 0) return null;
+  const sectionLevel = MARKDOWN_HEADING.exec(lines[start - 1]!.trim())?.[1]!.length;
   const steps: string[] = [];
   let baseIndent: number | undefined;
+  let inFence = false;
+  let afterBlank = false;
   for (const raw of lines.slice(start)) {
     const line = raw.trim();
-    if (!line) continue;
+    if (CODE_FENCE.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (!line) {
+      afterBlank = true;
+      continue;
+    }
+    const paragraphStart = afterBlank;
+    afterBlank = false;
     const indent = raw.length - raw.trimStart().length;
     const item = LIST_ITEM.exec(line)?.[1];
     const nested = baseIndent !== undefined && indent > baseIndent + 1;
@@ -76,9 +92,15 @@ export function parseNextSteps(markdown: string): ReadonlyArray<string> | null {
       steps.push(normalizeStep(item ?? line));
       continue;
     }
-    if (OTHER_HEADING.test(line)) break;
-    if (steps.length === 0 || (nested && item !== undefined)) continue;
-    if (indent === 0) break;
+    const level = MARKDOWN_HEADING.exec(line)?.[1]!.length;
+    if (level !== undefined || BOLD_HEADING.test(line)) {
+      const subHeading = level !== undefined && sectionLevel !== undefined && level > sectionLevel;
+      if (!nested && !subHeading) break;
+      continue;
+    }
+    // Unindented text after a blank line is closing prose, not part of the last step.
+    if (steps.length === 0 || (nested && item !== undefined) || (paragraphStart && indent === 0))
+      continue;
     steps[steps.length - 1] = normalizeStep(`${steps[steps.length - 1]} ${line}`);
   }
   return steps;

@@ -2366,19 +2366,6 @@ function visibleItemCountForShell(input: {
   );
 }
 
-/**
- * How a "Maxi: nothing needed right now" line ends inside a JSON payload, lowercased: before an
- * escaped line break (backslash + n or r, as stored) or the string's closing quote.
- */
-const NOTHING_NEEDED_LINE_ENDINGS = [
-  String.raw`.\n`,
-  String.raw`\n`,
-  String.raw`.\r`,
-  String.raw`\r`,
-  `."`,
-  `"`,
-].map((ending) => `maxi: nothing needed right now${ending}`);
-
 type ShellWaitSessionRow = {
   readonly thread_id: string;
   readonly provider_instance_id: string;
@@ -8310,17 +8297,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       )`;
     };
     /**
-     * A report payload, lowercased, without its "Maxi: nothing needed right now" lines. Only an
-     * occurrence that ends its line or the text is removed, so a longer Maxi step, which the
-     * parser counts as actionable, keeps its "maxi:".
+     * A report payload, lowercased, with bold markers and every "Maxi: nothing needed" wording
+     * removed, so `**Maxi**: x` reads as `maxi: x` and, like the parser, a nothing-needed step
+     * never counts as an ask whatever follows it.
      */
-    const actionableMaxiPayload = (column: string) => {
-      let expression = `lower(${column})`;
-      for (const ending of NOTHING_NEEDED_LINE_ENDINGS) {
-        expression = `replace(${expression}, '${ending}', '')`;
-      }
-      return sql.literal(expression);
-    };
+    const actionableMaxiPayload = (column: string) =>
+      sql.literal(
+        `replace(replace(replace(lower(${column}), '*', ''), '__', ''), 'maxi: nothing needed', '')`,
+      );
     // Mirrors isSilentRunForShell.
 
     const isSilentShellRun = (alias: string) => {
@@ -9813,7 +9797,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             )
             -- waitPhase "waiting" or "needs" from the shell's own report: its latest run
             -- completed with a WAIT line, or (unsettled) with a Maxi step other than "nothing
-            -- needed right now". LIKE is case-insensitive like the parsers; the payload holds
+            -- needed". LIKE is case-insensitive like the parsers; the payload holds
             -- the text.
             OR EXISTS (
               SELECT 1 FROM orchestration_v2_projection_turn_items report

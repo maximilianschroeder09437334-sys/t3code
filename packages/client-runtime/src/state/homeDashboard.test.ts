@@ -115,20 +115,28 @@ describe("Home dashboard helpers", () => {
     });
   });
 
-  it("does not flag a waited-on thread whose report needs nothing from Maxi", () => {
-    const target = thread("target", { homeFirstNextStep: "Maxi: nothing needed right now." });
+  it.each([
+    // The server flags a later Maxi step through the section; the first step is T3's.
+    [
+      "a server-flagged step-2 ask",
+      { homeFirstNextStep: "T3: push", homeDashboardSection: "needs" as const },
+      true,
+    ],
+    ["a nothing-needed report", { homeFirstNextStep: "Maxi: nothing needed right now." }, false],
+  ])("flags a waited-on target only when its section needs Maxi: %s", (_name, target, needsYou) => {
+    const waitedOn = thread("target", target);
     const waiting = thread("waiting", {
       homeFirstNextStep: "T3: WAIT on [Target](https://app.t3.codes/threads/home-test/target)",
     });
     const rows = deriveHomeDashboardRows({
       projects: [project],
       now: "2026-11-21T12:00:00.000Z",
-      threads: [target, waiting],
+      threads: [waitedOn, waiting],
     });
     expect(rows.find((row) => row.thread.id === waiting.id)).toMatchObject({
       section: "waiting",
-      waitingThread: target,
-      waitingOnNeedsYou: false,
+      waitingThread: waitedOn,
+      waitingOnNeedsYou: needsYou,
     });
   });
 

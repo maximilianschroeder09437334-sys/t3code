@@ -200,9 +200,7 @@ export function deriveHomeDashboardRows(input: {
       ...(waitingThread
         ? {
             waitingThread,
-            waitingOnNeedsYou: ["approval", "input", "request"].includes(
-              homeThreadStatus(waitingThread),
-            ),
+            waitingOnNeedsYou: sectionFor(waitingThread) === "needs",
           }
         : {}),
       waitingCount:

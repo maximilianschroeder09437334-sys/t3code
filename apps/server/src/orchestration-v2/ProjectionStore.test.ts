@@ -2216,18 +2216,21 @@ it.effect(
       yield* assertShellIndexCoversShells();
 
       // Needs-you children hold their waiting parent: a report whose next step is for Maxi, a
-      // later Maxi step after "nothing needed right now", and a guest message with no report
-      // step. A quiet child is the control the trim drops.
+      // later bold `**Maxi**:` step, and a guest message with no report step. A quiet child, whose
+      // only Maxi step is a "nothing needed" wording with extra text, is the control the trim drops.
       const needsReport = (steps: ReadonlyArray<string>) =>
         ["**What happened**", "- Built it.", "", "**Next steps in order**", ...steps].join("\n");
       const children = {
         "needs-report": needsReport(["1. Maxi: approve the result."]),
         "needs-tail": needsReport([
           "1. T3: nothing left to run.",
-          "2. Maxi: nothing needed right now, but glance at the diff.",
+          "2. **Maxi**: glance at the diff.",
         ]),
         "needs-guest": "Done.",
-        quiet: needsReport(["1. T3: nothing left to run.", "2. Maxi: nothing needed right now."]),
+        quiet: needsReport([
+          "1. T3: nothing left to run.",
+          "2. **Maxi:** nothing needed right now, the diff is optional.",
+        ]),
       } as const;
       for (const [name, text] of Object.entries(children)) {
         yield* createThread(name, "a");

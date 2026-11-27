@@ -15,6 +15,18 @@ const state = vi.hoisted(() => ({
   projects: [] as ReadonlyArray<unknown>,
 }));
 vi.mock("../ChatView", () => ({ default: () => null }));
+// The real resolver over the test shells, with every environment connected.
+vi.mock("../../state/threadWaits", async () => {
+  const { resolveThreadWaits, threadWaitKey } =
+    await import("@t3tools/client-runtime/state/thread-wait");
+  const waits = () =>
+    resolveThreadWaits({ threads: state.threads as never, environmentReady: () => true });
+  return {
+    useThreadWaits: waits,
+    useThreadWait: (environmentId: never, threadId: never) =>
+      waits().get(threadWaitKey(environmentId, threadId)),
+  };
+});
 // Synchronous stubs: spreading the real state modules from an async factory hits their import
 // cycles. Exports Home does not read only need to exist for the module graph to link.
 vi.mock("../../state/entities", () => ({
@@ -145,8 +157,9 @@ function setup() {
     },
   ];
   state.threads = [
+    // The server flagged step 2; the stored first step is T3's.
     shell("release", "Release: review the Home layout", {
-      homeFirstNextStep: "Maxi: approve the Home layout",
+      homeFirstNextStep: "T3: push the branch",
       homeAskText: "approve the Home layout",
       homeNeedsYou: true,
       homeDashboardSection: "needs",
@@ -163,8 +176,34 @@ function setup() {
       homeFirstNextStep: waitStep("Docs: guide pass", "docs"),
       homeDashboardSection: "waiting",
     }),
+    // Servers with wait fields: the waiter's line takes the target's waitPhase.
+    shell("ci", "CI: needs a decision", {
+      homeDashboardSection: "needs",
+      waitPhase: "needs",
+      waitingOn: [],
+    }),
+    shell("deploy", "Deploy: rollout", {
+      homeDashboardSection: "waiting",
+      waitPhase: "waiting",
+      waitingOn: [waitTarget("ci", "the CI decision")],
+    }),
+    shell("lint", "Lint: still running", { waitPhase: "working", waitingOn: [] }),
+    shell("bench", "Bench: compare", {
+      homeDashboardSection: "waiting",
+      waitPhase: "waiting",
+      waitingOn: [waitTarget("lint", "the lint run")],
+    }),
   ];
 }
+
+const waitTarget = (threadId: string, title: string) => ({
+  source: "thread_wait",
+  environmentId: null,
+  threadId: ThreadId.make(threadId),
+  title,
+});
+const lineText = (name: string, screen: { getByText: (text: string) => { element(): Element } }) =>
+  screen.getByText(name).element().closest(".truncate")?.textContent ?? "";
 
 it("lists Maxi's ask and marks only waits whose target needs Maxi", async () => {
   setup();
@@ -179,6 +218,11 @@ it("lists Maxi's ask and marks only waits whose target needs Maxi", async () => 
   const quietTarget = screen.getByRole("link", { name: "Docs: guide pass" });
   await expect.element(quietTarget).toHaveAttribute("href", "/environment-test/docs");
   expect(quietTarget.element().parentElement?.textContent).not.toContain("needs you");
+
+  await expect.element(screen.getByText("the CI decision")).toBeVisible();
+  expect(lineText("the CI decision", screen)).toMatch(/^Waiting on .*needs you/u);
+  expect(lineText("the lint run", screen)).toMatch(/^Waiting on /u);
+  expect(lineText("the lint run", screen)).not.toContain("needs you");
 
   if (PROOF_DIR) await page.screenshot({ path: `${PROOF_DIR}/3.1-home-needs-you-1280x800.png` });
 });

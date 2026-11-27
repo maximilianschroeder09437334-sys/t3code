@@ -51,9 +51,29 @@ describe("parseNextSteps", () => {
       ["Maxi: review the long proposal", "T3: ship"],
     ],
     [
-      "closing prose ends the list",
-      "**Next steps in order**\n1. T3: ship\nThanks!\n2. Maxi: not a step",
+      "closing prose after a blank line without joining it",
+      "**Next steps in order**\n1. T3: ship\n\nThanks!",
       ["T3: ship"],
+    ],
+    [
+      "an unindented wrapped line before a later Maxi step",
+      "**Next steps in order**\n1. T3: push the\nbranch\n2. Maxi: approve",
+      ["T3: push the branch", "Maxi: approve"],
+    ],
+    [
+      "an indented bold line inside a step",
+      "**Next steps in order**\n1. T3: push\n   **Important**\n2. Maxi: approve",
+      ["T3: push", "Maxi: approve"],
+    ],
+    [
+      "a # comment inside a code block",
+      "**Next steps in order**\n1. T3: run\n   ```sh\n   # build first\n   Maxi: not a step\n   ```\n2. Maxi: approve",
+      ["T3: run", "Maxi: approve"],
+    ],
+    [
+      "a deeper sub-heading under a # section",
+      "## Next steps in order\n1. T3: push\n### Details\nonly a note\n2. Maxi: approve\n## Notes\n1. Maxi: not a step",
+      ["T3: push only a note", "Maxi: approve"],
     ],
     [
       "last heading wins over a quoted earlier report",
@@ -99,8 +119,13 @@ describe("parseHomeNextStep", () => {
       "Maxi: nothing needed right now",
       "Maxi: Nothing needed right now.",
       "**Maxi:** nothing needed.",
-    ])
-      expect(parseHomeNextStep(`**Next steps in order**\n1. ${step}`)).toEqual({ kind: "none" });
+      "Maxi: **nothing needed right now**",
+      "Maxi: nothing needed right now, but glance at the diff.",
+    ]) {
+      const report = `**Next steps in order**\n1. ${step}`;
+      expect(parseHomeNextStep(report)).toEqual({ kind: "none" });
+      expect(parseHomeActionableMaxiStep(report)).toBeNull();
+    }
   });
   it("reads the ask from full reports and from the stored single step", () => {
     expect(parseHomeNextStep(FULL_REPORT)).toEqual({
