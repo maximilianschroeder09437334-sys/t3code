@@ -181,6 +181,7 @@ const isProviderEvent = Schema.is(ProviderAdapter.ProviderAdapterV2Event);
 
 function threadCreatedEvent(
   now: DateTime.Utc,
+  options: { readonly nativeThreadId?: string; readonly parentThreadId?: ThreadId } = {},
 ): Effect.Effect<
   OrchestrationV2DomainEvent,
   IdAllocator.IdAllocatorV2Error,
@@ -197,7 +198,7 @@ function threadCreatedEvent(
     });
     const providerThreadId = idAllocator.derive.providerThread({
       driver: CODEX_DRIVER,
-      nativeThreadId: "native-thread",
+      nativeThreadId: options.nativeThreadId ?? "native-thread",
     });
     const thread: OrchestrationV2AppThread = {
       createdBy: "user",
@@ -215,9 +216,9 @@ function threadCreatedEvent(
       activeOrderKey: null,
       activeProviderThreadId: providerThreadId,
       lineage: {
-        parentThreadId: null,
-        relationshipToParent: null,
-        rootThreadId: threadId,
+        parentThreadId: options.parentThreadId ?? null,
+        relationshipToParent: options.parentThreadId === undefined ? null : "subagent",
+        rootThreadId: options.parentThreadId ?? threadId,
       },
       forkedFrom: null,
       createdAt: now,
@@ -241,25 +242,30 @@ function threadCreatedEvent(
 
 const layer = it.layer(layerTest);
 
-layer("running context thresholds", (it) => {
-  it.effect("warns once per threshold on accepted native usage without a hook", () =>
-    Effect.gen(function* () {
+const contextNoticeSampler = Effect.fn(function* (key: string, asSubagent: boolean) {
       const now = yield* DateTime.now;
       const sink = yield* EventSink.EventSinkV2;
       const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const ids = yield* IdAllocator.IdAllocatorV2;
-      const created = yield* threadCreatedEvent(now);
+      const nativeId = `${key}-native`;
+      const parent = asSubagent
+        ? yield* threadCreatedEvent(now, { nativeThreadId: `${key}-parent-native` })
+        : undefined;
+      const created = yield* threadCreatedEvent(now, {
+        nativeThreadId: nativeId,
+        ...(parent === undefined ? {} : { parentThreadId: parent.threadId }),
+      });
       if (created.type !== "thread.created") throw new Error("Expected thread creation");
       const threadId = created.threadId;
       const providerThreadId = created.payload.activeProviderThreadId!;
-      const providerSessionId = ProviderSessionId.make("context-threshold-session");
-      const nativeId = "native-thread";
-      const runId = RunId.make("context-threshold-run");
-      const attemptId = RunAttemptId.make("context-threshold-attempt");
-      const nodeId = NodeId.make("context-threshold-root");
-      const turnId = ProviderTurnId.make("context-threshold-turn");
+      const providerSessionId = ProviderSessionId.make(`${key}-session`);
+      const runId = RunId.make(`${key}-run`);
+      const attemptId = RunAttemptId.make(`${key}-attempt`);
+      const nodeId = NodeId.make(`${key}-root`);
+      const turnId = ProviderTurnId.make(`${key}-turn`);
       yield* sink.write({
         events: [
+          ...(parent === undefined ? [] : [parent]),
           created,
           {
             id: yield* ids.allocate.event({ threadId }),
@@ -297,7 +303,7 @@ layer("running context thresholds", (it) => {
               providerInstanceId: modelSelection.instanceId,
               modelSelection,
               providerThreadId,
-              userMessageId: MessageId.make("context-threshold-message"),
+              userMessageId: MessageId.make(`${key}-message`),
               rootNodeId: nodeId,
               activeAttemptId: attemptId,
               status: "running",
@@ -364,10 +370,27 @@ layer("running context thresholds", (it) => {
               ),
             ),
           );
+      return sample;
+});
+
+layer("running context thresholds", (it) => {
+  it.effect("warns once per threshold on accepted native usage without a hook", () =>
+    Effect.gen(function* () {
+      const sample = yield* contextNoticeSampler("context-threshold", false);
       assert.deepEqual(yield* sample(149_999), []);
       assert.deepEqual(yield* sample(252_960, RunAttemptId.make("stale-attempt")), []);
       assert.deepEqual(yield* sample(150_000), ["Context is getting large"]);
       assert.deepEqual(yield* sample(152_000), []);
+      assert.deepEqual(yield* sample(252_960), ["Context rollover required"]);
+      assert.deepEqual(yield* sample(253_000), []);
+    }),
+  );
+
+  it.effect("skips the 150k nudge in a subagent thread but still caps it at 250k", () =>
+    Effect.gen(function* () {
+      const sample = yield* contextNoticeSampler("subagent-context-threshold", true);
+      assert.deepEqual(yield* sample(150_000), []);
+      assert.deepEqual(yield* sample(200_000), []);
       assert.deepEqual(yield* sample(252_960), ["Context rollover required"]);
       assert.deepEqual(yield* sample(253_000), []);
     }),
