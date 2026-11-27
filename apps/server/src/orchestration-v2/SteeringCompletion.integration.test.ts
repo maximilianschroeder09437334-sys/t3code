@@ -1182,8 +1182,15 @@ it.effect("holds an agent notice on an idle thread and delivers it after its nex
         threadId,
       });
 
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("snooze"),
+        threadId,
+        snoozedUntil: "2099-07-25T09:00:00.000Z",
+      });
       yield* send("notice", true);
       const idle = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNotNull(idle.thread.snoozedUntil);
       assert.deepInclude(
         idle.runs.find((run) => run.userMessageId === MessageId.make("message:notice")),
         { status: "queued", queueHeld: true },

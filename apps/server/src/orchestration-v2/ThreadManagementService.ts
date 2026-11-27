@@ -1245,6 +1245,10 @@ const make = Effect.gen(function* () {
     });
     const initial = yield* evaluate(target.runs);
     if (initial.settled) return settledResult(initial);
+    // A held run waits for the thread's next turn, which this wait cannot cause, so report it now.
+    if (initial.run.status === "queued" && initial.run.queueHeld === true) {
+      return settledResult({ ...initial, settled: true });
+    }
 
     // A declined continuation records no event, so its effect settling wakes
     // the wait too.

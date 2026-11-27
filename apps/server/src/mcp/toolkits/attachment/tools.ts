@@ -8,6 +8,7 @@ import {
   ThreadId,
   OrchestrationV2RunStatus,
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadSendInput,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as FileSystem from "effect/FileSystem";
@@ -51,7 +52,7 @@ const AttachmentSendTool = Tool.make("t3_thread_send_attachments", {
   ...shared,
   dependencies: [...shared.dependencies, DocumentText.DocumentText],
   description:
-    "Send uploaded attachments as a new message to a thread. No retry key. Target modes cannot exceed yours. Success does not mean the provider read them or finished.",
+    "Send uploaded attachments as a new message to a thread. No retry key. Target modes cannot exceed yours. Success does not mean the provider read them or finished. Idle targets hold it like `t3_thread_send` (`urgent` wakes them).",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     message: Schema.optional(Schema.String.check(Schema.isMaxLength(120000))),
@@ -59,12 +60,16 @@ const AttachmentSendTool = Tool.make("t3_thread_send_attachments", {
       Schema.isMinLength(1),
       Schema.isMaxLength(8),
     ),
+    urgent: OrchestratorMcpThreadSendInput.fields.urgent,
+    urgentReason: OrchestratorMcpThreadSendInput.fields.urgentReason,
   }),
   success: Schema.Struct({
     threadId: ThreadId,
     messageId: MessageId,
     runId: RunId,
     status: OrchestrationV2RunStatus,
+    /** The target was idle, so the message waits for its next turn instead of waking it. */
+    held: Schema.optional(Schema.Boolean),
   }),
 })
   .annotate(Tool.Destructive, true)

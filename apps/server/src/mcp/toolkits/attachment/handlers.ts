@@ -94,6 +94,18 @@ export const layer = McpToolAccess.toLayer(
                 code: "invalid_request",
                 message: "Unarchive the target thread before sending attachments.",
               });
+            if (input.urgent === true && input.urgentReason === undefined)
+              return yield* new OrchestratorMcpFailure({
+                code: "invalid_request",
+                message: "urgent needs an urgentReason.",
+              });
+            const urgentReason = input.urgent === true ? input.urgentReason : undefined;
+            if (urgentReason !== undefined)
+              yield* Effect.logInfo("orchestrator-mcp.thread-send-urgent", {
+                threadId: projection.thread.id,
+                senderThreadId: caller?.id,
+                reason: urgentReason,
+              });
             const attachments = yield* resolveAttachmentReferences(
               input.attachments,
               projection.messages.flatMap((message) => message.attachments),
@@ -109,6 +121,7 @@ export const layer = McpToolAccess.toLayer(
               text: input.message ?? "",
               attachments,
               mode: "auto",
+              ...(urgentReason === undefined ? {} : { urgentReason }),
               createdBy: "agent",
               creationSource: "mcp",
             }).pipe(
@@ -126,6 +139,7 @@ export const layer = McpToolAccess.toLayer(
               messageId,
               runId: result.run.id,
               status: result.run.status,
+              ...(result.held ? { held: true } : {}),
             };
           }),
       ),

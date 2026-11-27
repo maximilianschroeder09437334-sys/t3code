@@ -399,6 +399,17 @@ it.effect("waitForThread follows a restart continuation instead of the cut run",
       timedOut: false,
       run: { id: continuationId, status: "completed" },
     });
+
+    // A held notice's run starts only with the thread's next turn, so a wait on it ends now.
+    runs = [{ id: runId, status: "queued", queueHeld: true } as (typeof runs)[number]];
+    const held = yield* service
+      .waitForThread({ projectId, threadId, runId, timeoutMs: 60 * 60 * 1_000 })
+      .pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.hours(2));
+    expect(yield* Fiber.join(held)).toMatchObject({
+      timedOut: false,
+      run: { id: runId, status: "queued" },
+    });
   }),
 );
 
