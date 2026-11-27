@@ -7,6 +7,7 @@ import {
   MessageId,
   type ModelSelection,
   NodeId,
+  ORCHESTRATOR_MCP_HELD_SEND_NEXT,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   TurnItemId,
   type OrchestrationV2AppThread,
@@ -1482,6 +1483,17 @@ const make = Effect.gen(function* () {
     yield* assertTargetWithinLimits(limits, target.thread);
 
     const mode = input.mode ?? "auto";
+    if (input.urgent === true && input.urgentReason === undefined) {
+      return yield* failure("invalid_request", "urgent needs an urgentReason.");
+    }
+    const urgentReason = input.urgent === true ? input.urgentReason : undefined;
+    if (urgentReason !== undefined) {
+      yield* Effect.logInfo("orchestrator-mcp.thread-send-urgent", {
+        threadId: input.threadId,
+        senderThreadId: parent?.thread.id,
+        reason: urgentReason,
+      });
+    }
     const key = yield* requestKey(input.clientRequestId);
     const messageId = stableOperationMessageId({
       scope,
@@ -1507,6 +1519,7 @@ const make = Effect.gen(function* () {
         attachments: [],
         mode,
         ...(input.freshContext ? { freshContext: true } : {}),
+        ...(urgentReason === undefined ? {} : { urgentReason }),
         createdBy: "agent",
         creationSource: "mcp",
       })
@@ -1528,6 +1541,9 @@ const make = Effect.gen(function* () {
       ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
       status: result.run.status,
       delivery: result.delivery,
+      ...(result.held
+        ? { held: { reason: "target_idle" as const, next: ORCHESTRATOR_MCP_HELD_SEND_NEXT } }
+        : {}),
       ...(redirectedFrom === undefined
         ? {}
         : {

@@ -9,6 +9,7 @@ import {
   GitCommandError,
   MessageId,
   NodeId,
+  ORCHESTRATOR_MCP_HELD_SEND_NEXT,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpListScheduledTasksInput,
@@ -4934,6 +4935,52 @@ describe("OrchestratorMcpService thread lookup", () => {
       assert.deepStrictEqual(fromLink?.linkedSender, sender);
       assert.isUndefined(fromLink?.senderThreadId);
       assert.isUndefined((yield* sendAs(linked()))?.linkedSender);
+    }),
+  );
+
+  it.effect("reports a send held for an idle target and passes an urgent reason through", () =>
+    Effect.gen(function* () {
+      const target = liveThreadShell(ThreadId.make("thread:target"));
+      const inputs: Array<ThreadManagementService.ThreadManagementSendInput> = [];
+      const sent = yield* Ref.make(0);
+      yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const notice = yield* mcp.sendToThread(client, { threadId: target.id, message: "fyi" });
+        assert.deepStrictEqual(notice.held, {
+          reason: "target_idle",
+          next: ORCHESTRATOR_MCP_HELD_SEND_NEXT,
+        });
+        const unexplained = yield* mcp
+          .sendToThread(client, { threadId: target.id, message: "now", urgent: true })
+          .pipe(Effect.flip);
+        assert.equal(unexplained.code, "invalid_request");
+        const urgent = yield* mcp.sendToThread(client, {
+          threadId: target.id,
+          message: "now",
+          urgent: true,
+          urgentReason: "blocking question",
+        });
+        assert.isUndefined(urgent.held);
+      }).pipe(
+        Effect.provide(
+          service([target], sent, {
+            getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(target)),
+            sendToThread: (input) => {
+              inputs.push(input);
+              const held = input.urgentReason === undefined;
+              return Effect.succeed({
+                run: { id: RunId.make("run:sent"), status: held ? "queued" : "running" },
+                delivery: held ? "queued" : "started",
+                held,
+              } as never);
+            },
+          }),
+        ),
+      );
+      assert.deepStrictEqual(
+        inputs.map((input) => input.urgentReason),
+        [undefined, "blocking question"],
+      );
     }),
   );
 

@@ -1116,6 +1116,107 @@ it.effect.each(
   }),
 );
 
+it.effect("holds an agent notice on an idle thread and delivers it after its next run", () =>
+  Effect.gen(function* () {
+    const { events, started, layer, startFirstTurn } =
+      yield* nextTurnSelectionHarness("idle-notice-hold");
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = yield* startFirstTurn;
+      const finishTurn = (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+        Effect.gen(function* () {
+          const providerTurn = (yield* orchestrator.getThreadProjection(
+            threadId,
+          )).providerTurns.find((candidate) => candidate.runAttemptId === turn.attemptId)!;
+          const settled = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === turn.runId &&
+                event.payload.status === "completed",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          const now = yield* DateTime.now;
+          yield* Queue.offer(events, {
+            type: "provider_turn.updated",
+            driver,
+            providerTurn: { ...providerTurn, status: "completed", completedAt: now },
+          });
+          yield* Queue.offer(events, {
+            type: "turn.terminal",
+            driver,
+            providerThreadId: providerTurn.providerThreadId,
+            providerTurnId: providerTurn.id,
+            runOrdinal: turn.runOrdinal,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          });
+          yield* Fiber.join(settled);
+          yield* worker.drain();
+        });
+      const send = (text: string, holdWhileIdle: boolean) =>
+        orchestrator
+          .dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(text),
+            threadId,
+            messageId: MessageId.make(`message:${text}`),
+            text,
+            attachments: [],
+            modelSelection: runSelection,
+            dispatchMode: { type: holdWhileIdle ? "queue_after_active" : "start_immediately" },
+            ...(holdWhileIdle ? { holdWhileIdle: true } : {}),
+            createdBy: "agent",
+            creationSource: "mcp",
+          })
+          .pipe(Effect.andThen(worker.drain()));
+      yield* finishTurn(started[0]!);
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle"),
+        threadId,
+      });
+
+      yield* send("notice", true);
+      const idle = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepInclude(
+        idle.runs.find((run) => run.userMessageId === MessageId.make("message:notice")),
+        { status: "queued", queueHeld: true },
+      );
+      assert.equal(idle.thread.settledOverride, "settled");
+      assert.deepEqual(
+        started.map((turn) => turn.message.text),
+        ["first"],
+      );
+
+      const running = yield* orchestrator.streamDomainEvents.pipe(
+        Stream.filter(
+          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* send("urgent", false);
+      yield* Fiber.join(running);
+      assert.deepEqual(
+        started.map((turn) => turn.message.text),
+        ["first", "urgent"],
+      );
+      yield* finishTurn(started[1]!);
+      assert.deepEqual(
+        started.map((turn) => turn.message.text),
+        ["first", "urgent", "notice"],
+      );
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
 it.effect("force sends multiple queued messages and can force send a requeued message again", () =>
   Effect.gen(function* () {
     const { started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(

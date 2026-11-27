@@ -206,6 +206,10 @@ export const ORCHESTRATOR_MCP_RUNNING_TASK_NEXT =
 // A string, not a literal: linked environments on other versions send their own wording.
 const OrchestratorMcpRunningTaskNext = Schema.String;
 
+// Set on a send held because its target was idle.
+export const ORCHESTRATOR_MCP_HELD_SEND_NEXT =
+  "Queued, target idle: it reads this at its next turn. Do not resend. If it must act now, resend with urgent: true and an urgentReason.";
+
 // Optional: linked environments on older versions omit it.
 const OrchestratorMcpExecutedModel = Schema.NullOr(Schema.String).annotate({
   description:
@@ -578,6 +582,15 @@ export const OrchestratorMcpThreadSendInput = Schema.Struct({
         "Start a new provider session without the thread's earlier context, like /clear. Never steers.",
     }),
   ),
+  urgent: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Wake an idle target now. Without it, a message to an idle thread waits for its next turn. Requires urgentReason.",
+    }),
+  ),
+  urgentReason: Schema.optional(
+    TrimmedNonEmptyString.annotate({ description: "Why the idle target must act now." }),
+  ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;
@@ -593,6 +606,10 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
   /** A moved child's send to a former owner went to its current owner, `threadId`, instead. */
   redirected: Schema.optional(
     Schema.Struct({ fromThreadId: ThreadId, toThreadId: ThreadId, reason: Schema.String }),
+  ),
+  /** The target was idle, so the message waits for its next turn instead of waking it. */
+  held: Schema.optional(
+    Schema.Struct({ reason: Schema.Literal("target_idle"), next: OrchestratorMcpRunningTaskNext }),
   ),
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;

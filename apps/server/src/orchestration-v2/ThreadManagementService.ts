@@ -17,6 +17,7 @@ import {
   MessageId,
   OrchestrationV2StopWorkflowError,
   type OrchestrationV2StopWorkflowInput,
+  displayParentThreadId,
   OrchestrationV2ForceStopThreadError,
   type OrchestrationV2ForceStopThreadInput,
   type OrchestrationV2ForceStopThreadResult,
@@ -171,6 +172,8 @@ export interface ThreadManagementSendInput {
   readonly mode: ThreadManagementSendMode;
   /** Start a new provider session; the orchestrator queues it instead of steering. */
   readonly freshContext?: boolean;
+  /** An agent's reason to wake an idle target instead of holding its message. */
+  readonly urgentReason?: string;
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }
@@ -185,6 +188,8 @@ export interface ThreadManagementSendResult {
   readonly run: OrchestrationV2Run;
   readonly turnItem: Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }> | null;
   readonly delivery: "started" | "queued" | "steered" | "restarted";
+  /** Held for an idle target's next run instead of starting one. */
+  readonly held: boolean;
 }
 
 export interface ThreadManagementWaitInput {
@@ -909,6 +914,56 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  // An agent's message to a thread with no active run waits for that thread's next run instead
+  // of waking it. People, scheduled and server deliveries, urgent sends, a parent's order to its
+  // own child and replies to the target's own message still start one. Any doubt delivers now.
+  const holdsAgentNotice = Effect.fn("ThreadManagementService.holdsAgentNotice")(function* (
+    input: ThreadManagementSendInput,
+    target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  ) {
+    if (
+      input.createdBy !== "agent" ||
+      input.creationSource !== "mcp" ||
+      input.urgentReason !== undefined ||
+      input.scheduledTaskId !== undefined ||
+      input.hookContinuationOfRunId !== undefined ||
+      input.expectedRunId !== undefined ||
+      input.freshContext === true ||
+      latestActiveRun(target) !== undefined ||
+      !target.runs.some((run) => run.status !== "queued") ||
+      input.senderThreadId === displayParentThreadId(target.thread)
+    ) {
+      return false;
+    }
+    const enabled = yield* serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.holdAgentNoticesForIdleThreads),
+      Effect.orElseSucceed(() => false),
+    );
+    if (!enabled || input.senderThreadId === undefined) return enabled;
+    return !(yield* repliesToTarget(input.senderThreadId, input.threadId));
+  });
+
+  /** The sender's current run took a message from the target, so this send answers it. */
+  const repliesToTarget = (senderThreadId: ThreadId, targetThreadId: ThreadId) =>
+    orchestrator.getThreadRecords(senderThreadId, ["runs"]).pipe(
+      Effect.flatMap((sender) => {
+        const run = latestActiveRun(sender);
+        return run === undefined
+          ? Effect.succeed(false)
+          : orchestrator
+              .getThreadRecords(senderThreadId, ["messages"], {
+                messageRunIds: [run.id],
+                messageRoles: ["user"],
+              })
+              .pipe(
+                Effect.map(({ messages }) =>
+                  messages.some((message) => message.senderThreadId === targetThreadId),
+                ),
+              );
+      }),
+      Effect.orElseSucceed(() => true),
+    );
+
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = Effect.fn(
     "ThreadManagementService.sendToThread",
   )(function* (input) {
@@ -940,6 +995,8 @@ const make = Effect.gen(function* () {
         : agentQueuedSend
           ? "auto"
           : input.mode;
+    const holdWhileIdle =
+      mode === "auto" && steerableRun === undefined && (yield* holdsAgentNotice(input, target));
     let dispatchMode: Extract<
       OrchestrationV2Command,
       { readonly type: "message.dispatch" }
@@ -966,9 +1023,9 @@ const make = Effect.gen(function* () {
     }
 
     // Turn start would fail on its own after the send reported success; a replay keeps its answer.
-    // A live steer starts no turn, so it needs no workspace.
-    if (dispatchMode.type !== "steer_active") {
-      yield* worktreeRestore
+    // A live steer or a held notice starts no turn, so it needs no workspace.
+    const restoreWorktree = () =>
+      worktreeRestore
         .restore(target.thread)
         .pipe(
           Effect.catch((cause) =>
@@ -983,31 +1040,44 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
-    }
+    if (dispatchMode.type !== "steer_active" && !holdWhileIdle) yield* restoreWorktree();
 
-    const dispatched = yield* dispatch({
-      type: "message.dispatch",
-      commandId: input.commandId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      ...(input.hookContinuationOfRunId === undefined
-        ? {}
-        : { hookContinuationOfRunId: input.hookContinuationOfRunId }),
-      ...(input.hookStageWorkspaceRoot === undefined
-        ? {}
-        : { hookStageWorkspaceRoot: input.hookStageWorkspaceRoot }),
-      ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-      ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-      ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
-      text: input.text,
-      attachments: input.attachments,
-      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      ...(input.freshContext ? { freshContext: true } : {}),
-      dispatchMode,
-      ...(mode === "auto" ? { deliveryIntent: "auto" } : {}),
-      createdBy: input.createdBy,
-      creationSource: input.creationSource,
-    });
+    const dispatchMessage = (held: boolean) =>
+      dispatch({
+        type: "message.dispatch",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        ...(input.hookContinuationOfRunId === undefined
+          ? {}
+          : { hookContinuationOfRunId: input.hookContinuationOfRunId }),
+        ...(input.hookStageWorkspaceRoot === undefined
+          ? {}
+          : { hookStageWorkspaceRoot: input.hookStageWorkspaceRoot }),
+        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
+        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+        ...(input.linkedSender === undefined ? {} : { linkedSender: input.linkedSender }),
+        text: input.text,
+        attachments: input.attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.freshContext ? { freshContext: true } : {}),
+        ...(held
+          ? { dispatchMode: { type: "queue_after_active" } as const, holdWhileIdle: true }
+          : { dispatchMode, ...(mode === "auto" ? { deliveryIntent: "auto" as const } : {}) }),
+        createdBy: input.createdBy,
+        creationSource: input.creationSource,
+      });
+    // A hold the orchestrator refuses delivers the message now rather than losing it.
+    const dispatched = holdWhileIdle
+      ? yield* dispatchMessage(true).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("thread-management.idle-hold-failed", {
+              threadId: input.threadId,
+              cause,
+            }).pipe(Effect.andThen(restoreWorktree()), Effect.andThen(dispatchMessage(false))),
+          ),
+        )
+      : yield* dispatchMessage(false);
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],
       turnItemTypes: ["user_message"],
@@ -1056,7 +1126,8 @@ const make = Effect.gen(function* () {
             : mode === "restart"
               ? "restarted"
               : "steered";
-    return { dispatch: dispatched, projection, message, run, turnItem, delivery };
+    const held = holdWhileIdle && run.status === "queued" && run.queueHeld === true;
+    return { dispatch: dispatched, projection, message, run, turnItem, delivery, held };
   });
 
   const waitForOneThread: ThreadManagementServiceShape["waitForThread"] = Effect.fn(

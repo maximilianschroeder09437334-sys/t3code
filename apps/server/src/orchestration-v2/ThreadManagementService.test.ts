@@ -1108,53 +1108,80 @@ it.effect(
 );
 
 it.effect(
-  "delivers another agent's queued send like an automatic one, keeping a person's queued",
+  "holds another agent's send to an idle thread and delivers everything else as asked",
   () => {
-    const threadId = ThreadId.make("thread:agent-queued-send");
     const projectId = ProjectId.make("project:agent-queued-send");
     const selection = { instanceId: ProviderInstanceId.make("codex"), model: "test" };
+    const parentId = ThreadId.make("thread:parent");
+    const idle = ThreadId.make("thread:idle");
+    const settled = ThreadId.make("thread:settled");
+    const running = ThreadId.make("thread:running");
+    const peer = ThreadId.make("thread:peer");
+    const answering = ThreadId.make("thread:answering");
+    const active = (threadId: ThreadId) => ({
+      id: RunId.make(`run:${threadId}`),
+      ordinal: 2,
+      status: "running",
+      activeAttemptId: `attempt:${threadId}`,
+    });
+    // Senders are mid-turn; the answering one's turn took a message from the idle target.
+    const records = (threadId: ThreadId) =>
+      threadId === peer || threadId === answering
+        ? {
+            runs: [active(threadId)],
+            messages: [{ senderThreadId: threadId === answering ? idle : parentId }],
+          }
+        : {
+            thread: {
+              id: threadId,
+              projectId,
+              archivedAt: null,
+              deletedAt: null,
+              modelSelection: selection,
+              lineage: { parentThreadId: parentId },
+              settledOverride: threadId === settled ? "settled" : null,
+            },
+            runs: [
+              { id: RunId.make(`run:${threadId}:1`), ordinal: 1, status: "completed" },
+              ...(threadId === running ? [active(threadId)] : []),
+            ],
+            providerTurns:
+              threadId === running
+                ? [{ runAttemptId: `attempt:${threadId}`, status: "running" }]
+                : [],
+          };
     const commands: Array<Extract<OrchestrationV2Command, { type: "message.dispatch" }>> = [];
-    const layer = ThreadManagementService.layer.pipe(
-      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
-      Layer.provide(
-        Layer.mock(Orchestrator.OrchestratorV2)({
-          getThreadRecords: () =>
-            Effect.succeed({
-              thread: {
-                id: threadId,
-                projectId,
-                archivedAt: null,
-                deletedAt: null,
-                modelSelection: selection,
-              },
-              // Finished: an agent's message starts the next turn instead of joining a queue.
-              runs: [{ id: RunId.make("run:agent-queued-send"), ordinal: 1, status: "completed" }],
-              providerTurns: [],
-            } as never),
-          dispatch: (command) =>
-            Effect.sync(() => {
-              if (command.type === "message.dispatch") commands.push(command);
-            }).pipe(Effect.andThen(Effect.die("Fixture stops after observing the dispatch"))),
-        }),
-      ),
-      Layer.provide(
-        ServerSettings.layerTest({
-          providerInstances: { [selection.instanceId]: { driver: "codex", enabled: true } },
-        }),
-      ),
-      Layer.provideMerge(layerReceiptsTest),
-    );
-    return Effect.gen(function* () {
-      const threads = yield* ThreadManagementService.ThreadManagementService;
-      const send = (
-        id: string,
-        input: Partial<Parameters<typeof threads.sendToThread>[0]> & {
-          readonly createdBy: "agent" | "user";
-        },
-      ) =>
-        threads
+    const layer = (holdAgentNoticesForIdleThreads: boolean) =>
+      ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: (threadId) => Effect.succeed(records(threadId) as never),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                if (command.type === "message.dispatch") commands.push(command);
+              }).pipe(Effect.andThen(Effect.die("Fixture stops after observing the dispatch"))),
+          }),
+        ),
+        Layer.provide(
+          ServerSettings.layerTest({
+            holdAgentNoticesForIdleThreads,
+            providerInstances: { [selection.instanceId]: { driver: "codex", enabled: true } },
+          }),
+        ),
+        Layer.provideMerge(layerReceiptsTest),
+      );
+    const send = (
+      id: string,
+      input: Partial<ThreadManagementService.ThreadManagementSendInput> & {
+        readonly createdBy: "agent" | "user";
+      },
+    ) =>
+      Effect.gen(function* () {
+        const threads = yield* ThreadManagementService.ThreadManagementService;
+        return yield* threads
           .sendToThread({
-            threadId,
+            threadId: idle,
             projectId,
             commandId: CommandId.make(`command:agent-queued-send:${id}`),
             messageId: MessageId.make(`message:agent-queued-send:${id}`),
@@ -1162,22 +1189,51 @@ it.effect(
             attachments: [],
             mode: "queue",
             creationSource: input.createdBy === "user" ? "web" : "mcp",
+            ...(input.createdBy === "agent" ? { senderThreadId: peer } : {}),
             ...input,
           })
           .pipe(Effect.exit);
-      yield* send("agent", { createdBy: "agent" });
-      yield* send("person", { createdBy: "user" });
-      yield* send("scheduled", { createdBy: "agent", scheduledTaskId: "scheduled:1" as never });
-      yield* send("fresh", { createdBy: "agent", freshContext: true });
+      });
+    return Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        yield* send("idle notice", { createdBy: "agent" });
+        yield* send("settled notice", { createdBy: "agent", threadId: settled });
+        yield* send("answer", { createdBy: "agent", senderThreadId: answering });
+        yield* send("person", { createdBy: "user" });
+        yield* send("running", { createdBy: "agent", threadId: running });
+        yield* send("urgent", { createdBy: "agent", urgentReason: "blocking question" });
+        yield* send("parent order", { createdBy: "agent", senderThreadId: parentId });
+        yield* send("scheduled", { createdBy: "agent", scheduledTaskId: "scheduled:1" as never });
+        yield* send("fresh", { createdBy: "agent", freshContext: true });
+      }).pipe(Effect.provide(layer(true)));
+      yield* send("setting off", { createdBy: "agent" }).pipe(Effect.provide(layer(false)));
+      const held = { type: "queue_after_active" };
+      const starts = { type: "start_immediately" };
       expect(
-        commands.map((command) => [command.text, command.dispatchMode, command.deliveryIntent]),
+        commands.map((command) => [
+          command.text,
+          command.dispatchMode,
+          command.deliveryIntent,
+          command.holdWhileIdle,
+        ]),
       ).toEqual([
-        ["agent", { type: "start_immediately" }, "auto"],
-        ["person", { type: "queue_after_active" }, undefined],
-        ["scheduled", { type: "queue_after_active" }, undefined],
-        ["fresh", { type: "queue_after_active" }, undefined],
+        ["idle notice", held, undefined, true],
+        ["settled notice", held, undefined, true],
+        ["answer", starts, "auto", undefined],
+        ["person", { type: "queue_after_active" }, undefined, undefined],
+        [
+          "running",
+          { type: "steer_active", targetRunId: RunId.make(`run:${running}`) },
+          "auto",
+          undefined,
+        ],
+        ["urgent", starts, "auto", undefined],
+        ["parent order", starts, "auto", undefined],
+        ["scheduled", { type: "queue_after_active" }, undefined, undefined],
+        ["fresh", { type: "queue_after_active" }, undefined, undefined],
+        ["setting off", starts, "auto", undefined],
       ]);
-    }).pipe(Effect.provide(layer));
+    });
   },
 );
 

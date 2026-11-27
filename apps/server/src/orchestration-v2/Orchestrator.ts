@@ -7498,7 +7498,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : run.id === continuedFromRunId,
     )?.delegatedTaskId;
 
-    if (projection.thread.settledOverride !== null) {
+    // A held notice waits for the thread's next run and leaves it settled until then.
+    if (projection.thread.settledOverride !== null && command.holdWhileIdle !== true) {
       const now = yield* DateTime.now;
       const thread: OrchestrationV2AppThread = {
         ...projection.thread,
@@ -7980,7 +7981,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection.thread.worktreePath === null
         ? latestRun
         : undefined;
-    const queueBehindRun = activeRun ?? worktreeMissingRun;
+    // An agent notice to an idle thread waits, held, behind its last run. Like other unattended
+    // holds, the thread's next completed run releases it.
+    const idleHoldRun =
+      command.holdWhileIdle === true &&
+      activeRun === undefined &&
+      worktreeMissingRun === undefined &&
+      dispatchMode.type === "queue_after_active"
+        ? (latestRun ?? undefined)
+        : undefined;
+    const queueBehindRun = activeRun ?? worktreeMissingRun ?? idleHoldRun;
     const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);
     const startsOrQueuesRun =
       dispatchMode.type === "defer_start" ||
@@ -8180,6 +8190,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         status: "queued",
         ...(steerWhenReadyRunId === undefined ? {} : { steerWhenReadyRunId }),
         ...(worktreeMissingRun !== undefined ||
+        idleHoldRun !== undefined ||
         (heldRunsToRelease.length === 0 &&
           queueIsHeld &&
           !wakeSkipsHold &&
