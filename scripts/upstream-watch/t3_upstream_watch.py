@@ -255,7 +255,7 @@ class Git:
 
 
 def refresh_mirror(git: Git, cfg: dict) -> None:
-    # Bare repo holding only tags + the fork branch; `clone --mirror` of GitHub also pulls every PR ref.
+    # Bare repo with only tags + the fork branch; `clone --mirror` of GitHub pulls every PR ref too.
     if not os.path.isdir(cfg["mirrorPath"]):
         git("init", "--bare", "--quiet", cfg["mirrorPath"])
     git("fetch", "--quiet", "--no-tags", "--force", cfg["upstreamUrl"], "+refs/tags/*:refs/tags/*")
@@ -270,12 +270,12 @@ def refresh_mirror(git: Git, cfg: dict) -> None:
 
 
 def build_report(git: Git, cfg: dict, tag: str, previous: str | None) -> Report:
-    tag_ref = f"refs/tags/{tag}"
-    tag_sha, fork_sha = git("rev-parse", f"{tag_ref}^{{commit}}", FORK_REF).split()
-    ahead = int(git("rev-list", "--count", f"{FORK_REF}..{tag_ref}").strip())
-    fork_only = int(git("rev-list", "--count", "--no-merges", f"{tag_ref}..{FORK_REF}").strip())
+    # Peeled commit ids: upstream tags may be annotated, and every count must use the same commits.
+    tag_sha, fork_sha = git("rev-parse", f"refs/tags/{tag}^{{commit}}", FORK_REF).split()
+    ahead = int(git("rev-list", "--count", f"{fork_sha}..{tag_sha}").strip())
+    fork_only = int(git("rev-list", "--count", "--no-merges", f"{tag_sha}..{fork_sha}").strip())
     conflicts = parse_merge_tree(
-        git.raw("merge-tree", "--write-tree", "--name-only", "--no-messages", FORK_REF, tag_ref)
+        git.raw("merge-tree", "--write-tree", "--name-only", "--no-messages", fork_sha, tag_sha)
     )
     return Report(
         tag=tag,
@@ -295,8 +295,6 @@ def start_report_thread(runner: Runner, cfg: dict, report: Report) -> str | None
         *cfg["t3Command"],
         "thread",
         "start",
-        cfg["projectId"],
-        "-",
         "--title",
         report.title,
         "--provider",
@@ -304,6 +302,8 @@ def start_report_thread(runner: Runner, cfg: dict, report: Report) -> str | None
         "--model",
         cfg["reportModel"],
         "--json",
+        cfg["projectId"],
+        "-",
     ]
     r = runner(argv, stdin=report.message, timeout=cfg["commandTimeoutSec"])
     if r.code != 0:

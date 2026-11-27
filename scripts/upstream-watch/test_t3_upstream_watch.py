@@ -162,9 +162,8 @@ class RunTest(WatcherCase):
         [(argv, message)] = runner.thread_starts()
         self.assertEqual(
             argv,
-            ["t3", "thread", "start", "project-1", "-"]
-            + ["--title", "T3 Code: upstream v0.1.13 ready, merge?"]
-            + ["--provider", "claude", "--model", "haiku", "--json"],
+            ["t3", "thread", "start", "--title", "T3 Code: upstream v0.1.13 ready, merge?"]
+            + ["--provider", "claude", "--model", "haiku", "--json", "project-1", "-"],
         )
         for text in (
             "Upstream released v0.1.13 (aaaaaaaaaa). Last reported: none.",
