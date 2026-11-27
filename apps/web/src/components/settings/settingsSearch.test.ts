@@ -297,6 +297,7 @@ describe("auto-settlement search availability", () => {
     expect(searchSettings("auto-settle", items).map((item) => item.id)).toEqual([
       "auto-settle-inactive-threads",
       "auto-settle-merged-threads",
+      "auto-settle-agent-threads",
       "days-before-auto-settle",
       "keep-threads-with-pull-requests",
     ]);
