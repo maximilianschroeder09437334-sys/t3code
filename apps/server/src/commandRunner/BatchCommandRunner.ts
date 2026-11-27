@@ -40,6 +40,8 @@ export interface BatchCommandRunnerConfig {
   /** Logs older than this, or past the newest `maxLogCount`, are deleted when a batch starts. */
   readonly maxLogAgeMs: number;
   readonly maxLogCount: number;
+  /** Text budget for matched lines and tails across the whole batch, under MCP output limits. */
+  readonly maxBatchSummaryChars: number;
   readonly limits: OutputSummaryLimits;
 }
 
@@ -51,6 +53,8 @@ export const DEFAULT_BATCH_COMMAND_RUNNER_CONFIG: Omit<BatchCommandRunnerConfig,
   maxBatchMs: 60 * 60_000,
   maxLogAgeMs: 7 * 24 * 60 * 60_000,
   maxLogCount: 200,
+  // About 12K tokens; Claude Code rejects MCP results over 25K tokens by default.
+  maxBatchSummaryChars: 48_000,
   limits: DEFAULT_OUTPUT_SUMMARY_LIMITS,
 };
 
@@ -74,6 +78,8 @@ export interface CommandRunResult extends CommandOutputSummary {
   /** Something the shell started held the pipes open after it exited; later output is lost. */
   readonly outputCutAfterExit?: true;
   readonly durationMs: number;
+  /** Earlier tail lines cut by the batch text budget; the log has them. */
+  readonly tailLinesInLogOnly?: number;
 }
 
 export interface SkippedCommand {
@@ -321,6 +327,93 @@ const closeLog = (log: WriteStream) =>
     log.end(() => resume(Effect.void));
   });
 
+const textChars = (lines: ReadonlyArray<string>) =>
+  lines.reduce((total, line) => total + line.length, 0);
+
+/** Splits `budget` so small requests get all they ask and large ones share the rest evenly. */
+const fairShares = (sizes: ReadonlyArray<number>, budget: number): Array<number> => {
+  const shares = sizes.map(() => 0);
+  let left = budget;
+  const order = sizes.map((_, index) => index).toSorted((a, b) => sizes[a]! - sizes[b]!);
+  order.forEach((index, position) => {
+    const share = Math.min(sizes[index]!, Math.floor(left / (order.length - position)));
+    shares[index] = share;
+    left -= share;
+  });
+  return shares;
+};
+
+const keepWithin = (lengths: ReadonlyArray<number>, budget: number, fromEnd: boolean) => {
+  let used = 0;
+  let kept = 0;
+  for (let step = 0; step < lengths.length; step += 1) {
+    const length = lengths[fromEnd ? lengths.length - 1 - step : step]!;
+    if (used + length > budget) break;
+    used += length;
+    kept += 1;
+  }
+  return kept;
+};
+
+/** Trims matched lines from the middle and tails from the front so the batch fits `maxChars`. */
+export const capBatchSummaries = (
+  results: ReadonlyArray<CommandRunResult | SkippedCommand>,
+  maxChars: number,
+): Array<CommandRunResult | SkippedCommand> => {
+  const ran = results.filter((result): result is CommandRunResult => result.status !== "skipped");
+  const matchedSizes = ran.map((result) => textChars(result.matchedLines.map((m) => m.text)));
+  const tailSizes = ran.map((result) => textChars(result.tail ?? []));
+  const tailTotal = tailSizes.reduce((a, b) => a + b, 0);
+  if (matchedSizes.reduce((a, b) => a + b, 0) + tailTotal <= maxChars) return [...results];
+  const matchedShares = fairShares(
+    matchedSizes,
+    Math.max(maxChars - tailTotal, Math.floor(maxChars / 2)),
+  );
+  const capped = new Map<CommandRunResult, CommandRunResult>();
+  let matchedUsed = 0;
+  ran.forEach((result, index) => {
+    const lengths = result.matchedLines.map((m) => m.text.length);
+    const share = matchedShares[index]!;
+    const head = keepWithin(lengths, Math.floor(share / 2), false);
+    const last = Math.min(
+      keepWithin(
+        lengths,
+        share - textChars(result.matchedLines.slice(0, head).map((m) => m.text)),
+        true,
+      ),
+      lengths.length - head,
+    );
+    const matchedLines = [
+      ...result.matchedLines.slice(0, head),
+      ...result.matchedLines.slice(lengths.length - last),
+    ];
+    matchedUsed += textChars(matchedLines.map((m) => m.text));
+    capped.set(result, {
+      ...result,
+      matchedLines,
+      matchedLinesInLogOnly: result.matchedLinesInLogOnly + lengths.length - matchedLines.length,
+    });
+  });
+  const tailShares = fairShares(tailSizes, Math.max(0, maxChars - matchedUsed));
+  ran.forEach((result, index) => {
+    if (result.tail === undefined) return;
+    const kept = keepWithin(
+      result.tail.map((line) => line.length),
+      tailShares[index]!,
+      true,
+    );
+    if (kept === result.tail.length) return;
+    capped.set(result, {
+      ...capped.get(result)!,
+      tail: result.tail.slice(result.tail.length - kept),
+      tailLinesInLogOnly: result.tail.length - kept,
+    });
+  });
+  return results.map((result) =>
+    result.status === "skipped" ? result : (capped.get(result) ?? result),
+  );
+};
+
 export const make = (config: BatchCommandRunnerConfig): BatchCommandRunner["Service"] => ({
   run: Effect.fn("BatchCommandRunner.run")(function* (input) {
     const { timeoutMs, pattern } = yield* validate(input, config);
@@ -368,7 +461,7 @@ export const make = (config: BatchCommandRunnerConfig): BatchCommandRunner["Serv
             logPath: state.logPath,
             ...(state.error === undefined ? {} : { logError: state.error }),
             ...(batchTimedOut ? { batchTimedOut: true as const } : {}),
-            commands: results,
+            commands: capBatchSummaries(results, config.maxBatchSummaryChars),
           } satisfies BatchCommandRunResult;
         }),
       // Reached with the log still open only on failure or interruption.

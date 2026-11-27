@@ -21,6 +21,7 @@ const CommandResult = Schema.Struct({
   matchedLines: Schema.optional(Schema.Array(Schema.Struct({ line: Count, text: Schema.String }))),
   matchedLinesInLogOnly: Schema.optional(Count),
   tail: Schema.optional(Schema.Array(Schema.String)),
+  tailLinesInLogOnly: Schema.optional(Count),
 });
 
 const RunCommandsTool = Tool.make("t3_run_commands", {

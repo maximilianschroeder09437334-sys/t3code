@@ -60,7 +60,7 @@ const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&
 /** Caller additions are literal text: a caller regex could backtrack and stall the server. */
 export const compileMatchPatterns = (extra: ReadonlyArray<string> = []): RegExp =>
   new RegExp(
-    [...DEFAULT_MATCH_PATTERNS, ...extra.map(escapeRegExp)]
+    [...DEFAULT_MATCH_PATTERNS, ...extra.filter((text) => text !== "").map(escapeRegExp)]
       .map((source) => `(?:${source})`)
       .join("|"),
     "i",

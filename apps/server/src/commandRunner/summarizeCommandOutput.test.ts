@@ -113,6 +113,10 @@ describe("summarizeCommandOutput", () => {
     expect(pattern.test("x")).toBe(false);
     expect(pattern.test("[X]")).toBe(true);
   });
+
+  it("ignores an empty caller pattern instead of matching every line", () => {
+    expect(compileMatchPatterns([""]).test("plain progress line")).toBe(false);
+  });
 });
 
 describe("LineSplitter", () => {

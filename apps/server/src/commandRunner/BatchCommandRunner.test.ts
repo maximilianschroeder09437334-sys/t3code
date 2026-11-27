@@ -206,3 +206,53 @@ it.live("deletes logs past the retention age and count when a batch starts", () 
     { maxLogAgeMs: 10 * 365 * 24 * 60 * 60_000 },
   ),
 );
+
+const ranResult = (
+  command: string,
+  matched: number,
+  tail: number,
+  lineChars = 100,
+): BatchCommandRunner.CommandRunResult => ({
+  command,
+  status: "failed",
+  exitCode: 1,
+  durationMs: 1,
+  lineCount: matched + tail,
+  matchedLineCount: matched,
+  matchedLines: Array.from({ length: matched }, (_, index) => ({
+    line: index + 1,
+    text: `error ${index}`.padEnd(lineChars, "."),
+  })),
+  matchedLinesInLogOnly: 3,
+  tail: Array.from({ length: tail }, (_, index) => `tail ${index}`.padEnd(lineChars, ".")),
+});
+
+it("caps matched lines and tails across the whole batch and counts what moved to the log", () => {
+  const results = [
+    ranResult("big", 200, 30),
+    ranResult("small", 2, 0),
+    { command: "later", status: "skipped" as const },
+  ];
+  const capped = BatchCommandRunner.capBatchSummaries(results, 10_000);
+  const text = capped.flatMap((result) =>
+    result.status === "skipped"
+      ? []
+      : [...result.matchedLines.map((match) => match.text), ...(result.tail ?? [])],
+  );
+  expect(text.join("").length).toBeLessThanOrEqual(10_000);
+  const [big, small, later] = capped as [
+    BatchCommandRunner.CommandRunResult,
+    BatchCommandRunner.CommandRunResult,
+    BatchCommandRunner.SkippedCommand,
+  ];
+  expect(small.matchedLines).toHaveLength(2);
+  expect(later.status).toBe("skipped");
+  // First and last matches survive; the rest are counted, never silently dropped.
+  expect(big.matchedLines[0]?.line).toBe(1);
+  expect(big.matchedLines.at(-1)?.line).toBe(200);
+  expect(big.matchedLines.length + big.matchedLinesInLogOnly).toBe(200 + 3);
+  // The newest tail lines survive.
+  expect(big.tail?.at(-1)).toMatch(/^tail 29/);
+  expect((big.tail?.length ?? 0) + (big.tailLinesInLogOnly ?? 0)).toBe(30);
+  expect(BatchCommandRunner.capBatchSummaries(results, 1_000_000)).toEqual(results);
+});
