@@ -28,6 +28,8 @@ export interface HomeDashboardRow extends HomeDashboardRowLike {
     readonly threadId: string;
   };
   readonly waitingThread?: EnvironmentThreadShell;
+  /** The waited-on thread asks Maxi for something (report ask, approval, input or guest request). */
+  readonly waitingOnNeedsYou?: boolean;
   readonly waitingCount?: number;
 }
 
@@ -195,7 +197,14 @@ export function deriveHomeDashboardRows(input: {
       projectKey,
       predecessors,
       ...(waitingOn ? { waitingOn } : {}),
-      ...(waitingThread ? { waitingThread } : {}),
+      ...(waitingThread
+        ? {
+            waitingThread,
+            waitingOnNeedsYou: ["approval", "input", "request"].includes(
+              homeThreadStatus(waitingThread),
+            ),
+          }
+        : {}),
       waitingCount:
         thread.homeWaitingCount ??
         waitingCounts.get(`${thread.environmentId}\u0001${thread.id}`) ??

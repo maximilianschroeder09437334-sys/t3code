@@ -625,7 +625,7 @@ function HomeRowCard({
                 >
                   {row.waitingOn.title}
                 </a>
-                {row.waitingThread?.homeFirstNextStep?.startsWith("Maxi:") ? (
+                {row.waitingOnNeedsYou ? (
                   <span className="text-warning-foreground"> → needs you</span>
                 ) : null}
                 {row.thread.homeAutoWaitActive ? (

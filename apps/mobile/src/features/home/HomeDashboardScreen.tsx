@@ -305,6 +305,7 @@ export function HomeDashboardScreen(props: {
                         section={group}
                         waitingOn={row.waitingOn}
                         waitingThread={row.waitingThread}
+                        waitingOnNeedsYou={row.waitingOnNeedsYou === true}
                         waitingCount={row.waitingCount}
                         onOpenWaitingThread={
                           row.waitingThread
@@ -343,6 +344,7 @@ function HomeDashboardRow(props: {
     readonly threadId: string;
   };
   readonly waitingThread?: EnvironmentThreadShell;
+  readonly waitingOnNeedsYou: boolean;
   readonly waitingCount?: number;
   readonly onOpenWaitingThread?: () => void;
   readonly now: string;
@@ -486,7 +488,7 @@ function HomeDashboardRow(props: {
                     {props.waitingOn.title}
                   </Text>
                 </Pressable>
-                {props.waitingThread?.homeFirstNextStep?.startsWith("Maxi:") ? (
+                {props.waitingOnNeedsYou ? (
                   <Text className="text-xs text-warning-foreground">→ needs you</Text>
                 ) : null}
                 {thread.homeAutoWaitActive ? (

@@ -16,7 +16,7 @@ const NEXT_STEPS_HEADING =
 const LIST_ITEM = /^(?:\d+[.)]|[-*+])\s+(\S.*)$/u;
 const OWNER_LINE = /^(?:\*\*|__)?(?:Maxi|T3)(?:\*\*|__)?:/iu;
 const OTHER_HEADING = /^(?:#{1,6}\s|(?:\*\*|__)[^*_].*(?:\*\*|__):?$)/u;
-const NOTHING_NEEDED = /^Maxi:\s*nothing (?:is )?needed\b/iu;
+const NOTHING_NEEDED = /^Maxi:\s*nothing needed(?: right now)?\.?$/iu;
 
 /** Parses only the first ordered item under Next steps in order in a completed report. */
 export function parseHomeNextStep(report: string): HomeNextStep {

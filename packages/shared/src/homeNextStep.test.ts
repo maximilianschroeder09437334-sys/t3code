@@ -94,10 +94,10 @@ describe("parseHomeNextStep", () => {
     expect(parseHomeNextStep("**Next steps in order**\n1. T3: Continue")).toBeNull();
     expect(parseHomeNextStep(FULL_REPORT.replace("1. Maxi: approve", "1. T3: approve"))).toBeNull();
   });
-  it("treats any nothing-needed wording as no ask", () => {
+  it("treats nothing-needed wording without a period or with bold as no ask", () => {
     for (const step of [
       "Maxi: nothing needed right now",
-      "Maxi: Nothing needed right now (all pushed).",
+      "Maxi: Nothing needed right now.",
       "**Maxi:** nothing needed.",
     ])
       expect(parseHomeNextStep(`**Next steps in order**\n1. ${step}`)).toEqual({ kind: "none" });

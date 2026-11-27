@@ -111,6 +111,24 @@ describe("Home dashboard helpers", () => {
     expect(rows[1]).toMatchObject({
       waitingOn: { title: "Review this result", environmentId: "home-test", threadId: "needs" },
       waitingThread: needs,
+      waitingOnNeedsYou: true,
+    });
+  });
+
+  it("does not flag a waited-on thread whose report needs nothing from Maxi", () => {
+    const target = thread("target", { homeFirstNextStep: "Maxi: nothing needed right now." });
+    const waiting = thread("waiting", {
+      homeFirstNextStep: "T3: WAIT on [Target](https://app.t3.codes/threads/home-test/target)",
+    });
+    const rows = deriveHomeDashboardRows({
+      projects: [project],
+      now: "2026-11-21T12:00:00.000Z",
+      threads: [target, waiting],
+    });
+    expect(rows.find((row) => row.thread.id === waiting.id)).toMatchObject({
+      section: "waiting",
+      waitingThread: target,
+      waitingOnNeedsYou: false,
     });
   });
 
