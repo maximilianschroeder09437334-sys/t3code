@@ -252,8 +252,14 @@ it("stays on an unanswered question when the composer submits", async () => {
   await expect.element(screen.getByRole("status")).toHaveTextContent("Question 2");
 });
 
+/** Draft writes queued while `hold` is set, so a render can see a stale answer. */
+interface HeldAnswerWrites {
+  hold: boolean;
+  readonly pending: Array<() => void>;
+}
+
 /** Wires the composer editor to the answer draft the way ChatComposer does. */
-function AnswerEditorProbe(props: ProbeProps) {
+function AnswerEditorProbe({ writes, ...props }: ProbeProps & { writes: HeldAnswerWrites }) {
   const state = useProbeRequests(props);
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
   const answer = state.activePendingProgress?.customAnswer ?? "";
@@ -274,15 +280,19 @@ function AnswerEditorProbe(props: ProbeProps) {
       onPaste={() => {}}
       onChange={(value, nextCursor) => {
         setCursor(nextCursor);
-        state.onChangeActivePendingUserInputCustomAnswer("question-0", value);
+        const write = () => state.onChangeActivePendingUserInputCustomAnswer("question-0", value);
+        if (writes.hold) writes.pending.push(write);
+        else write();
       }}
     />
   );
 }
 
 it("keeps every letter in order when an answer is typed faster than the draft renders", async () => {
+  const writes: HeldAnswerWrites = { hold: false, pending: [] };
   await using screen = await render(
     <AnswerEditorProbe
+      writes={writes}
       environmentId={EnvironmentId.make("fast-typing-environment")}
       projection={questionProjection(threadRef.threadId)}
     />,
@@ -296,14 +306,20 @@ it("keeps every letter in order when an answer is typed faster than the draft re
   await vi.waitFor(() => expect(requests.activePendingProgress?.customAnswer).toBe(typed));
   expect(serializeEditorDoc(editor.state.doc).value).toBe(typed);
 
-  // Several keystrokes land before the draft store renders once.
+  // Each keystroke renders with the previous answer before its draft write lands, so the editor
+  // is reset to a stale value between keystrokes.
   const burst = "abcdefghijklmnopqrstuvwxyz0123456789";
-  await act(() => {
-    for (const letter of burst) {
+  writes.hold = true;
+  for (const [index, letter] of [...burst].entries()) {
+    await act(() => {
       editor.view.dispatch(editor.view.state.tr.insertText(letter));
-    }
-  });
-  expect(serializeEditorDoc(editor.state.doc).value).toBe(typed + burst);
+    });
+    await act(() => {
+      for (const write of writes.pending.splice(0)) write();
+    });
+    expect(serializeEditorDoc(editor.state.doc).value).toBe(typed + burst.slice(0, index + 1));
+  }
+  writes.hold = false;
   expect(requests.activePendingProgress?.customAnswer).toBe(typed + burst);
 
   // The next keystrokes continue at the end, so no render moved the caret back.
