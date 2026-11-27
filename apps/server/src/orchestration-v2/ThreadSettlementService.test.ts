@@ -461,6 +461,83 @@ describe("resolveAutoSettlementAt", () => {
   });
 });
 
+describe("resolveAgentThreadSettlementAt", () => {
+  const GRACE_MS = 30 * 60 * 1_000;
+  const agentThread = (overrides: Partial<SettlementShell> = {}) =>
+    shell({
+      createdBy: "agent",
+      creationSource: "mcp",
+      status: "completed",
+      latestRunId: RunId.make("run-1"),
+      latestRunStartedAt: at(-2 * GRACE_MS),
+      latestRunCompletedAt: at(-GRACE_MS - 1),
+      ...overrides,
+    });
+  const settle = (thread: SettlementShell, hasActiveChildren = false) =>
+    ThreadSettlementService.resolveAgentThreadSettlementAt({
+      thread,
+      nowMs: NOW_MS,
+      graceMs: GRACE_MS,
+      hasActiveChildren,
+    });
+  const question = {
+    id: RuntimeRequestId.make("question"),
+    kind: "user_input" as const,
+    createdAt: at(-GRACE_MS - 1),
+  };
+
+  it("settles a finished agent thread at its last activity once the grace passes", () => {
+    for (const creationSource of ["mcp", "provider"] as const) {
+      expect(settle(agentThread({ creationSource }))).toEqual(at(-GRACE_MS - 1));
+    }
+    for (const status of ["failed", "cancelled", "interrupted"] as const) {
+      expect(settle(agentThread({ status }))).toEqual(at(-GRACE_MS - 1));
+    }
+  });
+
+  it.each<[string, Partial<SettlementShell>]>([
+    ["a person created it", { createdBy: "user", creationSource: "web" }],
+    ["a person created it over MCP", { createdBy: "user", creationSource: "mcp" }],
+    ["the server created it", { createdBy: "agent", creationSource: "server" }],
+    ["it never ran", { latestRunId: null, status: "idle" }],
+    ["its latest run is running", { status: "running" }],
+    ["its latest run is waiting", { status: "waiting" }],
+    [
+      "it has pending background work",
+      { pendingBackgroundTasks: [{ taskId: "task", kind: "background_task" }] },
+    ],
+    ["it asks a question", { pendingRuntimeRequest: question }],
+    ["it waits on an approval", { pendingRuntimeRequest: { ...question, kind: "command" } }],
+    ["it is pinned", { pinnedAt: at(-DAY_MS) }],
+    ["it is snoozed", { snoozedUntil: at(DAY_MS), snoozedAt: at(-DAY_MS) }],
+    ["it is blocked on a thread wait", { blockedOnThreadWait: true }],
+    [
+      "it watches a pull request",
+      {
+        pendingBackgroundTasks: [
+          { taskId: "pull-request-watch:github.com/acme/app#1", kind: "monitor" },
+        ],
+      },
+    ],
+    ["its pull request is open", { pullRequests: [persistedLink("open", at(-DAY_MS))] }],
+    ["it opted out of auto-settle", { autoSettleDisabledAt: at(-DAY_MS) }],
+    ["it was active within the grace", { latestRunCompletedAt: at(-GRACE_MS + 1) }],
+  ])("keeps an agent thread when %s", (_, overrides) => {
+    expect(settle(agentThread(overrides))).toBeNull();
+  });
+
+  it("keeps an agent thread while a child runs or waits", () => {
+    expect(settle(agentThread(), true)).toBeNull();
+    const child = (overrides: Partial<SettlementShell> = {}) =>
+      ThreadSettlementService.childKeepsParentOpen(shell({ status: "completed", ...overrides }));
+    expect(child()).toBe(false);
+    expect(child({ status: "running" })).toBe(true);
+    expect(child({ status: "waiting" })).toBe(true);
+    expect(child({ pendingRuntimeRequest: question })).toBe(true);
+    expect(child({ pendingBackgroundTasks: [{ taskId: "sub", kind: "subagent" }] })).toBe(true);
+  });
+});
+
 const NOW = "2026-08-28T12:00:00.000Z";
 const PROJECT_ID = ProjectId.make("settlement-project");
 
@@ -688,6 +765,20 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       listShells: () => Ref.get(snapshots).pipe(Effect.map((snapshot) => snapshot.projects)),
     }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      listAppOwnedChildThreadIds: (threadId) =>
+        Ref.get(snapshots).pipe(
+          Effect.map((snapshot) =>
+            snapshot.threads
+              .filter((thread) => thread.lineage.parentThreadId === threadId)
+              .map((thread) => thread.id),
+          ),
+        ),
+      getThreadShell: (threadId) =>
+        Ref.get(snapshots).pipe(
+          Effect.map(
+            (snapshot) => snapshot.threads.find((thread) => thread.id === threadId) ?? null,
+          ),
+        ),
       ...options.projections,
       getSettlementCandidates: (threadId) =>
         Ref.update(candidateReads, (reads) => [...reads, threadId]).pipe(
@@ -1344,6 +1435,53 @@ describe("ThreadSettlementServiceV2 worker", () => {
           emptied: "/workspace/project",
         });
       }).pipe(Effect.provide(fixture.layer));
+    }),
+  );
+
+  it.effect("settles finished agent threads only when the agent rule is on", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const recent = DateTime.makeUnsafe("2026-08-28T11:00:00.000Z");
+      const finished = (id: string, overrides: Partial<SettlementShell> = {}) =>
+        makeThread(id, {
+          status: "completed",
+          latestRunId: RunId.make(`run:${id}`),
+          latestRunCompletedAt: recent,
+          latestUserMessageAt: recent,
+          ...overrides,
+        });
+      const agent = (id: string, overrides: Partial<SettlementShell> = {}) =>
+        finished(id, { createdBy: "agent", creationSource: "mcp", ...overrides });
+      const snapshot = makeSnapshot([
+        agent("finished-agent"),
+        finished("finished-user"),
+        agent("delegating-agent"),
+        agent("running-delegate", {
+          status: "running",
+          lineage: {
+            rootThreadId: ThreadId.make("delegating-agent"),
+            parentThreadId: ThreadId.make("delegating-agent"),
+            relationshipToParent: null,
+          },
+        }),
+      ]);
+      const settledIn = (mode: ContractServerSettings["agentThreadAutoSettleMode"]) =>
+        Effect.gen(function* () {
+          const fixture = yield* makeHarness({
+            snapshot,
+            settings: { ...DEFAULT_SERVER_SETTINGS, agentThreadAutoSettleMode: mode },
+          });
+          return yield* Effect.gen(function* () {
+            const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+            yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+            return (yield* Ref.get(fixture.commands)).map((command) => command.threadId);
+          }).pipe(Effect.provide(fixture.layer));
+        }).pipe(Effect.scoped);
+
+      expect(DEFAULT_SERVER_SETTINGS.agentThreadAutoSettleMode).toBe("dry-run");
+      expect(yield* settledIn("dry-run")).toEqual([]);
+      expect(yield* settledIn("off")).toEqual([]);
+      expect(yield* settledIn("on")).toEqual([ThreadId.make("finished-agent")]);
     }),
   );
 
