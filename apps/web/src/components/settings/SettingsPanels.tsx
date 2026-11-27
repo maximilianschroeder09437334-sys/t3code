@@ -1999,7 +1999,7 @@ export function ThreadsSettingsPanel() {
           {supportsAgentThreadAutoSettle ? (
             <SettingsRow
               {...searchableSetting("auto-settle-agent-threads")}
-              description={`Settle finished threads an agent created after ${settings.agentThreadAutoSettleGraceMinutes} idle minutes. Dry run only logs them on the server.`}
+              description={`Settle finished delegated and subagent threads once their parent has the result and ${settings.agentThreadAutoSettleGraceMinutes} idle minutes pass. Dry run only logs them on the server.`}
               resetAction={
                 settings.agentThreadAutoSettleMode !==
                 DEFAULT_UNIFIED_SETTINGS.agentThreadAutoSettleMode ? (

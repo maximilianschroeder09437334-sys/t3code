@@ -177,6 +177,12 @@ it.effect.each(["provider", "mcp"] as const)(
       assert.deepEqual(savedParent.autoSettleDisabledAt, parentCreatedAt);
       // A subagent child waits for its parent, so settle the pinned parent first.
       assert.deepEqual(yield* store.getSettlementCandidates(), []);
+      // Agent auto-settle asks for it while the parent is open and is told so.
+      const openParentChildren = yield* store.getSettlementCandidates(undefined, true);
+      assert.deepEqual(
+        openParentChildren.map((candidate) => [candidate.id, candidate.subagentParentOpen]),
+        [[childThreadId, true]],
+      );
       yield* store.apply({
         id: EventId.make(`event:${parentThreadId}:settled`),
         type: "thread.settled",
@@ -195,6 +201,7 @@ it.effect.each(["provider", "mcp"] as const)(
         candidates.map((candidate) => candidate.id),
         [childThreadId],
       );
+      assert.equal(candidates[0]!.subagentParentOpen, false);
       const settledAt = resolveAutoSettlementAt({
         thread: candidates[0]!,
         pullRequest: null,

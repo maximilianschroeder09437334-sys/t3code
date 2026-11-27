@@ -719,6 +719,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   const mergedPullRequests = yield* PubSub.unbounded<PullRequestService.PullRequestMergeEvent>();
   const pullRequestRefreshes = yield* PubSub.unbounded<number>();
   const commands = yield* Ref.make<ReadonlyArray<AutoSettleCommand>>([]);
+  const deliveryLookups = yield* Ref.make(0);
   const branchCalls = yield* Ref.make<
     ReadonlyArray<{ readonly cwd: string; readonly branch: string }>
   >([]);
@@ -819,7 +820,9 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
           ),
         ),
       hasPendingDelegatedCompletion: (threadId) =>
-        Effect.succeed(options.pendingDelegatedCompletions?.includes(threadId) === true),
+        Ref.update(deliveryLookups, (count) => count + 1).pipe(
+          Effect.as(options.pendingDelegatedCompletions?.includes(threadId) === true),
+        ),
       getThreadShell: (threadId) =>
         Ref.get(snapshots).pipe(
           Effect.map(
@@ -909,6 +912,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     snapshotReads,
     candidateReads,
     commands,
+    deliveryLookups,
     branchCalls,
     summaryCalls,
     summaryRecovery,
@@ -1539,6 +1543,25 @@ describe("ThreadSettlementServiceV2 worker", () => {
       expect(yield* settledIn("dry-run")).toEqual([]);
       expect(yield* settledIn("off")).toEqual([]);
       expect(yield* settledIn("on")).toEqual([ThreadId.make("finished-delegate")]);
+
+      const dryRunLookups = yield* Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          snapshot,
+          settings: { ...DEFAULT_SERVER_SETTINGS, agentThreadAutoSettleMode: "dry-run" },
+          pendingDelegatedCompletions: ["undelivered-delegate"],
+        });
+        return yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          const first = yield* Ref.get(fixture.deliveryLookups);
+          yield* TestClock.adjust("1 minute");
+          yield* Queue.take(fixture.snapshotReads);
+          yield* reactor.drain;
+          return [first, (yield* Ref.get(fixture.deliveryLookups)) - first];
+        }).pipe(Effect.provide(fixture.layer));
+      }).pipe(Effect.scoped);
+      // The unchanged eligible delegate is not looked up again; the two held ones are rechecked.
+      expect(dryRunLookups).toEqual([3, 2]);
     }),
   );
 
