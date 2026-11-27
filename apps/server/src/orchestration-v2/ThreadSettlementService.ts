@@ -47,6 +47,7 @@ export interface SettlementPullRequest {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+const MINUTE_MS = 60 * 1_000;
 const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 
 function toMillis(value: DateTime.Utc | null | undefined): number | null {
@@ -62,7 +63,12 @@ function latestMillis(values: ReadonlyArray<number | null>): number | null {
   return latest;
 }
 
-function threadActivityAtMs(thread: ProjectionStore.ProjectionSettlementCandidate): number {
+type SettlementThread = Omit<
+  ProjectionStore.ProjectionSettlementCandidate,
+  "latestUserAuthoredMessageAt"
+>;
+
+function threadActivityAtMs(thread: SettlementThread): number {
   return (
     latestMillis([
       toMillis(thread.latestUserMessageAt),
@@ -158,10 +164,7 @@ function pullRequestSettles(
   return pullRequestAtMs >= userAnchorMs;
 }
 
-export function isAutoSettlementCandidate(
-  thread: Omit<ProjectionStore.ProjectionSettlementCandidate, "latestUserAuthoredMessageAt">,
-  nowMs: number,
-): boolean {
+export function isAutoSettlementCandidate(thread: SettlementThread, nowMs: number): boolean {
   if (thread.archivedAt !== null || thread.settledOverride !== null) return false;
   if (thread.pinnedAt != null || thread.autoSettleDisabledAt != null) return false;
   if (thread.pendingRuntimeRequest !== null) return false;
@@ -252,14 +255,91 @@ export function resolveAutoSettlementAt(input: {
     thread.branchPullRequest != null;
   if (input.autoSettleKeepPullRequests === true && hasPullRequest) return null;
   if (input.autoSettleAfterDays === null) return null;
-  const snoozedUntilMs = toMillis(thread.snoozedUntil);
-  const timerWakeAtMs =
-    snoozedUntilMs !== null && snoozedUntilMs <= input.nowMs ? snoozedUntilMs : null;
-  const inactivityAtMs =
-    latestMillis([activityAtMs, toMillis(thread.lastSnoozeWakeAt), timerWakeAtMs]) ?? activityAtMs;
+  const inactivityAtMs = inactiveSinceMs(thread, input.nowMs);
   return inactivityAtMs < input.nowMs - input.autoSettleAfterDays * DAY_MS
     ? DateTime.makeUnsafe(inactivityAtMs)
     : null;
+}
+
+/** Last activity, counting a snooze wake as activity. */
+function inactiveSinceMs(thread: SettlementThread, nowMs: number): number {
+  const activityAtMs = threadActivityAtMs(thread);
+  const snoozedUntilMs = toMillis(thread.snoozedUntil);
+  const timerWakeAtMs = snoozedUntilMs !== null && snoozedUntilMs <= nowMs ? snoozedUntilMs : null;
+  return (
+    latestMillis([activityAtMs, toMillis(thread.lastSnoozeWakeAt), timerWakeAtMs]) ?? activityAtMs
+  );
+}
+
+const FINISHED_RUN_STATUSES: ReadonlySet<OrchestrationV2ThreadShell["status"]> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+const AGENT_CREATION_SOURCES: ReadonlySet<OrchestrationV2ThreadShell["creationSource"]> = new Set([
+  "mcp",
+  "provider",
+]);
+
+/** A child its parent may still be waiting on: running, asking, or holding any background work. */
+export function childKeepsParentOpen(
+  child: Pick<
+    OrchestrationV2ThreadShell,
+    | "status"
+    | "activityRunStatus"
+    | "pendingRuntimeRequest"
+    | "pendingBackgroundTasks"
+    | "blockedOnThreadWait"
+  >,
+): boolean {
+  return (
+    (child.status !== "idle" &&
+      child.status !== "rolled_back" &&
+      !FINISHED_RUN_STATUSES.has(child.status)) ||
+    child.activityRunStatus != null ||
+    child.pendingRuntimeRequest != null ||
+    child.blockedOnThreadWait === true ||
+    (child.pendingBackgroundTasks?.length ?? 0) > 0
+  );
+}
+
+function hasUnfinishedPullRequest(thread: SettlementThread): boolean {
+  const links = visibleThreadPullRequests(thread.pullRequests ?? []);
+  if (links.length > 0) {
+    return links.some((link) => link.snapshot === null || link.snapshot.state === "open");
+  }
+  return thread.linkedPullRequest != null || thread.branchPullRequest != null;
+}
+
+/**
+ * When a finished delegated or provider subagent settles: after its idle grace, once its parent
+ * has its result and nothing in or under it still runs, asks or waits. Only subagent lineage opts
+ * in; top-level threads (owners, handoff successors) never settle this way.
+ */
+export function resolveAgentThreadSettlementAt(input: {
+  readonly thread: SettlementThread;
+  readonly nowMs: number;
+  readonly graceMs: number;
+  readonly hasActiveChildren: boolean;
+  readonly resultDelivered: boolean;
+}): DateTime.Utc | null {
+  const { thread, nowMs } = input;
+  if (thread.lineage.relationshipToParent !== "subagent") return null;
+  if (thread.createdBy !== "agent" || !AGENT_CREATION_SOURCES.has(thread.creationSource)) {
+    return null;
+  }
+  if (thread.latestRunId === null || !FINISHED_RUN_STATUSES.has(thread.status)) return null;
+  // Settling disarms usage-limit auto-resume, so a failed run waiting on it is not finished.
+  if (thread.limitRecovery?.autoResume === true) return null;
+  // Unawaited commands and monitors still run; only an empty list means the agent is done.
+  if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) return null;
+  if (!input.resultDelivered || input.hasActiveChildren) return null;
+  // No thread-wait check: a wait lives inside an active run, which candidates already exclude.
+  if (!isAutoSettlementCandidate(thread, nowMs)) return null;
+  if (hasUnfinishedPullRequest(thread)) return null;
+  const idleSinceMs = inactiveSinceMs(thread, nowMs);
+  return idleSinceMs <= nowMs - input.graceMs ? DateTime.makeUnsafe(idleSinceMs) : null;
 }
 
 export class ThreadSettlementServiceV2 extends Context.Service<
@@ -286,6 +366,8 @@ export function autoSettlementSettingsKey(
   settings: import("@t3tools/contracts").ServerSettings,
 ): string {
   return JSON.stringify([
+    settings.agentThreadAutoSettleMode,
+    settings.agentThreadAutoSettleGraceMinutes,
     settings.sidebarAutoSettleOnMerge,
     settings.sidebarAutoSettleAfterDays,
     settings.sidebarAutoSettleKeepPullRequests,
@@ -342,6 +424,103 @@ export const make = Effect.gen(function* () {
   // Repeated thread.settled retains settledAt; run the action only once per settlement.
   const settleActionRunAt = new Map<ThreadId, number>();
   const noPullRequestRechecks = makeNoPullRequestRechecks();
+  // A dry run logs and looks up each eligible thread once per state change (its updatedAt).
+  const agentDryRunLogged = new Map<ThreadId, number>();
+
+  // An unreadable child counts as active so its parent stays.
+  const threadHasActiveChildren = Effect.fn("ThreadSettlementServiceV2.threadHasActiveChildren")(
+    function* (threadId: ThreadId) {
+      for (const childId of yield* projections.listAppOwnedChildThreadIds(threadId, true)) {
+        const child = yield* projections.getThreadShell(childId);
+        if (child !== null && childKeepsParentOpen(child)) return true;
+      }
+      return false;
+    },
+    Effect.orElseSucceed(() => true),
+  );
+
+  const settleFinishedAgentThreads = Effect.fn(
+    "ThreadSettlementServiceV2.settleFinishedAgentThreads",
+  )(function* (
+    threads: ReadonlyArray<ProjectionStore.ProjectionSettlementCandidate>,
+    settings: import("@t3tools/contracts").ServerSettings,
+    nowMs: number,
+    fullSweep: boolean,
+  ) {
+    const settled = new Set<ThreadId>();
+    const mode = settings.agentThreadAutoSettleMode;
+    if (mode === "off") return settled;
+    const graceMs = settings.agentThreadAutoSettleGraceMinutes * MINUTE_MS;
+    const evaluated = yield* Effect.forEach(
+      // A subagent whose parent is done already settles with it on the sidebar path.
+      threads.filter((thread) => thread.subagentParentOpen === true),
+      (thread) =>
+        Effect.gen(function* () {
+          const decide = (hasActiveChildren: boolean, resultDelivered: boolean) =>
+            resolveAgentThreadSettlementAt({
+              thread,
+              nowMs,
+              graceMs,
+              hasActiveChildren,
+              resultDelivered,
+            });
+          if (decide(false, true) === null) return null;
+          const updatedAtMs = DateTime.toEpochMillis(thread.updatedAt);
+          if (mode === "dry-run" && agentDryRunLogged.get(thread.id) === updatedAtMs) {
+            return { thread, settledAt: decide(false, true), fresh: false };
+          }
+          const resultDelivered = !(yield* projections
+            .hasPendingDelegatedCompletion(thread.id)
+            .pipe(Effect.orElseSucceed(() => true)));
+          const settledAt = decide(yield* threadHasActiveChildren(thread.id), resultDelivered);
+          return { thread, settledAt, fresh: true };
+        }),
+      { concurrency: 8 },
+    );
+    const eligible = evaluated.flatMap((entry) =>
+      entry === null || entry.settledAt === null ? [] : [{ ...entry, settledAt: entry.settledAt }],
+    );
+    if (mode === "dry-run") {
+      const fresh = eligible.filter((entry) => entry.fresh).map(({ thread }) => thread.id);
+      if (fullSweep) agentDryRunLogged.clear();
+      for (const { thread } of eligible) {
+        agentDryRunLogged.set(thread.id, DateTime.toEpochMillis(thread.updatedAt));
+      }
+      if (fresh.length > 0) {
+        yield* Effect.logInfo("agent thread auto-settle dry run: would settle", {
+          threadIds: fresh,
+          graceMinutes: settings.agentThreadAutoSettleGraceMinutes,
+        });
+      }
+      return settled;
+    }
+    yield* Effect.forEach(
+      eligible,
+      ({ thread, settledAt }) =>
+        Effect.gen(function* () {
+          const uuid = yield* random.uuidV4();
+          yield* orchestrator.dispatch({
+            type: "thread.auto-settle",
+            commandId: CommandId.make(`server:auto-settle:${thread.id}:${uuid}`),
+            threadId: thread.id,
+            snapshotAt: thread.updatedAt,
+            settledAt,
+          });
+          settled.add(thread.id);
+        }).pipe(
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterruptsOnly(cause),
+            (cause) =>
+              Effect.logWarning("automatic agent thread settlement skipped", {
+                threadId: thread.id,
+                cause: Cause.pretty(cause),
+              }),
+          ),
+        ),
+      { concurrency: 8, discard: true },
+    );
+    return settled;
+  });
 
   const sweep = Effect.fn("ThreadSettlementServiceV2.sweep")(function* (
     mergedPullRequest: PullRequestService.PullRequestMergeEvent | null,
@@ -351,7 +530,10 @@ export const make = Effect.gen(function* () {
     if (mergedPullRequest !== null) yield* pauseQuietReads();
     const settings = yield* settingsService.getSettings;
     const automaticSettlementEnabled = autoSettlementConfigured(settings);
-    const threads = yield* projections.getSettlementCandidates(threadId);
+    const threads = yield* projections.getSettlementCandidates(
+      threadId,
+      settings.agentThreadAutoSettleMode !== "off",
+    );
     if (threads.length === 0) return;
     const projectShells = yield* projectStore.listShells();
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
@@ -359,9 +541,17 @@ export const make = Effect.gen(function* () {
     for (const [key, readAtMs] of quietOpenReadAt) {
       if (nowMs - readAtMs >= QUIET_SYNC_INTERVAL_MS) quietOpenReadAt.delete(key);
     }
+    const agentSettled = yield* settleFinishedAgentThreads(
+      threads,
+      settings,
+      nowMs,
+      threadId === undefined,
+    );
     // Merge events resweep all candidates because unlinked threads settle through branch lookup.
     const candidates = threads.filter(
       (thread) =>
+        !agentSettled.has(thread.id) &&
+        thread.subagentParentOpen !== true &&
         (automaticSettlementEnabled || thread.lineage.relationshipToParent === "subagent") &&
         isAutoSettlementCandidate(thread, nowMs),
     );

@@ -507,6 +507,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.sidebarAutoSettleOnMerge !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge
       ? ["Auto-settle merged threads"]
       : []),
+    ...(settings.agentThreadAutoSettleMode !== DEFAULT_UNIFIED_SETTINGS.agentThreadAutoSettleMode
+      ? ["Auto-settle agent threads"]
+      : []),
     ...(settings.autoResumeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads
       ? ["Resume after usage limits"]
       : []),
@@ -681,6 +684,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
       sidebarAutoSettleKeepPullRequests: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleKeepPullRequests,
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
+      agentThreadAutoSettleMode: DEFAULT_UNIFIED_SETTINGS.agentThreadAutoSettleMode,
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       snoozePresets: DEFAULT_UNIFIED_SETTINGS.snoozePresets,
@@ -733,6 +737,14 @@ export function useSettingsRestore(onRestored?: () => void) {
 }
 
 const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays ?? 7;
+const AGENT_THREAD_AUTO_SETTLE_MODES = [
+  { value: "off", label: "Off" },
+  { value: "dry-run", label: "Dry run" },
+  { value: "on", label: "On" },
+] as const satisfies ReadonlyArray<{
+  readonly value: (typeof DEFAULT_UNIFIED_SETTINGS)["agentThreadAutoSettleMode"];
+  readonly label: string;
+}>;
 
 function AutoSettleDaysInput({
   value,
@@ -1737,6 +1749,9 @@ export function ThreadsSettingsPanel() {
   const supportsAutoSettlementScope = connectedEnvironments.every(
     (target) => target.serverConfig?.environment.capabilities.threadAutoSettlementScope === true,
   );
+  const supportsAgentThreadAutoSettle = connectedEnvironments.every(
+    (target) => target.serverConfig?.environment.capabilities.agentThreadAutoSettle === true,
+  );
 
   const textGenerationTargets = useTextGenerationTargets({
     environmentId,
@@ -1978,6 +1993,58 @@ export function ThreadsSettingsPanel() {
                   }
                   aria-label="Keep threads with a PR"
                 />
+              }
+            />
+          ) : null}
+          {supportsAgentThreadAutoSettle ? (
+            <SettingsRow
+              {...searchableSetting("auto-settle-agent-threads")}
+              description={`Settle finished delegated and subagent threads once their parent has the result and ${settings.agentThreadAutoSettleGraceMinutes} idle minutes pass. Dry run only logs them on the server.`}
+              resetAction={
+                settings.agentThreadAutoSettleMode !==
+                DEFAULT_UNIFIED_SETTINGS.agentThreadAutoSettleMode ? (
+                  <SettingResetButton
+                    label="auto-settle agent threads"
+                    onClick={() =>
+                      updateSettings({
+                        agentThreadAutoSettleMode:
+                          DEFAULT_UNIFIED_SETTINGS.agentThreadAutoSettleMode,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <Select
+                  value={settings.agentThreadAutoSettleMode}
+                  onValueChange={(value) => {
+                    const mode = AGENT_THREAD_AUTO_SETTLE_MODES.find(
+                      (option) => option.value === value,
+                    );
+                    if (mode) updateSettings({ agentThreadAutoSettleMode: mode.value });
+                  }}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full sm:w-40"
+                    aria-label="Auto-settle agent threads"
+                  >
+                    <SelectValue>
+                      {
+                        AGENT_THREAD_AUTO_SETTLE_MODES.find(
+                          (option) => option.value === settings.agentThreadAutoSettleMode,
+                        )?.label
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="end" alignItemWithTrigger={false}>
+                    {AGENT_THREAD_AUTO_SETTLE_MODES.map((option) => (
+                      <SelectItem hideIndicator key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
               }
             />
           ) : null}

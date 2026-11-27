@@ -56,7 +56,10 @@ function at(offsetMs: number): DateTime.Utc {
 }
 
 type SettlementShell = OrchestrationV2ThreadShell &
-  Pick<ProjectionStore.ProjectionSettlementCandidate, "latestUserAuthoredMessageAt">;
+  Pick<
+    ProjectionStore.ProjectionSettlementCandidate,
+    "latestUserAuthoredMessageAt" | "subagentParentOpen"
+  >;
 
 function shell(overrides: Partial<SettlementShell> = {}): SettlementShell {
   return {
@@ -461,6 +464,117 @@ describe("resolveAutoSettlementAt", () => {
   });
 });
 
+describe("resolveAgentThreadSettlementAt", () => {
+  const GRACE_MS = 30 * 60 * 1_000;
+  const owner = ThreadId.make("owner");
+  const agentThread = (overrides: Partial<SettlementShell> = {}) =>
+    shell({
+      createdBy: "agent",
+      creationSource: "mcp",
+      lineage: { rootThreadId: owner, parentThreadId: owner, relationshipToParent: "subagent" },
+      status: "completed",
+      latestRunId: RunId.make("run-1"),
+      latestRunStartedAt: at(-2 * GRACE_MS),
+      latestRunCompletedAt: at(-GRACE_MS - 1),
+      ...overrides,
+    });
+  const settle = (thread: SettlementShell, hasActiveChildren = false, resultDelivered = true) =>
+    ThreadSettlementService.resolveAgentThreadSettlementAt({
+      thread,
+      nowMs: NOW_MS,
+      graceMs: GRACE_MS,
+      hasActiveChildren,
+      resultDelivered,
+    });
+  const question = {
+    id: RuntimeRequestId.make("question"),
+    kind: "user_input" as const,
+    createdAt: at(-GRACE_MS - 1),
+  };
+
+  it("settles a finished subagent at its last activity once the grace passes", () => {
+    for (const creationSource of ["mcp", "provider"] as const) {
+      expect(settle(agentThread({ creationSource }))).toEqual(at(-GRACE_MS - 1));
+    }
+    for (const status of ["failed", "cancelled", "interrupted"] as const) {
+      expect(settle(agentThread({ status }))).toEqual(at(-GRACE_MS - 1));
+    }
+  });
+
+  it.each<[string, Partial<SettlementShell>]>([
+    [
+      "it is a top-level owner or successor",
+      { lineage: { rootThreadId: owner, parentThreadId: null, relationshipToParent: null } },
+    ],
+    [
+      "it is a fork",
+      { lineage: { rootThreadId: owner, parentThreadId: owner, relationshipToParent: "fork" } },
+    ],
+    [
+      "its failed run waits on usage-limit auto-resume",
+      {
+        status: "failed",
+        limitRecovery: {
+          runId: RunId.make("run-1"),
+          resetAt: DateTime.formatIso(at(DAY_MS)),
+          autoResume: true,
+        },
+      },
+    ],
+    [
+      "it runs an unawaited command",
+      { pendingBackgroundTasks: [{ taskId: "dev", kind: "command" }] },
+    ],
+    [
+      "it runs an unawaited monitor",
+      { pendingBackgroundTasks: [{ taskId: "log", kind: "monitor" }] },
+    ],
+    ["a person created it", { createdBy: "user", creationSource: "web" }],
+    ["a person created it over MCP", { createdBy: "user", creationSource: "mcp" }],
+    ["the server created it", { createdBy: "agent", creationSource: "server" }],
+    ["it never ran", { latestRunId: null, status: "idle" }],
+    ["its latest run is running", { status: "running" }],
+    ["its latest run is waiting", { status: "waiting" }],
+    [
+      "it has pending background work",
+      { pendingBackgroundTasks: [{ taskId: "task", kind: "background_task" }] },
+    ],
+    ["it asks a question", { pendingRuntimeRequest: question }],
+    ["it waits on an approval", { pendingRuntimeRequest: { ...question, kind: "command" } }],
+    ["it is pinned", { pinnedAt: at(-DAY_MS) }],
+    ["it is snoozed", { snoozedUntil: at(DAY_MS), snoozedAt: at(-DAY_MS) }],
+    [
+      "it watches a pull request",
+      {
+        pendingBackgroundTasks: [
+          { taskId: "pull-request-watch:github.com/acme/app#1", kind: "monitor" },
+        ],
+      },
+    ],
+    ["its pull request is open", { pullRequests: [persistedLink("open", at(-DAY_MS))] }],
+    ["it opted out of auto-settle", { autoSettleDisabledAt: at(-DAY_MS) }],
+    ["it was active within the grace", { latestRunCompletedAt: at(-GRACE_MS + 1) }],
+  ])("keeps an agent thread when %s", (_, overrides) => {
+    expect(settle(agentThread(overrides))).toBeNull();
+  });
+
+  it("keeps a subagent until its parent has its result", () => {
+    expect(settle(agentThread(), false, false)).toBeNull();
+  });
+
+  it("keeps an agent thread while a child runs or waits", () => {
+    expect(settle(agentThread(), true)).toBeNull();
+    const child = (overrides: Partial<SettlementShell> = {}) =>
+      ThreadSettlementService.childKeepsParentOpen(shell({ status: "completed", ...overrides }));
+    expect(child()).toBe(false);
+    expect(child({ status: "running" })).toBe(true);
+    expect(child({ status: "waiting" })).toBe(true);
+    expect(child({ pendingRuntimeRequest: question })).toBe(true);
+    expect(child({ pendingBackgroundTasks: [{ taskId: "sub", kind: "subagent" }] })).toBe(true);
+    expect(child({ pendingBackgroundTasks: [{ taskId: "dev", kind: "command" }] })).toBe(true);
+  });
+});
+
 const NOW = "2026-08-28T12:00:00.000Z";
 const PROJECT_ID = ProjectId.make("settlement-project");
 
@@ -590,6 +704,7 @@ interface HarnessOptions {
   readonly onCloseIdle?: () => Effect.Effect<void>;
   readonly currentThreads?: ReadonlyArray<OrchestrationV2AppThread>;
   readonly projections?: ProjectionStore.ProjectionStoreV2Shape;
+  readonly pendingDelegatedCompletions?: ReadonlyArray<string>;
 }
 
 const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options: HarnessOptions) {
@@ -604,6 +719,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   const mergedPullRequests = yield* PubSub.unbounded<PullRequestService.PullRequestMergeEvent>();
   const pullRequestRefreshes = yield* PubSub.unbounded<number>();
   const commands = yield* Ref.make<ReadonlyArray<AutoSettleCommand>>([]);
+  const deliveryLookups = yield* Ref.make(0);
   const branchCalls = yield* Ref.make<
     ReadonlyArray<{ readonly cwd: string; readonly branch: string }>
   >([]);
@@ -688,18 +804,46 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       listShells: () => Ref.get(snapshots).pipe(Effect.map((snapshot) => snapshot.projects)),
     }),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      // Like the store: snapshots hold no subagent task rows, only subagent lineage.
+      listAppOwnedChildThreadIds: (threadId, includeHandoffLineage) =>
+        Ref.get(snapshots).pipe(
+          Effect.map((snapshot) =>
+            includeHandoffLineage === true
+              ? snapshot.threads
+                  .filter(
+                    (thread) =>
+                      thread.lineage.parentThreadId === threadId &&
+                      thread.lineage.relationshipToParent === "subagent",
+                  )
+                  .map((thread) => thread.id)
+              : [],
+          ),
+        ),
+      hasPendingDelegatedCompletion: (threadId) =>
+        Ref.update(deliveryLookups, (count) => count + 1).pipe(
+          Effect.as(options.pendingDelegatedCompletions?.includes(threadId) === true),
+        ),
+      getThreadShell: (threadId) =>
+        Ref.get(snapshots).pipe(
+          Effect.map(
+            (snapshot) => snapshot.threads.find((thread) => thread.id === threadId) ?? null,
+          ),
+        ),
       ...options.projections,
-      getSettlementCandidates: (threadId) =>
+      getSettlementCandidates: (threadId, includeOpenParentSubagents) =>
         Ref.update(candidateReads, (reads) => [...reads, threadId]).pipe(
           Effect.andThen(Ref.updateAndGet(snapshotReadCount, (count) => count + 1)),
           Effect.tap((count) => Queue.offer(snapshotReads, count)),
           Effect.andThen(
-            options.projections?.getSettlementCandidates(threadId) ??
+            options.projections?.getSettlementCandidates(threadId, includeOpenParentSubagents) ??
               Ref.get(snapshots).pipe(
-                Effect.map((snapshot) =>
-                  threadId === undefined
-                    ? snapshot.threads
-                    : snapshot.threads.filter((thread) => thread.id === threadId),
+                Effect.map(
+                  (snapshot): ReadonlyArray<ProjectionStore.ProjectionSettlementCandidate> =>
+                    snapshot.threads.filter(
+                      (thread) =>
+                        (threadId === undefined || thread.id === threadId) &&
+                        (includeOpenParentSubagents === true || thread.subagentParentOpen !== true),
+                    ),
                 ),
               ),
           ),
@@ -768,6 +912,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     snapshotReads,
     candidateReads,
     commands,
+    deliveryLookups,
     branchCalls,
     summaryCalls,
     summaryRecovery,
@@ -1344,6 +1489,79 @@ describe("ThreadSettlementServiceV2 worker", () => {
           emptied: "/workspace/project",
         });
       }).pipe(Effect.provide(fixture.layer));
+    }),
+  );
+
+  it.effect("settles finished agent threads only when the agent rule is on", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const recent = DateTime.makeUnsafe("2026-08-28T11:00:00.000Z");
+      const finished = (id: string, overrides: Partial<SettlementShell> = {}) =>
+        makeThread(id, {
+          status: "completed",
+          latestRunId: RunId.make(`run:${id}`),
+          latestRunCompletedAt: recent,
+          latestUserMessageAt: recent,
+          ...overrides,
+        });
+      const agent = (id: string, overrides: Partial<SettlementShell> = {}) =>
+        finished(id, { createdBy: "agent", creationSource: "mcp", ...overrides });
+      const subagentOf = (id: string, parent: string, overrides: Partial<SettlementShell> = {}) =>
+        agent(id, {
+          subagentParentOpen: true,
+          lineage: {
+            rootThreadId: ThreadId.make("owner"),
+            parentThreadId: ThreadId.make(parent),
+            relationshipToParent: "subagent",
+          },
+          ...overrides,
+        });
+      const snapshot = makeSnapshot([
+        // A top-level agent thread (an owner or handoff successor) is never auto-settled.
+        agent("owner"),
+        finished("finished-user"),
+        subagentOf("finished-delegate", "owner"),
+        subagentOf("undelivered-delegate", "owner"),
+        subagentOf("delegating-delegate", "owner"),
+        subagentOf("running-grandchild", "delegating-delegate", { status: "running" }),
+      ]);
+      const settledIn = (mode: ContractServerSettings["agentThreadAutoSettleMode"]) =>
+        Effect.gen(function* () {
+          const fixture = yield* makeHarness({
+            snapshot,
+            settings: { ...DEFAULT_SERVER_SETTINGS, agentThreadAutoSettleMode: mode },
+            pendingDelegatedCompletions: ["undelivered-delegate"],
+          });
+          return yield* Effect.gen(function* () {
+            const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+            yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+            return (yield* Ref.get(fixture.commands)).map((command) => command.threadId);
+          }).pipe(Effect.provide(fixture.layer));
+        }).pipe(Effect.scoped);
+
+      expect(DEFAULT_SERVER_SETTINGS.agentThreadAutoSettleMode).toBe("dry-run");
+      expect(yield* settledIn("dry-run")).toEqual([]);
+      expect(yield* settledIn("off")).toEqual([]);
+      expect(yield* settledIn("on")).toEqual([ThreadId.make("finished-delegate")]);
+
+      const dryRunLookups = yield* Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          snapshot,
+          settings: { ...DEFAULT_SERVER_SETTINGS, agentThreadAutoSettleMode: "dry-run" },
+          pendingDelegatedCompletions: ["undelivered-delegate"],
+        });
+        return yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          const first = yield* Ref.get(fixture.deliveryLookups);
+          yield* TestClock.adjust("1 minute");
+          yield* Queue.take(fixture.snapshotReads);
+          yield* reactor.drain;
+          return [first, (yield* Ref.get(fixture.deliveryLookups)) - first];
+        }).pipe(Effect.provide(fixture.layer));
+      }).pipe(Effect.scoped);
+      // The unchanged eligible delegate is not looked up again; the two held ones are rechecked.
+      expect(dryRunLookups).toEqual([3, 2]);
     }),
   );
 

@@ -253,9 +253,14 @@ export type ProjectionSettlementCandidate = Pick<
   | "pendingRuntimeRequest"
   | "pendingBackgroundTasks"
   | "pendingGuestMessageCount"
+  | "createdBy"
+  | "creationSource"
+  | "limitRecovery"
 > &
   Pick<OrchestrationV2AppThread, "lastSnoozeWakeAt"> & {
     readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
+    /** A subagent whose parent is still open; only listed when the caller asks for them. */
+    readonly subagentParentOpen?: boolean;
   };
 
 const ProjectionCheckpointContext = Schema.Struct({
@@ -687,6 +692,7 @@ export interface ProjectionStoreV2Shape {
   ) => Effect.Effect<number | null, ProjectionStoreV2Error>;
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
+    includeOpenParentSubagents?: boolean,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
@@ -1246,7 +1252,7 @@ type SettlementThreadRow = Pick<
   | "latest_run_completed_at"
   | "latest_user_message_at"
   | "latest_user_authored_message_at"
->;
+> & { readonly subagent_parent_open: number };
 
 type ShellRunItemCountRow = {
   readonly thread_id: string;
@@ -8972,12 +8978,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return { providerThreadsByThreadId, pendingTurnItemsByThreadId };
     });
 
-    const getSettlementCandidates: ProjectionStoreV2Shape["getSettlementCandidates"] = (threadId) =>
-      sql
+    const getSettlementCandidates: ProjectionStoreV2Shape["getSettlementCandidates"] = (
+      threadId,
+      includeOpenParentSubagents = false,
+    ) => {
+      const subagentParentOpen = sql`json_extract(t.payload_json, '$.lineage.relationshipToParent') IS 'subagent'
+        AND EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_threads parent
+          WHERE parent.thread_id = json_extract(t.payload_json, '$.lineage.parentThreadId')
+            AND parent.deleted_at IS NULL
+            AND json_extract(parent.payload_json, '$.archivedAt') IS NULL
+            AND json_extract(parent.payload_json, '$.settledOverride') IS NOT 'settled'
+        )`;
+      return sql
         .withTransaction(
           Effect.gen(function* () {
             const rows = yield* sql<SettlementThreadRow>`
             SELECT t.thread_id, t.payload_json,
+              (${subagentParentOpen}) AS subagent_parent_open,
               r.run_id AS latest_run_id,
               r.status AS latest_run_status,
               r.requested_at AS latest_run_requested_at,
@@ -9028,16 +9046,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
               AND json_extract(t.payload_json, '$.pinnedAt') IS NULL
               AND json_extract(t.payload_json, '$.autoSettleDisabledAt') IS NULL
-              AND (
-                json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
-                OR NOT EXISTS (
-                  SELECT 1 FROM orchestration_v2_projection_threads parent
-                  WHERE parent.thread_id = json_extract(t.payload_json, '$.lineage.parentThreadId')
-                    AND parent.deleted_at IS NULL
-                    AND json_extract(parent.payload_json, '$.archivedAt') IS NULL
-                    AND json_extract(parent.payload_json, '$.settledOverride') IS NOT 'settled'
-                )
-              )
+              AND (${includeOpenParentSubagents ? sql`1` : sql`0`} OR NOT (${subagentParentOpen}))
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs active
                 WHERE active.thread_id = t.thread_id
@@ -9111,6 +9120,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   activityRunStartedAt: null,
                   pendingRuntimeRequest: null,
                   pendingGuestMessageCount: pendingGuestMessageCount(thread.guestShare),
+                  subagentParentOpen: row.subagent_parent_open === 1,
                   pendingBackgroundTasks: derivePendingBackgroundWork({
                     latestRun:
                       latestRunId === null || status === "idle"
@@ -9128,6 +9138,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           }),
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })));
+    };
 
     const getOpenRemoteDelegatedTasks: ProjectionStoreV2Shape["getOpenRemoteDelegatedTasks"] = sql<{
       readonly thread_id: string;

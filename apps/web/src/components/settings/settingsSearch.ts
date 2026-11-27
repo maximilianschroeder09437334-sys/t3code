@@ -671,6 +671,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "project-defaults",
   },
   {
+    id: "auto-settle-agent-threads",
+    title: "Auto-settle agent threads",
+    to: "/settings/threads",
+    searchTerms: ["agent delegate subagent mcp finished cleanup dry run sidebar"],
+    requiresThreadAutoSettlement: true,
+    scope: "environment-defaults",
+  },
+  {
     id: "keep-threads-with-pull-requests",
     title: "Keep threads with a PR",
     to: "/settings/threads",

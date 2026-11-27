@@ -97,6 +97,20 @@ export const SidebarAutoSettleAfterDays = Schema.Number.check(
 );
 export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
 const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 7;
+/** Settling finished agent-created threads: off, log only (dry-run), or settle (on). */
+export const AgentThreadAutoSettleMode = Schema.Literals(["off", "dry-run", "on"]);
+export type AgentThreadAutoSettleMode = typeof AgentThreadAutoSettleMode.Type;
+const DEFAULT_AGENT_THREAD_AUTO_SETTLE_MODE: AgentThreadAutoSettleMode = "dry-run";
+export const MIN_AGENT_THREAD_AUTO_SETTLE_GRACE_MINUTES = 1;
+export const MAX_AGENT_THREAD_AUTO_SETTLE_GRACE_MINUTES = 7 * 24 * 60;
+export const AgentThreadAutoSettleGraceMinutes = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_AGENT_THREAD_AUTO_SETTLE_GRACE_MINUTES,
+    maximum: MAX_AGENT_THREAD_AUTO_SETTLE_GRACE_MINUTES,
+  }),
+);
+export type AgentThreadAutoSettleGraceMinutes = typeof AgentThreadAutoSettleGraceMinutes.Type;
+const DEFAULT_AGENT_THREAD_AUTO_SETTLE_GRACE_MINUTES: AgentThreadAutoSettleGraceMinutes = 30;
 
 export const MAX_SNOOZE_PRESET_MINUTES = 30 * 24 * 60;
 export const MAX_SNOOZE_PRESETS = 8;
@@ -1481,6 +1495,12 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  agentThreadAutoSettleMode: AgentThreadAutoSettleMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AGENT_THREAD_AUTO_SETTLE_MODE)),
+  ),
+  agentThreadAutoSettleGraceMinutes: AgentThreadAutoSettleGraceMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AGENT_THREAD_AUTO_SETTLE_GRACE_MINUTES)),
+  ),
   backgroundActivity: BackgroundActivitySettings,
 
   automaticGitFetchInterval: Schema.DurationFromMillis.pipe(
@@ -1899,6 +1919,8 @@ export const ServerSettingsPatch = Schema.Struct({
   idleCompaction: Schema.optionalKey(IdleCompactionMode),
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
+  agentThreadAutoSettleMode: Schema.optionalKey(AgentThreadAutoSettleMode),
+  agentThreadAutoSettleGraceMinutes: Schema.optionalKey(AgentThreadAutoSettleGraceMinutes),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozePresets: Schema.optionalKey(SnoozePresetSettings),

@@ -202,6 +202,13 @@ choose **Auto-settle behavior**, and pick **Never**. The current option is check
 a thread on **Follow settings** does not settle automatically either. Manual settle, snooze, and
 archive still work while it is set to **Never**.
 
+Delegated tasks and subagent threads can also settle on their own once they finished, their
+parent has their result, and they stayed idle for 30 minutes. **Auto-settle agent threads** in
+**Settings → Threads** turns this on. It starts as **Dry run**, which only lists the threads it
+would settle in the server log. Top-level threads, including ones an agent launched or handed
+off to, never settle this way. A thread stays while its work, background commands, questions,
+children, usage-limit auto-resume, snooze, pin, or open pull request still need it.
+
 Change these rules in **Settings → Threads**.
 They continue to run when your apps are closed. On web and desktop, choose an environment at the
 top to change only its rules, or **All environments** to update connected environments together.
