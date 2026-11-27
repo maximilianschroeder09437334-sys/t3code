@@ -104,9 +104,7 @@ export class OutputSummarizer {
       matchedLineCount: this.#matchedLineCount,
       matchedLines: this.#matched,
       matchedLinesInLogOnly: this.#matchedLineCount - this.#matched.length,
-      ...(failed
-        ? { tail: this.#tail.map((line) => clip(line, this.#limits.maxLineChars)) }
-        : {}),
+      ...(failed ? { tail: this.#tail.map((line) => clip(line, this.#limits.maxLineChars)) } : {}),
     };
   }
 }
@@ -120,7 +118,10 @@ export const summarizeCommandOutput = (
     readonly limits?: OutputSummaryLimits;
   },
 ): CommandOutputSummary => {
-  const summarizer = new OutputSummarizer(options.pattern ?? compileMatchPatterns(), options.limits);
+  const summarizer = new OutputSummarizer(
+    options.pattern ?? compileMatchPatterns(),
+    options.limits,
+  );
   const splitter = new LineSplitter();
   for (const line of [...splitter.push(text), ...splitter.flush()]) summarizer.addLine(line);
   return summarizer.finish(options.failed);

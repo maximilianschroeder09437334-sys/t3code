@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 
 import {
   compileMatchPatterns,
@@ -76,10 +76,7 @@ describe("summarizeCommandOutput", () => {
       failed: false,
       pattern: compileMatchPatterns(["segfault"]),
     });
-    expect(summary.matchedLines.map((match) => match.text)).toEqual([
-      "error one",
-      "segfault two",
-    ]);
+    expect(summary.matchedLines.map((match) => match.text)).toEqual(["error one", "segfault two"]);
   });
 });
 

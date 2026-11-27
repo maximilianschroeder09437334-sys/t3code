@@ -13,6 +13,9 @@
  * - `stopOnFailure` (default true) skips the commands after a failure and lists them as skipped.
  * Invariant: no matched line and no failing tail is hidden without the result saying so.
  */
+// @effect-diagnostics nodeBuiltinImport:off -- Raw pipes stream into one log in arrival order.
+// @effect-diagnostics globalTimers:off -- Timeout and pipe-close timers live in child callbacks.
+// @effect-diagnostics globalTimersInEffect:off
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
@@ -21,6 +24,7 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -241,11 +245,11 @@ const validate = Effect.fnUntraced(function* (
   return { timeoutMs, pattern };
 });
 
-const openLog = (config: BatchCommandRunnerConfig) =>
-  Effect.tryPromise({
+const openLog = Effect.fnUntraced(function* (config: BatchCommandRunnerConfig) {
+  const stamp = DateTime.formatIso(yield* DateTime.now).replace(/[:.]/g, "-");
+  return yield* Effect.tryPromise({
     try: async () => {
       await mkdir(config.logsDir, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const logPath = join(config.logsDir, `${stamp}-${randomUUID().slice(0, 8)}.log`);
       const log = createWriteStream(logPath, { flags: "wx" });
       await new Promise<void>((resolve, reject) => {
@@ -261,6 +265,7 @@ const openLog = (config: BatchCommandRunnerConfig) =>
     catch: (cause) =>
       new BatchCommandLogError({ message: "Could not create the command log.", cause }),
   });
+});
 
 const closeLog = (log: WriteStream) =>
   Effect.callback<void>((resume) => {
