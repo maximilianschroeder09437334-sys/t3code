@@ -11,6 +11,8 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2DelegatedFrom,
+  EnvironmentId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2RuntimeRequest,
@@ -24,7 +26,7 @@ import {
   ProviderTurnId,
   RunAttemptId,
   RunId,
-  type ThreadId,
+  ThreadId,
   RuntimeRequestId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -181,7 +183,12 @@ const isProviderEvent = Schema.is(ProviderAdapter.ProviderAdapterV2Event);
 
 function threadCreatedEvent(
   now: DateTime.Utc,
-  options: { readonly nativeThreadId?: string; readonly parentThreadId?: ThreadId } = {},
+  options: {
+    readonly nativeThreadId?: string;
+    readonly parentThreadId?: ThreadId;
+    readonly relationshipToParent?: "fork" | "subagent";
+    readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
+  } = {},
 ): Effect.Effect<
   OrchestrationV2DomainEvent,
   IdAllocator.IdAllocatorV2Error,
@@ -217,9 +224,13 @@ function threadCreatedEvent(
       activeProviderThreadId: providerThreadId,
       lineage: {
         parentThreadId: options.parentThreadId ?? null,
-        relationshipToParent: options.parentThreadId === undefined ? null : "subagent",
+        relationshipToParent:
+          options.parentThreadId === undefined
+            ? null
+            : (options.relationshipToParent ?? "subagent"),
         rootThreadId: options.parentThreadId ?? threadId,
       },
+      ...(options.delegatedFrom === undefined ? {} : { delegatedFrom: options.delegatedFrom }),
       forkedFrom: null,
       createdAt: now,
       updatedAt: now,
@@ -242,22 +253,40 @@ function threadCreatedEvent(
 
 const layer = it.layer(layerTest);
 
-const contextNoticeSampler = Effect.fn(function* (key: string, asSubagent: boolean) {
+const contextNoticeSampler = Effect.fn(function* (
+  key: string,
+  kind: "top-level" | "fork" | "subagent" | "delegated",
+) {
   const now = yield* DateTime.now;
   const sink = yield* EventSink.EventSinkV2;
   const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const nativeId = `${key}-native`;
-  const parent = asSubagent
-    ? yield* threadCreatedEvent(now, { nativeThreadId: `${key}-parent-native` })
-    : undefined;
+  const parent =
+    kind === "fork" || kind === "subagent"
+      ? yield* threadCreatedEvent(now, { nativeThreadId: `${key}-parent-native` })
+      : undefined;
   if (parent !== undefined) {
     if (parent.type !== "thread.created") throw new Error("Expected thread creation");
     yield* sink.write({ events: [parent] });
   }
   const fresh = yield* threadCreatedEvent(now, {
     nativeThreadId: nativeId,
-    ...(parent === undefined ? {} : { parentThreadId: parent.threadId }),
+    ...(parent === undefined
+      ? {}
+      : {
+          parentThreadId: parent.threadId,
+          relationshipToParent: kind === "fork" ? ("fork" as const) : ("subagent" as const),
+        }),
+    ...(kind === "delegated"
+      ? {
+          delegatedFrom: {
+            environmentId: EnvironmentId.make("linked-environment"),
+            threadId: ThreadId.make("linked-thread"),
+            title: "Linked parent",
+          },
+        }
+      : {}),
   });
   if (fresh.type !== "thread.created") throw new Error("Expected thread creation");
   // A subagent lives in its parent's project.
@@ -384,7 +413,7 @@ const contextNoticeSampler = Effect.fn(function* (key: string, asSubagent: boole
 layer("running context thresholds", (it) => {
   it.effect("warns once per threshold on accepted native usage without a hook", () =>
     Effect.gen(function* () {
-      const sample = yield* contextNoticeSampler("context-threshold", false);
+      const sample = yield* contextNoticeSampler("context-threshold", "top-level");
       assert.deepEqual(yield* sample(149_999), []);
       assert.deepEqual(yield* sample(252_960, RunAttemptId.make("stale-attempt")), []);
       assert.deepEqual(yield* sample(150_000), ["Context is getting large"]);
@@ -394,15 +423,22 @@ layer("running context thresholds", (it) => {
     }),
   );
 
-  it.effect("skips the 150k nudge in a subagent thread but still caps it at 250k", () =>
-    Effect.gen(function* () {
-      const sample = yield* contextNoticeSampler("subagent-context-threshold", true);
-      assert.deepEqual(yield* sample(150_000), []);
-      assert.deepEqual(yield* sample(200_000), []);
-      assert.deepEqual(yield* sample(252_960), ["Context rollover required"]);
-      assert.deepEqual(yield* sample(253_000), []);
-    }),
-  );
+  // Forks and side chats are user-driven; only agent-driven threads finish instead of handing off.
+  for (const [kind, nudged] of [
+    ["fork", true],
+    ["subagent", false],
+    ["delegated", false],
+  ] as const) {
+    it.effect(`${nudged ? "nudges" : "skips the 150k nudge in"} a ${kind} thread and caps it`, () =>
+      Effect.gen(function* () {
+        const sample = yield* contextNoticeSampler(`${kind}-context-threshold`, kind);
+        assert.deepEqual(yield* sample(150_000), nudged ? ["Context is getting large"] : []);
+        assert.deepEqual(yield* sample(200_000), []);
+        assert.deepEqual(yield* sample(252_960), ["Context rollover required"]);
+        assert.deepEqual(yield* sample(253_000), []);
+      }),
+    );
+  }
 });
 
 it.effect("takes a hub's reset for an unreset usage_limit, then refreshes the snapshot", () =>

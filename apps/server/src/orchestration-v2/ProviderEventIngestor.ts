@@ -20,6 +20,7 @@ import {
   type RuntimeRequestId,
   ThreadId,
   ThreadContextRecord,
+  isDelegatedAppThread,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -435,10 +436,9 @@ export const layer: Layer.Layer<
       const now = yield* DateTime.now;
       // Delegated and subagent threads finish their task instead of handing off at the
       // 150k nudge; the 250k rollover still applies to them.
-      const thresholds =
-        records.thread.lineage.parentThreadId === null
-          ? ([CONTEXT_HANDOFF_NUDGE, CONTEXT_ROLLOVER_LIMIT] as const)
-          : ([CONTEXT_ROLLOVER_LIMIT] as const);
+      const thresholds = isDelegatedAppThread(records.thread)
+        ? ([CONTEXT_ROLLOVER_LIMIT] as const)
+        : ([CONTEXT_HANDOFF_NUDGE, CONTEXT_ROLLOVER_LIMIT] as const);
       for (const threshold of thresholds) {
         if (usage.usedTokens < threshold) continue;
         const id = contextRolloverNoticeId(provider, threshold);
