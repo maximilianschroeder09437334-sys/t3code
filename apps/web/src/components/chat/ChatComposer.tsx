@@ -4,6 +4,7 @@ import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferenc
 import type { ComposerAttachmentInsertion } from "../composerAttachmentInsertion";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { BackgroundThreadContext } from "./backgroundThread";
+import { ThreadNotesDialog } from "./ThreadNotesDialog";
 import {
   resolveCompatibleRuntimeMode,
   runtimeModeConfig,
@@ -1007,6 +1008,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  const [threadNotesOpen, setThreadNotesOpen] = useState(false);
   const isMobileViewport = useMediaQuery("max-sm");
   const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [isComposerFocused, setIsComposerFocused] = useState(false);
@@ -1134,6 +1136,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
     freshSessionAvailable: props.onFreshSession !== undefined,
+    threadNotesAvailable: routeKind === "server" && activeThreadId !== null,
     compactSlashCommandAvailable,
     selectedProvider,
     selectedProviderSkills,
@@ -1920,6 +1923,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         if (applied) {
           setComposerHighlightedItemId(null);
           void navigate({ to: "/settings/hooks" });
+        }
+        return;
+      }
+      if (item.command === "notes") {
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          focusEditorAfterReplace: false,
+        });
+        if (applied) {
+          setComposerHighlightedItemId(null);
+          setThreadNotesOpen(true);
         }
         return;
       }
@@ -3581,6 +3595,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   />
                 </ComposerCommandMenuLayer>
               )}
+              {routeKind === "server" && activeThreadId !== null ? (
+                <ThreadNotesDialog
+                  environmentId={environmentId}
+                  threadId={activeThreadId}
+                  open={threadNotesOpen}
+                  onOpenChange={setThreadNotesOpen}
+                />
+              ) : null}
 
               {!isComposerCollapsedMobile &&
                 pendingUserInputs.length === 0 &&

@@ -1,5 +1,6 @@
 import {
   ORCHESTRATION_V2_WS_METHODS,
+  WS_METHODS,
   type EnvironmentId,
   type ThreadId,
   type OrchestrationV2ThreadLinkMetadata,
@@ -195,6 +196,13 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     nativeChildWork: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:native-child-work",
       tag: ORCHESTRATION_V2_WS_METHODS.getNativeChildWork,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    // Mounted only while the notes dialog is open; agents save notes between opens.
+    threadNotes: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:thread-notes",
+      tag: WS_METHODS.threadNotesRead,
       staleTimeMs: 0,
       idleTtlMs: 0,
     }),
