@@ -9,10 +9,17 @@ import { page } from "vite-plus/test/browser";
 
 import { render } from "../../../test/render";
 import "../../index.css";
+import { cn } from "../../lib/utils";
 import { makeThreadFixture } from "../../test-fixtures";
 import type { SidebarThreadSummary } from "../../types";
 import { Sidebar, SidebarContent, SidebarGroup, SidebarProvider } from "../ui/sidebar";
 import { SidebarChromeFooter } from "./SidebarChrome";
+import {
+  APP_SIDEBAR_PROVIDER_CLASS,
+  THREAD_SIDEBAR_CONTENT_CLASS,
+  THREAD_SIDEBAR_LIST_CLASS,
+  THREAD_SIDEBAR_LIST_GROUP_CLASS,
+} from "./sidebarLayoutClasses";
 import { SortableThreadRow } from "./SidebarThreadRow";
 
 // Set VITE_T3_PROOF_DIR (a folder inside the repo, which Vite may write to) to also save one PNG
@@ -153,16 +160,16 @@ function setup() {
 const noop = () => {};
 
 // The chain the app builds: AppSidebarLayout's provider and Sidebar, then ThreadSidebar's
-// scrolling content, row list and footer.
+// scrolling content, row list and footer. Classes come from the module both components use.
 function ProductionShapedSidebar() {
   return (
-    <SidebarProvider className="h-dvh! min-h-0!">
+    <SidebarProvider className={APP_SIDEBAR_PROVIDER_CLASS}>
       <Sidebar side="left" collapsible="offcanvas" role="navigation" aria-label="Threads">
-        <SidebarContent className="min-h-full">
-          <SidebarGroup className="flex-1" role="presentation">
+        <SidebarContent className={THREAD_SIDEBAR_CONTENT_CLASS}>
+          <SidebarGroup className={THREAD_SIDEBAR_LIST_GROUP_CLASS} role="presentation">
             <DndContext>
               <SortableContext items={rows.map((row) => row.key)}>
-                <ul role="presentation" className="relative flex flex-1 flex-col gap-px">
+                <ul role="presentation" className={cn(THREAD_SIDEBAR_LIST_CLASS, "flex-1")}>
                   {rows.map(({ kind, thread, key }) => (
                     <SortableThreadRow
                       key={key}

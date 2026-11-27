@@ -253,6 +253,11 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import {
+  THREAD_SIDEBAR_CONTENT_CLASS,
+  THREAD_SIDEBAR_LIST_CLASS,
+  THREAD_SIDEBAR_LIST_GROUP_CLASS,
+} from "./sidebar/sidebarLayoutClasses";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { TooltipProvider } from "./ui/tooltip";
 import {
@@ -2986,7 +2991,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       <SidebarChromeHeader isElectron={isElectron} />
       <SidebarContent
         ref={sidebarContentRef}
-        className="min-h-full"
+        className={THREAD_SIDEBAR_CONTENT_CLASS}
         fixedHeader={
           <SidebarGroup className="z-[1]">
             <SidebarThreadHeader
@@ -3229,7 +3234,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             }}
           />
         </div>
-        <SidebarGroup className="flex-1" role="presentation">
+        <SidebarGroup className={THREAD_SIDEBAR_LIST_GROUP_CLASS} role="presentation">
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
               <TooltipProvider
@@ -3376,7 +3381,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     // controls.
                     role="presentation"
                     className={cn(
-                      "relative flex flex-col gap-px",
+                      THREAD_SIDEBAR_LIST_CLASS,
                       sidebarListItems.length > 0 && "flex-1",
                       actionSweep !== null && "**:pointer-events-none",
                       // Projected rows (two boundary labels, two hints) extend the scroll range; a range that
