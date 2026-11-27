@@ -7,7 +7,8 @@ import {
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import { makeThreadRequestsResolvedAnnouncer } from "@t3tools/client-runtime/state/thread-requests";
-import { useLayoutEffect, useRef, type ComponentProps } from "react";
+import type { Editor } from "@tiptap/core";
+import { useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
@@ -18,8 +19,13 @@ vi.mock(import("../ChatMarkdown"), async (importOriginal) => ({
 
 import { act, fakeTimers, render } from "../../../test/render";
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
+import { serializeEditorDoc } from "../../composer-rich-text-doc";
 import { makeThreadProjectionFixture } from "../../test-fixtures";
 import { toastManager } from "../ui/toast";
+import {
+  ComposerPromptEditorTiptap,
+  type ComposerPromptEditorHandle,
+} from "../ComposerPromptEditorTiptap";
 import { usePendingThreadRequests, usePendingUserInputDraft } from "./usePendingThreadRequests";
 
 const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
@@ -244,6 +250,68 @@ it("stays on an unanswered question when the composer submits", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Choose Incremental" }));
   await userEvent.click(submit);
   await expect.element(screen.getByRole("status")).toHaveTextContent("Question 2");
+});
+
+/** Wires the composer editor to the answer draft the way ChatComposer does. */
+function AnswerEditorProbe(props: ProbeProps) {
+  const state = useProbeRequests(props);
+  const editorRef = useRef<ComposerPromptEditorHandle>(null);
+  const answer = state.activePendingProgress?.customAnswer ?? "";
+  const [cursor, setCursor] = useState(answer.length);
+  useLayoutEffect(() => {
+    requests = state;
+  });
+  return (
+    <ComposerPromptEditorTiptap
+      editorRef={editorRef}
+      ariaLabel="Answer"
+      value={answer}
+      cursor={cursor}
+      contextRecords={new Map()}
+      skills={[]}
+      disabled={false}
+      placeholder=""
+      onPaste={() => {}}
+      onChange={(value, nextCursor) => {
+        setCursor(nextCursor);
+        state.onChangeActivePendingUserInputCustomAnswer("question-0", value);
+      }}
+    />
+  );
+}
+
+it("keeps every letter in order when an answer is typed faster than the draft renders", async () => {
+  await using screen = await render(
+    <AnswerEditorProbe
+      environmentId={EnvironmentId.make("fast-typing-environment")}
+      projection={questionProjection(threadRef.threadId)}
+    />,
+  );
+  const element = screen.container.querySelector<HTMLElement & { editor: Editor }>(".tiptap");
+  if (!element) throw new Error("Answer editor did not mount");
+  const { editor } = element;
+  const typed = "The quick brown fox jumps over the lazy dog, twice. ".repeat(4);
+  await userEvent.click(element);
+  await userEvent.keyboard(typed);
+  await vi.waitFor(() => expect(requests.activePendingProgress?.customAnswer).toBe(typed));
+  expect(serializeEditorDoc(editor.state.doc).value).toBe(typed);
+
+  // Several keystrokes land before the draft store renders once.
+  const burst = "abcdefghijklmnopqrstuvwxyz0123456789";
+  await act(() => {
+    for (const letter of burst) {
+      editor.view.dispatch(editor.view.state.tr.insertText(letter));
+    }
+  });
+  expect(serializeEditorDoc(editor.state.doc).value).toBe(typed + burst);
+  expect(requests.activePendingProgress?.customAnswer).toBe(typed + burst);
+
+  // The next keystrokes continue at the end, so no render moved the caret back.
+  await userEvent.keyboard(" end");
+  await vi.waitFor(() =>
+    expect(requests.activePendingProgress?.customAnswer).toBe(`${typed}${burst} end`),
+  );
+  expect(serializeEditorDoc(editor.state.doc).value).toBe(`${typed}${burst} end`);
 });
 
 it("isolates drafts by environment, thread and request and discards only resolved requests", async () => {
