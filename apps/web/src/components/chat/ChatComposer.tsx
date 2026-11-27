@@ -5,6 +5,7 @@ import type { ComposerAttachmentInsertion } from "../composerAttachmentInsertion
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { BackgroundThreadContext } from "./backgroundThread";
 import { ThreadNotesDialog } from "./ThreadNotesDialog";
+import { setOpenThreadNotes, useThreadNotesStore } from "./threadNotesStore";
 import {
   resolveCompatibleRuntimeMode,
   runtimeModeConfig,
@@ -1008,7 +1009,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
-  const [threadNotesOpen, setThreadNotesOpen] = useState(false);
+  const threadNotesKey =
+    routeKind === "server" && activeThreadId !== null
+      ? scopedThreadKey(scopeThreadRef(environmentId, activeThreadId))
+      : null;
+  const threadNotesOpen = useThreadNotesStore(
+    (state) => threadNotesKey !== null && state.threadKey === threadNotesKey,
+  );
+  const setThreadNotesOpen = (open: boolean) => setOpenThreadNotes(open ? threadNotesKey : null);
   const isMobileViewport = useMediaQuery("max-sm");
   const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [isComposerFocused, setIsComposerFocused] = useState(false);

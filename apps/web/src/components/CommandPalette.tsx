@@ -74,6 +74,7 @@ import {
   RotateCcwIcon,
   SettingsIcon,
   MonitorIcon,
+  NotebookTextIcon,
   PinIcon,
   PinOffIcon,
   PlugIcon,
@@ -82,6 +83,7 @@ import {
   UserPlusIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
+import { setOpenThreadNotes } from "./chat/threadNotesStore";
 import { dispatchPreviewAction } from "./preview/previewActionBus";
 import { previewBridge } from "./preview/previewBridge";
 import {
@@ -1377,6 +1379,19 @@ function OpenCommandPaletteDialog(props: {
       shortcutCommand: "chat.find",
       run: async () => {
         openThreadFind(activeThreadKey);
+      },
+    });
+  }
+
+  if (activeThreadKey !== null) {
+    actionItems.push({
+      kind: "action",
+      value: "action:thread-notes",
+      title: "Show thread notes",
+      searchTerms: ["notes", "saved notes", "agent notes"],
+      icon: <NotebookTextIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        setOpenThreadNotes(activeThreadKey);
       },
     });
   }
