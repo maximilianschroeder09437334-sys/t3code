@@ -246,6 +246,8 @@ it.effect(
           getMessageCount: () => Effect.die("unused message count"),
           getTranscriptByteFloor: () => Effect.die("unused transcript byte floor"),
           hasPendingDelegatedCompletion: () => Effect.die("unused hasPendingDelegatedCompletion"),
+          hasUndeliveredDelegatedCompletion: () =>
+            Effect.die("unused hasUndeliveredDelegatedCompletion"),
           getSubagentCount: () => Effect.die("unused subagent count"),
           listHandoffSessionWrites: () => Effect.die("unused listHandoffSessionWrites"),
           hasForeignHandoffCheckoutOwner: () => Effect.die("unused hasForeignHandoffCheckoutOwner"),

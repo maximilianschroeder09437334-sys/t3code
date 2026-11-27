@@ -5,6 +5,8 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ProjectId,
   EventId,
+  NodeId,
+  ProviderDriverKind,
   ProviderInstanceId,
   MessageId,
   RuntimeRequestId,
@@ -17,6 +19,7 @@ import {
   type OrchestrationV2Command,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadShell,
   type PullRequestSummary,
   type ServerSettings as ContractServerSettings,
@@ -562,7 +565,7 @@ describe("resolveAgentThreadSettlementAt", () => {
     expect(settle(agentThread(), false, false)).toBeNull();
   });
 
-  it("keeps an agent thread while a child runs or waits", () => {
+  it("keeps an agent thread while a child runs, waits or will auto-resume", () => {
     expect(settle(agentThread(), true)).toBeNull();
     const child = (overrides: Partial<SettlementShell> = {}) =>
       ThreadSettlementService.childKeepsParentOpen(shell({ status: "completed", ...overrides }));
@@ -572,6 +575,13 @@ describe("resolveAgentThreadSettlementAt", () => {
     expect(child({ pendingRuntimeRequest: question })).toBe(true);
     expect(child({ pendingBackgroundTasks: [{ taskId: "sub", kind: "subagent" }] })).toBe(true);
     expect(child({ pendingBackgroundTasks: [{ taskId: "dev", kind: "command" }] })).toBe(true);
+    const limitRecovery = (autoResume: boolean) => ({
+      runId: RunId.make("child-run"),
+      resetAt: DateTime.formatIso(at(DAY_MS)),
+      autoResume,
+    });
+    expect(child({ status: "failed", limitRecovery: limitRecovery(true) })).toBe(true);
+    expect(child({ status: "failed", limitRecovery: limitRecovery(false) })).toBe(false);
   });
 });
 
@@ -703,8 +713,8 @@ interface HarnessOptions {
   ) => Effect.Effect<void>;
   readonly onCloseIdle?: () => Effect.Effect<void>;
   readonly currentThreads?: ReadonlyArray<OrchestrationV2AppThread>;
-  readonly projections?: ProjectionStore.ProjectionStoreV2Shape;
-  readonly pendingDelegatedCompletions?: ReadonlyArray<string>;
+  readonly projections?: Partial<ProjectionStore.ProjectionStoreV2Shape>;
+  readonly undeliveredDelegatedCompletions?: ReadonlyArray<string>;
 }
 
 const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options: HarnessOptions) {
@@ -819,9 +829,9 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
               : [],
           ),
         ),
-      hasPendingDelegatedCompletion: (threadId) =>
+      hasUndeliveredDelegatedCompletion: (threadId) =>
         Ref.update(deliveryLookups, (count) => count + 1).pipe(
-          Effect.as(options.pendingDelegatedCompletions?.includes(threadId) === true),
+          Effect.as(options.undeliveredDelegatedCompletions?.includes(threadId) === true),
         ),
       getThreadShell: (threadId) =>
         Ref.get(snapshots).pipe(
@@ -835,7 +845,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
           Effect.andThen(Ref.updateAndGet(snapshotReadCount, (count) => count + 1)),
           Effect.tap((count) => Queue.offer(snapshotReads, count)),
           Effect.andThen(
-            options.projections?.getSettlementCandidates(threadId, includeOpenParentSubagents) ??
+            options.projections?.getSettlementCandidates?.(threadId, includeOpenParentSubagents) ??
               Ref.get(snapshots).pipe(
                 Effect.map(
                   (snapshot): ReadonlyArray<ProjectionStore.ProjectionSettlementCandidate> =>
@@ -849,7 +859,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
           ),
         ),
       getThread: (threadId) => {
-        if (options.projections) return options.projections.getThread(threadId);
+        if (options.projections?.getThread) return options.projections.getThread(threadId);
         const thread = options.currentThreads?.find((candidate) => candidate.id === threadId);
         return thread
           ? Effect.succeed(thread)
@@ -1530,7 +1540,7 @@ describe("ThreadSettlementServiceV2 worker", () => {
           const fixture = yield* makeHarness({
             snapshot,
             settings: { ...DEFAULT_SERVER_SETTINGS, agentThreadAutoSettleMode: mode },
-            pendingDelegatedCompletions: ["undelivered-delegate"],
+            undeliveredDelegatedCompletions: ["undelivered-delegate"],
           });
           return yield* Effect.gen(function* () {
             const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
@@ -1548,7 +1558,7 @@ describe("ThreadSettlementServiceV2 worker", () => {
         const fixture = yield* makeHarness({
           snapshot,
           settings: { ...DEFAULT_SERVER_SETTINGS, agentThreadAutoSettleMode: "dry-run" },
-          pendingDelegatedCompletions: ["undelivered-delegate"],
+          undeliveredDelegatedCompletions: ["undelivered-delegate"],
         });
         return yield* Effect.gen(function* () {
           const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
@@ -1562,6 +1572,144 @@ describe("ThreadSettlementServiceV2 worker", () => {
       }).pipe(Effect.scoped);
       // The unchanged eligible delegate is not looked up again; the two held ones are rechecked.
       expect(dryRunLookups).toEqual([3, 2]);
+    }),
+  );
+
+  const RECENT = DateTime.makeUnsafe("2026-08-28T11:00:00.000Z");
+  const finishedSubagent = (id: string, overrides: Partial<SettlementShell> = {}) =>
+    makeThread(id, {
+      createdBy: "agent",
+      creationSource: "mcp",
+      status: "completed",
+      latestRunId: RunId.make(`run:${id}`),
+      latestRunCompletedAt: RECENT,
+      latestUserMessageAt: RECENT,
+      subagentParentOpen: true,
+      lineage: {
+        rootThreadId: ThreadId.make("owner"),
+        parentThreadId: ThreadId.make("owner"),
+        relationshipToParent: "subagent",
+      },
+      ...overrides,
+    });
+  const delegatedTask = (
+    childId: string,
+    task: {
+      readonly id?: string;
+      readonly status?: OrchestrationV2Subagent["status"];
+      readonly result?: string | null;
+      readonly delivery?: NonNullable<OrchestrationV2Subagent["completionDelivery"]>["state"];
+    } = {},
+  ): OrchestrationV2DomainEvent => {
+    const id = NodeId.make(`task:${task.id ?? childId}`);
+    const owner = ThreadId.make("owner");
+    const driver = ProviderDriverKind.make("codex");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    return {
+      id: EventId.make(`event:${id}`),
+      type: "subagent.updated",
+      threadId: owner,
+      nodeId: id,
+      driver,
+      providerInstanceId,
+      occurredAt: RECENT,
+      payload: {
+        id,
+        threadId: owner,
+        runId: null,
+        parentNodeId: NodeId.make("node:owner"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: ThreadId.make(childId),
+        nativeTaskRef: null,
+        prompt: "Do the work",
+        title: childId,
+        model: null,
+        status: task.status ?? "completed",
+        result: task.result === undefined ? "Done" : task.result,
+        startedAt: RECENT,
+        completedAt: RECENT,
+        updatedAt: RECENT,
+        ...(task.delivery === undefined
+          ? {}
+          : { completionDelivery: { state: task.delivery, observedByRunId: null } }),
+      },
+    };
+  };
+  // Shells come from the snapshot; delivery is read from real task rows.
+  const settledAgentThreads = (
+    threads: ReadonlyArray<SettlementShell>,
+    tasks: ReadonlyArray<OrchestrationV2DomainEvent>,
+  ) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(NOW));
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      for (const task of tasks) yield* store.apply(task);
+      const fixture = yield* makeHarness({
+        snapshot: makeSnapshot(threads),
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          agentThreadAutoSettleMode: "on",
+          agentThreadAutoSettleGraceMinutes: 30,
+        },
+        projections: {
+          hasUndeliveredDelegatedCompletion: store.hasUndeliveredDelegatedCompletion,
+        },
+      });
+      return yield* Effect.gen(function* () {
+        const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+        yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+        return (yield* Ref.get(fixture.commands)).map((command) => command.threadId).toSorted();
+      }).pipe(Effect.provide(fixture.layer));
+    }).pipe(Effect.scoped, Effect.provide(projectionStoreSql));
+
+  it.effect("settles a delegate only once its parent received every result", () =>
+    Effect.gen(function* () {
+      const settled = yield* settledAgentThreads(
+        [
+          ...["delivered", "acknowledged", "pending", "claimed", "unoffered", "followed-up"].map(
+            (id) => finishedSubagent(id),
+          ),
+          finishedSubagent("provider-subagent", { creationSource: "provider" }),
+        ],
+        [
+          delegatedTask("delivered", { delivery: "delivered" }),
+          delegatedTask("acknowledged", { delivery: "acknowledged" }),
+          delegatedTask("pending", { delivery: "pending" }),
+          delegatedTask("claimed", { delivery: "claimed" }),
+          // A settled_only result is offered only after the parent's run ends.
+          delegatedTask("unoffered"),
+          delegatedTask("followed-up", { delivery: "delivered" }),
+          delegatedTask("followed-up", { id: "follow-up", delivery: "pending" }),
+        ],
+      );
+      expect(settled).toEqual([
+        ThreadId.make("acknowledged"),
+        ThreadId.make("delivered"),
+        ThreadId.make("provider-subagent"),
+      ]);
+    }),
+  );
+
+  it.effect("settles a delegate stopped before its result once the grace passes", () =>
+    Effect.gen(function* () {
+      const justNow = DateTime.makeUnsafe("2026-08-28T11:55:00.000Z");
+      const stopped = { status: "cancelled", result: null, delivery: "disposed" } as const;
+      const settled = yield* settledAgentThreads(
+        [
+          finishedSubagent("stopped", { status: "cancelled" }),
+          finishedSubagent("stopped-just-now", {
+            status: "cancelled",
+            latestRunCompletedAt: justNow,
+            latestUserMessageAt: justNow,
+          }),
+        ],
+        [delegatedTask("stopped", stopped), delegatedTask("stopped-just-now", stopped)],
+      );
+      expect(settled).toEqual([ThreadId.make("stopped")]);
     }),
   );
 

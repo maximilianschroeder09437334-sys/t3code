@@ -282,7 +282,10 @@ const AGENT_CREATION_SOURCES: ReadonlySet<OrchestrationV2ThreadShell["creationSo
   "provider",
 ]);
 
-/** A child its parent may still be waiting on: running, asking, or holding any background work. */
+/**
+ * A child its parent may still be waiting on: running, asking, holding any background work, or
+ * armed to resume after a usage limit.
+ */
 export function childKeepsParentOpen(
   child: Pick<
     OrchestrationV2ThreadShell,
@@ -291,6 +294,7 @@ export function childKeepsParentOpen(
     | "pendingRuntimeRequest"
     | "pendingBackgroundTasks"
     | "blockedOnThreadWait"
+    | "limitRecovery"
   >,
 ): boolean {
   return (
@@ -300,6 +304,7 @@ export function childKeepsParentOpen(
     child.activityRunStatus != null ||
     child.pendingRuntimeRequest != null ||
     child.blockedOnThreadWait === true ||
+    child.limitRecovery?.autoResume === true ||
     (child.pendingBackgroundTasks?.length ?? 0) > 0
   );
 }
@@ -470,7 +475,7 @@ export const make = Effect.gen(function* () {
             return { thread, settledAt: decide(false, true), fresh: false };
           }
           const resultDelivered = !(yield* projections
-            .hasPendingDelegatedCompletion(thread.id)
+            .hasUndeliveredDelegatedCompletion(thread.id)
             .pipe(Effect.orElseSucceed(() => true)));
           const settledAt = decide(yield* threadHasActiveChildren(thread.id), resultDelivered);
           return { thread, settledAt, fresh: true };

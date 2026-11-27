@@ -203,7 +203,7 @@ a thread on **Follow settings** does not settle automatically either. Manual set
 archive still work while it is set to **Never**.
 
 Delegated tasks and subagent threads can also settle on their own once they finished, their
-parent has their result, and they stayed idle for 30 minutes. **Auto-settle agent threads** in
+parent has their result or stopped them, and they stayed idle for 30 minutes. **Auto-settle agent threads** in
 **Settings → Threads** turns this on. It starts as **Dry run**, which only lists the threads it
 would settle in the server log. Top-level threads, including ones an agent launched or handed
 off to, never settle this way. A thread stays while its work, background commands, questions,

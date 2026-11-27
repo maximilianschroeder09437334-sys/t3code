@@ -599,6 +599,9 @@ export interface ProjectionStoreV2Shape {
   readonly hasPendingDelegatedCompletion: (
     childThreadId: ThreadId,
   ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  readonly hasUndeliveredDelegatedCompletion: (
+    childThreadId: ThreadId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
@@ -6833,6 +6836,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           Effect.mapError(controlReadError(childThreadId)),
         ),
       );
+    // A task of this child whose result its parent neither received nor let go. A Stop disposes
+    // a task that has no result, so a stopped child owes nothing.
+    const hasUndeliveredDelegatedCompletion: ProjectionStoreV2Shape["hasUndeliveredDelegatedCompletion"] =
+      Effect.fn("ProjectionStore.hasUndeliveredDelegatedCompletion")((childThreadId) =>
+        sql`SELECT 1 FROM orchestration_v2_projection_subagents
+        WHERE child_thread_id = ${childThreadId} AND origin = 'app_owned'
+          AND COALESCE(completion_delivery_state, '') NOT IN ('acknowledged', 'delivered', 'disposed')
+        LIMIT 1`.pipe(
+          Effect.map((rows) => rows.length > 0),
+          Effect.mapError(controlReadError(childThreadId)),
+        ),
+      );
     const getNextTurnItemOrdinal: ProjectionStoreV2Shape["getNextTurnItemOrdinal"] = (threadId) =>
       sql<{ ordinal: number | null }>`SELECT MAX(ordinal) AS ordinal
         FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`.pipe(
@@ -10228,6 +10243,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       listHandoffSessionWrites: readOnReader(listHandoffSessionWrites),
       hasForeignHandoffCheckoutOwner: readOnReader(hasForeignHandoffCheckoutOwner),
       hasPendingDelegatedCompletion: readOnReader(hasPendingDelegatedCompletion),
+      hasUndeliveredDelegatedCompletion: readOnReader(hasUndeliveredDelegatedCompletion),
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
       getTurnItem: readOnReader(getTurnItem),
       getMessagesById: readOnReader(getMessagesById),
