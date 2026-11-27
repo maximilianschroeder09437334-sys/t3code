@@ -282,7 +282,7 @@ const AGENT_CREATION_SOURCES: ReadonlySet<OrchestrationV2ThreadShell["creationSo
   "provider",
 ]);
 
-/** A child its parent may still be waiting on: running, asking, or holding awaited work. */
+/** A child its parent may still be waiting on: running, asking, or holding any background work. */
 export function childKeepsParentOpen(
   child: Pick<
     OrchestrationV2ThreadShell,
@@ -300,7 +300,7 @@ export function childKeepsParentOpen(
     child.activityRunStatus != null ||
     child.pendingRuntimeRequest != null ||
     child.blockedOnThreadWait === true ||
-    backgroundWorkHoldsCompletion(child.pendingBackgroundTasks ?? [])
+    (child.pendingBackgroundTasks?.length ?? 0) > 0
   );
 }
 
@@ -313,21 +313,29 @@ function hasUnfinishedPullRequest(thread: SettlementThread): boolean {
 }
 
 /**
- * When a finished thread an agent created (MCP, delegate, provider subagent) settles: after its
- * idle grace, once nothing in or under it still runs or asks. Threads a person made never do.
+ * When a finished delegated or provider subagent settles: after its idle grace, once its parent
+ * has its result and nothing in or under it still runs, asks or waits. Only subagent lineage opts
+ * in; top-level threads (owners, handoff successors) never settle this way.
  */
 export function resolveAgentThreadSettlementAt(input: {
   readonly thread: SettlementThread;
   readonly nowMs: number;
   readonly graceMs: number;
   readonly hasActiveChildren: boolean;
+  readonly resultDelivered: boolean;
 }): DateTime.Utc | null {
   const { thread, nowMs } = input;
+  if (thread.lineage.relationshipToParent !== "subagent") return null;
   if (thread.createdBy !== "agent" || !AGENT_CREATION_SOURCES.has(thread.creationSource)) {
     return null;
   }
   if (thread.latestRunId === null || !FINISHED_RUN_STATUSES.has(thread.status)) return null;
-  if (thread.blockedOnThreadWait === true || input.hasActiveChildren) return null;
+  // Settling disarms usage-limit auto-resume, so a failed run waiting on it is not finished.
+  if (thread.limitRecovery?.autoResume === true) return null;
+  // Unawaited commands and monitors still run; only an empty list means the agent is done.
+  if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) return null;
+  if (!input.resultDelivered || input.hasActiveChildren) return null;
+  // No thread-wait check: a wait lives inside an active run, which candidates already exclude.
   if (!isAutoSettlementCandidate(thread, nowMs)) return null;
   if (hasUnfinishedPullRequest(thread)) return null;
   const idleSinceMs = inactiveSinceMs(thread, nowMs);
@@ -416,8 +424,8 @@ export const make = Effect.gen(function* () {
   // Repeated thread.settled retains settledAt; run the action only once per settlement.
   const settleActionRunAt = new Map<ThreadId, number>();
   const noPullRequestRechecks = makeNoPullRequestRechecks();
-  // A dry run logs each thread once while it stays eligible; full sweeps reset the list.
-  let agentDryRunLogged = new Set<ThreadId>();
+  // A dry run logs and looks up each eligible thread once per state change (its updatedAt).
+  const agentDryRunLogged = new Map<ThreadId, number>();
 
   // An unreadable child counts as active so its parent stays.
   const threadHasActiveChildren = Effect.fn("ThreadSettlementServiceV2.threadHasActiveChildren")(
@@ -443,24 +451,41 @@ export const make = Effect.gen(function* () {
     const mode = settings.agentThreadAutoSettleMode;
     if (mode === "off") return settled;
     const graceMs = settings.agentThreadAutoSettleGraceMinutes * MINUTE_MS;
-    const eligible = (yield* Effect.forEach(
-      threads,
+    const evaluated = yield* Effect.forEach(
+      // A subagent whose parent is done already settles with it on the sidebar path.
+      threads.filter((thread) => thread.subagentParentOpen === true),
       (thread) =>
         Effect.gen(function* () {
-          // Subagents already settle with their parent.
-          if (thread.lineage.relationshipToParent === "subagent") return null;
-          const decide = (hasActiveChildren: boolean) =>
-            resolveAgentThreadSettlementAt({ thread, nowMs, graceMs, hasActiveChildren });
-          if (decide(false) === null) return null;
-          const settledAt = decide(yield* threadHasActiveChildren(thread.id));
-          return settledAt === null ? null : { thread, settledAt };
+          const decide = (hasActiveChildren: boolean, resultDelivered: boolean) =>
+            resolveAgentThreadSettlementAt({
+              thread,
+              nowMs,
+              graceMs,
+              hasActiveChildren,
+              resultDelivered,
+            });
+          if (decide(false, true) === null) return null;
+          const updatedAtMs = DateTime.toEpochMillis(thread.updatedAt);
+          if (mode === "dry-run" && agentDryRunLogged.get(thread.id) === updatedAtMs) {
+            return { thread, settledAt: decide(false, true), fresh: false };
+          }
+          const resultDelivered = !(yield* projections
+            .hasPendingDelegatedCompletion(thread.id)
+            .pipe(Effect.orElseSucceed(() => true)));
+          const settledAt = decide(yield* threadHasActiveChildren(thread.id), resultDelivered);
+          return { thread, settledAt, fresh: true };
         }),
       { concurrency: 8 },
-    )).filter((entry) => entry !== null);
+    );
+    const eligible = evaluated.flatMap((entry) =>
+      entry === null || entry.settledAt === null ? [] : [{ ...entry, settledAt: entry.settledAt }],
+    );
     if (mode === "dry-run") {
-      const ids = eligible.map(({ thread }) => thread.id);
-      const fresh = ids.filter((id) => !agentDryRunLogged.has(id));
-      agentDryRunLogged = new Set(fullSweep ? ids : [...agentDryRunLogged, ...ids]);
+      const fresh = eligible.filter((entry) => entry.fresh).map(({ thread }) => thread.id);
+      if (fullSweep) agentDryRunLogged.clear();
+      for (const { thread } of eligible) {
+        agentDryRunLogged.set(thread.id, DateTime.toEpochMillis(thread.updatedAt));
+      }
       if (fresh.length > 0) {
         yield* Effect.logInfo("agent thread auto-settle dry run: would settle", {
           threadIds: fresh,
@@ -505,7 +530,10 @@ export const make = Effect.gen(function* () {
     if (mergedPullRequest !== null) yield* pauseQuietReads();
     const settings = yield* settingsService.getSettings;
     const automaticSettlementEnabled = autoSettlementConfigured(settings);
-    const threads = yield* projections.getSettlementCandidates(threadId);
+    const threads = yield* projections.getSettlementCandidates(
+      threadId,
+      settings.agentThreadAutoSettleMode !== "off",
+    );
     if (threads.length === 0) return;
     const projectShells = yield* projectStore.listShells();
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
@@ -523,6 +551,7 @@ export const make = Effect.gen(function* () {
     const candidates = threads.filter(
       (thread) =>
         !agentSettled.has(thread.id) &&
+        thread.subagentParentOpen !== true &&
         (automaticSettlementEnabled || thread.lineage.relationshipToParent === "subagent") &&
         isAutoSettlementCandidate(thread, nowMs),
     );
