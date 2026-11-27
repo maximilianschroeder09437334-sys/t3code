@@ -1,0 +1,24 @@
+{
+  "mirrorPath": "~/.codex/state/t3-upstream-watch/mirror.git",
+  "upstreamUrl": "https://github.com/pingdotgg/t3code.git",
+  "forkRemote": "https://github.com/maximilianschroeder09437334-sys/t3code.git",
+  "forkBranch": "main",
+  "channelPattern": "^v\\d+\\.\\d+\\.\\d+$",
+  "projectId": "<T3 project id, from `t3 project list`>",
+  "reportProvider": "<provider instance id>",
+  "reportModel": "<model slug>",
+  "t3Command": ["t3"],
+  "commandTimeoutSec": 600,
+  "statePath": "~/.codex/state/t3-upstream-watch/state.json",
+  "logPath": "~/.codex/state/t3-upstream-watch/watch.log",
+  "areaRules": {
+    "apps/server/src/orchestration-v2/": "server/orchestration-v2",
+    "apps/server/src/mcp/": "server/mcp",
+    "apps/server/src/persistence/": "server/persistence",
+    "apps/server/src/": "server",
+    "apps/mobile/src/": "mobile",
+    "apps/web/src/": "web",
+    "packages/client-runtime/": "client-runtime",
+    "packages/contracts/": "contracts"
+  }
+}
