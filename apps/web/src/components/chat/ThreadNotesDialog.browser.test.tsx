@@ -18,18 +18,22 @@ const query = vi.hoisted(() => ({
   data: undefined as unknown,
   error: null as string | null,
   refresh: (() => {}) as () => void,
+  read: vi.fn(),
 }));
 vi.mock(import("../../state/query"), async (importOriginal) => ({
   ...(await importOriginal()),
-  useEnvironmentQuery: (() => ({
-    data: query.data,
-    dataUpdatedAt: 0,
-    error: query.error,
-    failure: null,
-    isPending: false,
-    isSuccess: query.data !== undefined,
-    refresh: query.refresh,
-  })) as never,
+  useEnvironmentQuery: ((atom: unknown) => {
+    query.read(atom);
+    return {
+      data: query.data,
+      dataUpdatedAt: 0,
+      error: query.error,
+      failure: null,
+      isPending: false,
+      isSuccess: query.data !== undefined,
+      refresh: query.refresh,
+    };
+  }) as never,
 }));
 
 const environmentId = EnvironmentId.make("environment-test");
@@ -39,6 +43,7 @@ function setup(notes: ThreadNotesListResult["notes"], truncated = false) {
   query.data = { threadId, notes, truncated } satisfies ThreadNotesListResult;
   query.error = null;
   query.refresh = vi.fn();
+  query.read = vi.fn();
   return query;
 }
 
@@ -98,11 +103,14 @@ it("lists each saved note with its attachment names and refreshes on demand", as
 });
 
 it("says so when the thread has no notes, and loads nothing while closed", async () => {
-  setup([]);
+  const state = setup([]);
   await page.viewport(1000, 700);
-  await using screen = await render(dialog());
+  await using screen = await render(dialog(false));
+  expect(state.read).not.toHaveBeenCalled();
 
+  await screen.rerender(dialog());
   await expect.element(page.getByText("No notes saved on this thread yet.")).toBeVisible();
+  expect(state.read).toHaveBeenCalled();
   expect(page.getByRole("region", { name: "Thread note" }).elements()).toHaveLength(0);
   if (PROOF_DIR) await page.screenshot({ path: `${PROOF_DIR}/1.3-thread-notes-dialog-empty.png` });
 
@@ -110,6 +118,9 @@ it("says so when the thread has no notes, and loads nothing while closed", async
   await expect
     .element(page.getByText("No notes saved on this thread yet."))
     .not.toBeInTheDocument();
+  state.read.mockClear();
+  await screen.rerender(dialog(false));
+  expect(state.read).not.toHaveBeenCalled();
 });
 
 it("shows the read error instead of notes", async () => {

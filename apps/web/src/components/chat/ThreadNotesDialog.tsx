@@ -20,7 +20,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 
-/** Read-only view of the notes agents saved on this thread. Loads only while open. */
+/** Read-only view of the notes agents saved on this thread. Loads only while the popup is mounted. */
 export function ThreadNotesDialog(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -34,9 +34,7 @@ export function ThreadNotesDialog(props: {
           <DialogTitle>Thread notes</DialogTitle>
           <DialogDescription>What agents saved on this thread.</DialogDescription>
         </DialogHeader>
-        {props.open ? (
-          <ThreadNotesContent environmentId={props.environmentId} threadId={props.threadId} />
-        ) : null}
+        <ThreadNotesContent environmentId={props.environmentId} threadId={props.threadId} />
       </DialogPopup>
     </Dialog>
   );
