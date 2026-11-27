@@ -1118,6 +1118,16 @@ it.effect(
     const running = ThreadId.make("thread:running");
     const peer = ThreadId.make("thread:peer");
     const answering = ThreadId.make("thread:answering");
+    const successor = ThreadId.make("thread:successor");
+    const child = ThreadId.make("thread:child");
+    const holding = ThreadId.make("thread:holding");
+    const heldRun = {
+      id: RunId.make("run:held"),
+      ordinal: 2,
+      status: "queued",
+      queueHeld: true,
+      userMessageId: MessageId.make("message:held"),
+    };
     const active = (threadId: ThreadId) => ({
       id: RunId.make(`run:${threadId}`),
       ordinal: 2,
@@ -1126,8 +1136,13 @@ it.effect(
     });
     // Senders are mid-turn; the answering one's turn took a message from the idle target.
     const records = (threadId: ThreadId) =>
-      threadId === peer || threadId === answering
+      threadId === peer || threadId === answering || threadId === child
         ? {
+            thread: {
+              id: threadId,
+              lineage: { parentThreadId: parentId },
+              ...(threadId === child ? { ownership: { ownerThreadId: idle } } : {}),
+            },
             runs: [active(threadId)],
             messages: [{ senderThreadId: threadId === answering ? idle : parentId }],
           }
@@ -1140,17 +1155,21 @@ it.effect(
               modelSelection: selection,
               lineage: { parentThreadId: parentId },
               settledOverride: threadId === settled ? "settled" : null,
+              ...(threadId === successor ? { launchedBy: { threadId: peer } } : {}),
             },
             runs: [
               { id: RunId.make(`run:${threadId}:1`), ordinal: 1, status: "completed" },
               ...(threadId === running ? [active(threadId)] : []),
+              ...(threadId === holding ? [heldRun] : []),
             ],
+            messages: [{ id: heldRun.userMessageId, senderThreadId: peer, text: "urgent resend" }],
             providerTurns:
               threadId === running
                 ? [{ runAttemptId: `attempt:${threadId}`, status: "running" }]
                 : [],
           };
     const commands: Array<Extract<OrchestrationV2Command, { type: "message.dispatch" }>> = [];
+    const promotions: Array<unknown> = [];
     const layer = (holdAgentNoticesForIdleThreads: boolean) =>
       ThreadManagementService.layer.pipe(
         Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
@@ -1160,7 +1179,16 @@ it.effect(
             dispatch: (command) =>
               Effect.sync(() => {
                 if (command.type === "message.dispatch") commands.push(command);
-              }).pipe(Effect.andThen(Effect.die("Fixture stops after observing the dispatch"))),
+                else promotions.push(command);
+              }).pipe(
+                Effect.andThen(
+                  command.type === "message.dispatch" &&
+                    command.holdWhileIdle === true &&
+                    command.text === "refused hold"
+                    ? Effect.fail("hold refused" as never)
+                    : Effect.die("Fixture stops after observing the dispatch"),
+                ),
+              ),
           }),
         ),
         Layer.provide(
@@ -1205,6 +1233,14 @@ it.effect(
         yield* send("parent order", { createdBy: "agent", senderThreadId: parentId });
         yield* send("scheduled", { createdBy: "agent", scheduledTaskId: "scheduled:1" as never });
         yield* send("fresh", { createdBy: "agent", freshContext: true });
+        yield* send("launcher order", { createdBy: "agent", threadId: successor });
+        yield* send("child report", { createdBy: "agent", senderThreadId: child });
+        yield* send("refused hold", { createdBy: "agent" });
+        yield* send("urgent resend", {
+          createdBy: "agent",
+          threadId: holding,
+          urgentReason: "blocking question",
+        });
       }).pipe(Effect.provide(layer(true)));
       yield* send("setting off", { createdBy: "agent" }).pipe(Effect.provide(layer(false)));
       const held = { type: "queue_after_active" };
@@ -1231,7 +1267,27 @@ it.effect(
         ["parent order", starts, "auto", undefined],
         ["scheduled", { type: "queue_after_active" }, undefined, undefined],
         ["fresh", { type: "queue_after_active" }, undefined, undefined],
+        ["launcher order", starts, "auto", undefined],
+        ["child report", starts, "auto", undefined],
+        ["refused hold", held, undefined, true],
+        ["refused hold", starts, "auto", undefined],
         ["setting off", starts, "auto", undefined],
+      ]);
+      // The fallback is a new command: the refused one already has a receipt.
+      expect(
+        commands.filter((command) => command.text === "refused hold").map((c) => c.commandId),
+      ).toEqual([
+        "command:agent-queued-send:refused hold",
+        "command:agent-queued-send:refused hold:deliver-now",
+      ]);
+      // An urgent resend starts the held copy instead of sending a second message.
+      expect(promotions).toEqual([
+        {
+          type: "queued-run.start",
+          commandId: "command:agent-queued-send:urgent resend:urgent",
+          threadId: holding,
+          runId: heldRun.id,
+        },
       ]);
     });
   },

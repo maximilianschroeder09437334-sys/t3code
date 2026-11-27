@@ -4650,7 +4650,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           effects,
         );
       }
-      for (const run of automaticQueuedRuns) {
+      // Another agent's held message outlives the settle and reaches the thread's next turn.
+      const keepsHeldNotice = (run: OrchestrationV2Run) => {
+        const message = queuedMessages.get(run.userMessageId);
+        return (
+          run.queueHeld === true &&
+          message?.createdBy === "agent" &&
+          message.creationSource === "mcp"
+        );
+      };
+      for (const run of automaticQueuedRuns.filter((queued) => !keepsHeldNotice(queued))) {
         yield* dispatchQueuedRunCancel(
           {
             type: "queued-run.cancel",

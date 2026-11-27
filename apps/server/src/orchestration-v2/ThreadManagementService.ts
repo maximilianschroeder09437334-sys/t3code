@@ -915,8 +915,8 @@ const make = Effect.gen(function* () {
     );
 
   // An agent's message to a thread with no active run waits for that thread's next run instead
-  // of waking it. People, scheduled and server deliveries, urgent sends, a parent's order to its
-  // own child and replies to the target's own message still start one. Any doubt delivers now.
+  // of waking it. People, scheduled and server deliveries, urgent sends, orders from a parent or
+  // launcher, a child's report to its owner and replies to the target still start one.
   const holdsAgentNotice = Effect.fn("ThreadManagementService.holdsAgentNotice")(function* (
     input: ThreadManagementSendInput,
     target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
@@ -931,7 +931,8 @@ const make = Effect.gen(function* () {
       input.freshContext === true ||
       latestActiveRun(target) !== undefined ||
       !target.runs.some((run) => run.status !== "queued") ||
-      input.senderThreadId === displayParentThreadId(target.thread)
+      input.senderThreadId === displayParentThreadId(target.thread) ||
+      input.senderThreadId === target.thread.launchedBy?.threadId
     ) {
       return false;
     }
@@ -940,13 +941,14 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => false),
     );
     if (!enabled || input.senderThreadId === undefined) return enabled;
-    return !(yield* repliesToTarget(input.senderThreadId, input.threadId));
+    return !(yield* answersTarget(input.senderThreadId, input.threadId));
   });
 
-  /** The sender's current run took a message from the target, so this send answers it. */
-  const repliesToTarget = (senderThreadId: ThreadId, targetThreadId: ThreadId) =>
+  /** The target owns the sender, or the sender's current run took a message from the target. */
+  const answersTarget = (senderThreadId: ThreadId, targetThreadId: ThreadId) =>
     orchestrator.getThreadRecords(senderThreadId, ["runs"]).pipe(
       Effect.flatMap((sender) => {
+        if (displayParentThreadId(sender.thread) === targetThreadId) return Effect.succeed(true);
         const run = latestActiveRun(sender);
         return run === undefined
           ? Effect.succeed(false)
@@ -963,6 +965,24 @@ const make = Effect.gen(function* () {
       }),
       Effect.orElseSucceed(() => true),
     );
+
+  /** The sender's held notice on an idle target that an urgent resend starts instead of repeating. */
+  const heldNoticeToPromote = Effect.fn("ThreadManagementService.heldNoticeToPromote")(function* (
+    input: ThreadManagementSendInput,
+    target: Pick<OrchestrationV2ThreadProjection, "runs">,
+  ) {
+    const held = target.runs.filter((run) => run.status === "queued" && run.queueHeld === true);
+    if (held.length === 0 || latestActiveRun(target) !== undefined) return undefined;
+    const { messages } = yield* getProjectThreadRecords(input, ["messages"], {
+      messageIds: held.map((run) => run.userMessageId),
+    });
+    const notice = messages.find(
+      (message) =>
+        message.id === input.messageId ||
+        (message.senderThreadId === input.senderThreadId && message.text === input.text),
+    );
+    return notice === undefined ? undefined : held.find((run) => run.userMessageId === notice.id);
+  });
 
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = Effect.fn(
     "ThreadManagementService.sendToThread",
@@ -995,8 +1015,15 @@ const make = Effect.gen(function* () {
         : agentQueuedSend
           ? "auto"
           : input.mode;
+    const promotedRun =
+      input.urgentReason === undefined || input.senderThreadId === undefined
+        ? undefined
+        : yield* heldNoticeToPromote(input, target);
     const holdWhileIdle =
-      mode === "auto" && steerableRun === undefined && (yield* holdsAgentNotice(input, target));
+      promotedRun === undefined &&
+      mode === "auto" &&
+      steerableRun === undefined &&
+      (yield* holdsAgentNotice(input, target));
     let dispatchMode: Extract<
       OrchestrationV2Command,
       { readonly type: "message.dispatch" }
@@ -1045,7 +1072,11 @@ const make = Effect.gen(function* () {
     const dispatchMessage = (held: boolean) =>
       dispatch({
         type: "message.dispatch",
-        commandId: input.commandId,
+        // The refused hold's command already has a rejected receipt.
+        commandId:
+          holdWhileIdle && !held
+            ? CommandId.make(`${input.commandId}:deliver-now`)
+            : input.commandId,
         threadId: input.threadId,
         messageId: input.messageId,
         ...(input.hookContinuationOfRunId === undefined
@@ -1068,21 +1099,29 @@ const make = Effect.gen(function* () {
         creationSource: input.creationSource,
       });
     // A hold the orchestrator refuses delivers the message now rather than losing it.
-    const dispatched = holdWhileIdle
-      ? yield* dispatchMessage(true).pipe(
-          Effect.catch((cause) =>
-            Effect.logWarning("thread-management.idle-hold-failed", {
-              threadId: input.threadId,
-              cause,
-            }).pipe(Effect.andThen(restoreWorktree()), Effect.andThen(dispatchMessage(false))),
-          ),
-        )
-      : yield* dispatchMessage(false);
+    const dispatched = promotedRun
+      ? yield* dispatch({
+          type: "queued-run.start",
+          commandId: CommandId.make(`${input.commandId}:urgent`),
+          threadId: input.threadId,
+          runId: promotedRun.id,
+        })
+      : holdWhileIdle
+        ? yield* dispatchMessage(true).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("thread-management.idle-hold-failed", {
+                threadId: input.threadId,
+                cause,
+              }).pipe(Effect.andThen(restoreWorktree()), Effect.andThen(dispatchMessage(false))),
+            ),
+          )
+        : yield* dispatchMessage(false);
+    const messageId = promotedRun?.userMessageId ?? input.messageId;
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
-      messageIds: [input.messageId],
+      messageIds: [messageId],
       turnItemTypes: ["user_message"],
     });
-    const message = projection.messages.find((candidate) => candidate.id === input.messageId);
+    const message = projection.messages.find((candidate) => candidate.id === messageId);
     const run =
       message?.runId === null || message?.runId === undefined
         ? undefined
@@ -1092,7 +1131,7 @@ const make = Effect.gen(function* () {
         (
           candidate,
         ): candidate is Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }> =>
-          candidate.type === "user_message" && candidate.messageId === input.messageId,
+          candidate.type === "user_message" && candidate.messageId === messageId,
       ) ?? null;
     if (
       message === undefined ||
@@ -1101,7 +1140,7 @@ const make = Effect.gen(function* () {
     ) {
       return yield* new ThreadManagementDurableRunProjectionError({
         threadId: input.threadId,
-        messageId: input.messageId,
+        messageId,
       });
     }
     // A provider without interrupt-and-restart stops the turn and runs the
@@ -1114,18 +1153,20 @@ const make = Effect.gen(function* () {
           event.payload.type === "run_interrupt_request" &&
           event.payload.runId !== run.id,
       );
-    const delivery: ThreadManagementSendResult["delivery"] = restartedAsNextTurn
-      ? "restarted"
-      : run.status === "queued" && run.steerWhenReadyRunId !== undefined
-        ? // Held only until the target's turn starts, then steered into it.
-          "steered"
-        : turnItem === null || turnItem.inputIntent === "queued_turn"
-          ? "queued"
-          : turnItem.inputIntent === "turn_start"
-            ? "started"
-            : mode === "restart"
-              ? "restarted"
-              : "steered";
+    const delivery: ThreadManagementSendResult["delivery"] = promotedRun
+      ? "started"
+      : restartedAsNextTurn
+        ? "restarted"
+        : run.status === "queued" && run.steerWhenReadyRunId !== undefined
+          ? // Held only until the target's turn starts, then steered into it.
+            "steered"
+          : turnItem === null || turnItem.inputIntent === "queued_turn"
+            ? "queued"
+            : turnItem.inputIntent === "turn_start"
+              ? "started"
+              : mode === "restart"
+                ? "restarted"
+                : "steered";
     const held = holdWhileIdle && run.status === "queued" && run.queueHeld === true;
     return { dispatch: dispatched, projection, message, run, turnItem, delivery, held };
   });

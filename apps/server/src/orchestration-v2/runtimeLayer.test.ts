@@ -8110,7 +8110,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       const settled = yield* orchestrator.getThreadProjection(threadId);
       assert.isNotNull(settled.thread.settledAt);
-      assert.isTrue(settled.runs.every((run) => run.status === "cancelled"));
+      assert.deepEqual(
+        settled.runs
+          .filter((run) => run.status !== "cancelled")
+          .map((run) => [run.userMessageId, run.status, run.queueHeld]),
+        [[MessageId.make("settle-automatic-agent"), "queued", true]],
+      );
 
       yield* orchestrator.dispatch({
         type: "thread.unsettle",
@@ -8149,7 +8154,11 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isNull(blocked.thread.settledAt);
       assert.deepEqual(
         blocked.runs.filter((run) => run.status === "queued").map((run) => run.userMessageId),
-        ["settle-automatic-user-queued", "settle-automatic-agent-queued-2"],
+        [
+          "settle-automatic-agent",
+          "settle-automatic-user-queued",
+          "settle-automatic-agent-queued-2",
+        ],
       );
     }),
   );
