@@ -7,8 +7,10 @@
   "projectId": "<T3 project id, from `t3 project list`>",
   "reportProvider": "<provider instance id>",
   "reportModel": "<model slug>",
-  "t3Command": ["t3"],
+  "t3Command": ["C:/Users/<you>/AppData/Roaming/npm/t3.cmd"],
   "commandTimeoutSec": 600,
+  "maxStartAttempts": 3,
+  "lockStaleSec": 7200,
   "statePath": "~/.codex/state/t3-upstream-watch/state.json",
   "logPath": "~/.codex/state/t3-upstream-watch/watch.log",
   "areaRules": {

@@ -2,8 +2,16 @@
 
 Run: pythonw t3_upstream_watch.py --config <path> [--dry-run]
 Checks the newest upstream tag on the configured channel. Nothing new: one log line, exit 0.
-New tag: counts commits and merge conflicts, then starts one T3 report thread that asks Maxi
-for an OK. It never merges, pushes, or opens a merge thread itself.
+New tag (or a reported tag re-pushed to a new commit): counts commits and merge conflicts, then
+starts one T3 report thread that asks Maxi for an OK. It never merges, pushes, or opens a merge
+thread itself. One run at a time (lock file next to the state file); the pending report is saved
+before the thread starts, so a lost reply is adopted by title on the next run instead of re-sent.
+
+Config: see config.example.json. Pin t3Command to an absolute path (`where t3` on Windows gives the
+npm t3.cmd shim); a bare name is resolved through PATH/PATHEXT at run time. mirrorPath must be a
+folder this script created (it marks the bare repo with upstreamWatch.mirror=true). After
+maxStartAttempts failed starts for one tag it stops and logs; delete "pending" in the state file to
+retry. Errors, including config errors, go to logPath (or <config>.error.log if it is unreadable).
 """
 
 from __future__ import annotations
@@ -12,8 +20,12 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -32,11 +44,21 @@ REQUIRED_KEYS = (
     "areaRules",
     "t3Command",
 )
-DEFAULTS = {"channelPattern": STABLE_PATTERN, "commandTimeoutSec": 600}
+DEFAULTS = {
+    "channelPattern": STABLE_PATTERN,
+    "commandTimeoutSec": 600,
+    "maxStartAttempts": 3,
+    "lockStaleSec": 7200,
+}
 PATH_KEYS = ("mirrorPath", "statePath", "logPath")
 FORK_REF = "refs/watch/fork"
+MIRROR_MARKER = "upstreamWatch.mirror"
 OTHER_AREA = "other"
 TITLE = "T3 Code: upstream {tag} ready, merge?"
+TITLE_REPUSHED = "T3 Code: upstream {tag} re-pushed ({sha}), merge?"
+# Scheduled runs have nobody to answer a credential prompt or dialog.
+GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+KILL_GRACE_SEC = 10
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
 
 
@@ -45,6 +67,10 @@ class WatchError(Exception):
 
 
 class ConfigError(WatchError):
+    pass
+
+
+class LockBusy(WatchError):
     pass
 
 
@@ -58,24 +84,71 @@ class Result:
 Runner = Callable[..., Result]
 
 
-def run_hidden(argv: list[str], stdin: str | None = None, timeout: float | None = None) -> Result:
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+def hidden_flags() -> int:
+    return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def kill_tree(p: subprocess.Popen) -> None:
+    if os.name == "nt":
+        root = os.environ.get("SystemRoot", r"C:\Windows")
+        try:
+            subprocess.run(
+                [os.path.join(root, "System32", "taskkill.exe"), "/T", "/F", "/PID", str(p.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=hidden_flags(),
+                timeout=KILL_GRACE_SEC,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    p.kill()
+
+
+def run_hidden(
+    argv: list[str],
+    stdin: str | None = None,
+    timeout: float | None = None,
+    env: dict | None = None,
+) -> Result:
     try:
-        p = subprocess.run(
+        p = subprocess.Popen(
             argv,
-            input=stdin,
-            capture_output=True,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
-            creationflags=flags,
+            creationflags=hidden_flags(),
+            env={**os.environ, **env} if env else None,
         )
-    except subprocess.TimeoutExpired:
-        return Result(124, "", f"timed out after {timeout}s: {argv[0]}")
     except OSError as e:
         return Result(127, "", f"cannot run {argv[0]}: {e}")
-    return Result(p.returncode, p.stdout, p.stderr)
+    try:
+        out, err = p.communicate(stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(p)
+        try:
+            p.communicate(timeout=KILL_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            pass  # a surviving grandchild holds the pipes; the reader threads are daemons
+        return Result(124, "", f"timed out after {timeout}s: {argv[0]}")
+    return Result(p.returncode, out, err)
+
+
+def resolve_command(cmd: list[str], which: Callable[[str], str | None] = shutil.which) -> list[str]:
+    # CreateProcess cannot find the npm `t3.cmd` shim by bare name; which() applies PATHEXT.
+    exe = cmd[0]
+    if os.path.isabs(exe):
+        if not os.path.isfile(exe):
+            raise ConfigError(f"t3Command {exe} does not exist")
+        return list(cmd)
+    found = which(exe)
+    if not found:
+        raise ConfigError(f"t3Command {exe!r} is not on PATH; set an absolute path")
+    return [found, *cmd[1:]]
 
 
 # --- config and state -------------------------------------------------------
@@ -83,7 +156,7 @@ def run_hidden(argv: list[str], stdin: str | None = None, timeout: float | None 
 
 def load_config(path: str) -> dict:
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             raw = json.load(f)
     except (OSError, ValueError) as e:
         raise ConfigError(f"cannot read config {path}: {e}") from e
@@ -105,6 +178,9 @@ def validate_config(raw: object, source: str = "config") -> dict:
     cmd = cfg["t3Command"]
     if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
         raise ConfigError(f"{source}: t3Command must be a non-empty list of strings")
+    for k in ("commandTimeoutSec", "maxStartAttempts", "lockStaleSec"):
+        if not isinstance(cfg[k], int) or isinstance(cfg[k], bool) or cfg[k] < 1:
+            raise ConfigError(f"{source}: {k} must be a positive integer")
     try:
         re.compile(cfg["channelPattern"])
     except re.error as e:
@@ -116,7 +192,7 @@ def validate_config(raw: object, source: str = "config") -> dict:
 
 def load_state(path: str) -> dict:
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except FileNotFoundError:
         return {}
@@ -132,6 +208,39 @@ def save_state(path: str, state: dict) -> None:
         json.dump(state, f, indent=2)
         f.write("\n")
     os.replace(tmp, path)
+
+
+@contextmanager
+def run_lock(path: str, stale_sec: float):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(path)
+            except FileNotFoundError:
+                continue
+            if age < stale_sec:
+                raise LockBusy(f"another run holds {path} ({int(age)}s old)") from None
+            # Older than any real run can last (lockStaleSec): its owner died without cleanup.
+            os.remove(path)
+    else:
+        raise LockBusy(f"cannot take {path}")
+    token = f"{os.getpid()} {uuid.uuid4()}"
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(token)
+    try:
+        yield
+    finally:
+        try:
+            with open(path, encoding="utf-8") as f:
+                mine = f.read() == token
+            if mine:
+                os.remove(path)
+        except OSError:
+            pass
 
 
 def append_log(path: str, now: datetime, status: str, detail: str = "") -> None:
@@ -173,6 +282,17 @@ def is_newer(tag: str, last: str | None) -> bool:
     return version_key(tag) > last_key
 
 
+def report_due(tag: str, sha: str, state: dict) -> str | None:
+    """"new", "repushed" (a reported tag now points at another commit), or None."""
+    reported = state.get("reported") or {}
+    last = state.get("lastReportedTag")
+    if tag in reported:
+        return "repushed" if reported[tag] != sha else None
+    if tag == last:  # state written before tag SHAs were stored
+        return None
+    return "new" if is_newer(tag, last) else None
+
+
 def parse_merge_tree(result: Result) -> list[str]:
     """`git merge-tree --write-tree --name-only --no-messages`: exit 0 clean, 1 conflicts."""
     if result.code not in (0, 1):
@@ -209,15 +329,19 @@ class Report:
     fork_only: int
     conflicts: list[str]
     areas: list[tuple[str, int]]
+    repushed: bool = False
 
     @property
     def title(self) -> str:
+        if self.repushed:
+            return TITLE_REPUSHED.format(tag=self.tag, sha=self.tag_sha[:10])
         return TITLE.format(tag=self.tag)
 
     @property
     def message(self) -> str:
+        verb = "re-pushed (the tag moved to a new commit)" if self.repushed else "released"
         lines = [
-            f"Upstream released {self.tag} ({self.tag_sha[:10]}). "
+            f"Upstream {verb} {self.tag} ({self.tag_sha[:10]}). "
             f"Last reported: {self.previous_tag or 'none'}.",
             f"Compared with fork branch {self.fork_branch} ({self.fork_sha[:10]}):",
             f"- Upstream commits not in the fork: {self.upstream_ahead}",
@@ -245,7 +369,7 @@ class Git:
 
     def raw(self, *args: str) -> Result:
         argv = ["git", "-c", "core.quotePath=false", "--git-dir", self.mirror, *args]
-        return self.runner(argv, timeout=self.timeout)
+        return self.runner(argv, timeout=self.timeout, env=GIT_ENV)
 
     def __call__(self, *args: str) -> str:
         r = self.raw(*args)
@@ -256,9 +380,22 @@ class Git:
 
 def refresh_mirror(git: Git, cfg: dict) -> None:
     # Bare repo with only tags + the fork branch; `clone --mirror` of GitHub pulls every PR ref too.
-    if not os.path.isdir(cfg["mirrorPath"]):
-        git("init", "--bare", "--quiet", cfg["mirrorPath"])
-    git("fetch", "--quiet", "--no-tags", "--force", cfg["upstreamUrl"], "+refs/tags/*:refs/tags/*")
+    mirror = cfg["mirrorPath"]
+    if not os.path.isdir(mirror) or not os.listdir(mirror):
+        git("init", "--bare", "--quiet", mirror)
+        git("config", MIRROR_MARKER, "true")
+    elif git.raw("config", "--get", MIRROR_MARKER).out.strip() != "true":
+        # Fetching force-overwrites and prunes tags: never adopt a folder this script did not make.
+        raise WatchError(f"{mirror} is not a watcher mirror (no {MIRROR_MARKER}); refusing")
+    git(
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--force",
+        "--prune",
+        cfg["upstreamUrl"],
+        "+refs/tags/*:refs/tags/*",
+    )
     git(
         "fetch",
         "--quiet",
@@ -269,9 +406,15 @@ def refresh_mirror(git: Git, cfg: dict) -> None:
     )
 
 
-def build_report(git: Git, cfg: dict, tag: str, previous: str | None) -> Report:
-    # Peeled commit ids: upstream tags may be annotated, and every count must use the same commits.
-    tag_sha, fork_sha = git("rev-parse", f"refs/tags/{tag}^{{commit}}", FORK_REF).split()
+def tag_commit(git: Git, tag: str) -> str:
+    # Peeled commit id: upstream tags may be annotated, and every count must use the same commits.
+    return git("rev-parse", f"refs/tags/{tag}^{{commit}}").strip()
+
+
+def build_report(
+    git: Git, cfg: dict, tag: str, tag_sha: str, previous: str | None, repushed: bool = False
+) -> Report:
+    fork_sha = git("rev-parse", FORK_REF).strip()
     ahead = int(git("rev-list", "--count", f"{fork_sha}..{tag_sha}").strip())
     fork_only = int(git("rev-list", "--count", "--no-merges", f"{tag_sha}..{fork_sha}").strip())
     conflicts = parse_merge_tree(
@@ -287,12 +430,28 @@ def build_report(git: Git, cfg: dict, tag: str, previous: str | None) -> Report:
         fork_only=fork_only,
         conflicts=conflicts,
         areas=group_by_area(conflicts, cfg["areaRules"]),
+        repushed=repushed,
     )
 
 
-def start_report_thread(runner: Runner, cfg: dict, report: Report) -> str | None:
+def find_thread(runner: Runner, t3: list[str], cfg: dict, title: str) -> str | None:
+    argv = [*t3, "thread", "list", "--project", cfg["projectId"], "--json"]
+    r = runner(argv, timeout=cfg["commandTimeoutSec"])
+    if r.code != 0:
+        raise WatchError(f"t3 thread list failed ({r.code}): {r.err.strip()[-300:]}")
+    try:
+        threads = json.loads(r.out)
+    except ValueError as e:
+        raise WatchError(f"t3 thread list printed no JSON: {e}") from e
+    for t in threads if isinstance(threads, list) else []:
+        if isinstance(t, dict) and t.get("title") == title:
+            return str(t.get("threadId"))
+    return None
+
+
+def start_report_thread(runner: Runner, t3: list[str], cfg: dict, report: Report) -> str | None:
     argv = [
-        *cfg["t3Command"],
+        *t3,
         "thread",
         "start",
         "--title",
@@ -314,6 +473,72 @@ def start_report_thread(runner: Runner, cfg: dict, report: Report) -> str | None
         return None
 
 
+def mark_reported(cfg: dict, state: dict, report: Report, thread_id: str | None, at: datetime):
+    rest = {k: v for k, v in state.items() if k != "pending"}
+    save_state(
+        cfg["statePath"],
+        {
+            **rest,
+            "lastReportedTag": report.tag,
+            "reported": {**(state.get("reported") or {}), report.tag: report.tag_sha},
+            "reportedAt": at.astimezone(timezone.utc).isoformat(),
+            "reportThreadId": thread_id,
+        },
+    )
+
+
+def run_locked(
+    cfg: dict, runner: Runner, t3: list[str] | None, dry_run: bool, now, out, log
+) -> int:
+    git = Git(runner, cfg)
+    refresh_mirror(git, cfg)
+    newest = pick_newest(git("tag", "--list").split(), cfg["channelPattern"])
+    if newest is None:
+        log("no-tag", f"nothing matches {cfg['channelPattern']}")
+        return 0
+    tag_sha = tag_commit(git, newest)
+    state = load_state(cfg["statePath"])
+    due = report_due(newest, tag_sha, state)
+    if not dry_run and due is None:
+        log("nothing-new", newest)
+        return 0
+    last = state.get("lastReportedTag")
+    report = build_report(git, cfg, newest, tag_sha, last, repushed=due == "repushed")
+    if dry_run or t3 is None:
+        out(f"{report.title}\n\n{report.message}")
+        log("dry-run", f"{newest} conflicts={len(report.conflicts)}")
+        return 0
+    pending = state.get("pending")
+    attempts = 0
+    if isinstance(pending, dict) and (pending.get("tag"), pending.get("sha")) == (newest, tag_sha):
+        # The last start may have created the thread even though its reply or state write was lost.
+        thread_id = find_thread(runner, t3, cfg, report.title)
+        if thread_id is not None:
+            mark_reported(cfg, state, report, thread_id, now())
+            log("adopted", f"{newest} thread={thread_id}")
+            return 0
+        attempts = int(pending.get("attempts", 0))
+        if attempts >= cfg["maxStartAttempts"]:
+            log(
+                "error",
+                f"gave up on {newest} after {attempts} start attempts; "
+                f"delete 'pending' in {cfg['statePath']} to retry",
+            )
+            return 1
+    pending = {
+        "tag": newest,
+        "sha": tag_sha,
+        "title": report.title,
+        "attempts": attempts + 1,
+        "since": now().astimezone(timezone.utc).isoformat(),
+    }
+    save_state(cfg["statePath"], {**state, "pending": pending})
+    thread_id = start_report_thread(runner, t3, cfg, report)
+    mark_reported(cfg, state, report, thread_id, now())
+    log("reported", f"{newest} thread={thread_id} conflicts={len(report.conflicts)}")
+    return 0
+
+
 def run(
     cfg: dict,
     runner: Runner = run_hidden,
@@ -321,43 +546,44 @@ def run(
     dry_run: bool = False,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     out: Callable[[str], None] = print,
+    which: Callable[[str], str | None] = shutil.which,
 ) -> int:
     def log(status: str, detail: str = "") -> None:
         append_log(cfg["logPath"], now(), status, detail)
 
     try:
-        git = Git(runner, cfg)
-        refresh_mirror(git, cfg)
-        newest = pick_newest(git("tag", "--list").split(), cfg["channelPattern"])
-        if newest is None:
-            log("no-tag", f"nothing matches {cfg['channelPattern']}")
-            return 0
-        state = load_state(cfg["statePath"])
-        last = state.get("lastReportedTag")
-        if not dry_run and not is_newer(newest, last):
-            log("nothing-new", newest)
-            return 0
-        report = build_report(git, cfg, newest, last)
-        if dry_run:
-            out(f"{report.title}\n\n{report.message}")
-            log("dry-run", f"{newest} conflicts={len(report.conflicts)}")
-            return 0
-        thread_id = start_report_thread(runner, cfg, report)
-        # State moves only after the thread exists, so a failed start retries on the next run.
-        save_state(
-            cfg["statePath"],
-            {
-                **state,
-                "lastReportedTag": newest,
-                "reportedAt": now().astimezone(timezone.utc).isoformat(),
-                "reportThreadId": thread_id,
-            },
-        )
-        log("reported", f"{newest} thread={thread_id} conflicts={len(report.conflicts)}")
+        t3 = None if dry_run else resolve_command(cfg["t3Command"], which)
+        with run_lock(cfg["statePath"] + ".lock", cfg["lockStaleSec"]):
+            return run_locked(cfg, runner, t3, dry_run, now, out, log)
+    except LockBusy as e:
+        log("busy", str(e))
         return 0
-    except (WatchError, OSError) as e:
+    except WatchError as e:
         log("error", str(e))
         return 1
+    except Exception as e:  # pythonw has no console: the log is the only place errors show up
+        log("error", f"{type(e).__name__}: {e}")
+        return 1
+
+
+def fallback_log_path(config_path: str) -> str:
+    try:
+        with open(config_path, encoding="utf-8-sig") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict) and isinstance(raw.get("logPath"), str) and raw["logPath"]:
+            return os.path.expanduser(raw["logPath"])
+    except (OSError, ValueError):
+        pass
+    return config_path + ".error.log"
+
+
+def report_fatal(config_path: str, message: str) -> None:
+    if sys.stderr:  # None under pythonw
+        print(message, file=sys.stderr)
+    try:
+        append_log(fallback_log_path(config_path), datetime.now(timezone.utc), "error", message)
+    except OSError:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -367,11 +593,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config)
-    except ConfigError as e:
-        if sys.stderr:  # None under pythonw
-            print(e, file=sys.stderr)
+    except Exception as e:
+        detail = str(e) if isinstance(e, WatchError) else f"{type(e).__name__}: {e}"
+        report_fatal(args.config, detail)
         return 2
-    return run(cfg, dry_run=args.dry_run)
+    try:
+        return run(cfg, dry_run=args.dry_run)
+    except Exception as e:  # only reachable when the log file itself cannot be written
+        report_fatal(args.config, f"{type(e).__name__}: {e}")
+        return 1
 
 
 if __name__ == "__main__":
