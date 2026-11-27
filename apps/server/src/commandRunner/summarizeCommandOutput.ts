@@ -1,19 +1,28 @@
 export interface OutputSummaryLimits {
   /** Lines of a failing command's tail to return. */
   readonly tailLines: number;
-  /** Matched lines returned per command before the rest are only counted. */
-  readonly maxMatchedLines: number;
-  /** Longer kept lines are cut here; the log has the full text. */
+  /** First matched lines returned per command; later ones go to the last-matches window. */
+  readonly headMatchedLines: number;
+  /** Last matched lines returned per command, so late errors survive a noisy start. */
+  readonly tailMatchedLines: number;
+  /** Text budget for returned matched lines, split evenly between first and last. */
+  readonly maxMatchedChars: number;
+  /** Longer kept lines are cut around their match; the log has the full text. */
   readonly maxLineChars: number;
+  /** A line still unbroken at this length is split here, bounding memory and match cost. */
+  readonly maxBufferedLineChars: number;
 }
 
 export const DEFAULT_OUTPUT_SUMMARY_LIMITS: OutputSummaryLimits = {
   tailLines: 30,
-  maxMatchedLines: 500,
+  headMatchedLines: 100,
+  tailMatchedLines: 100,
+  maxMatchedChars: 64_000,
   maxLineChars: 2_000,
+  maxBufferedLineChars: 64 * 1024,
 };
 
-/** Case-insensitive regex sources. Callers may add to them, never remove them. */
+/** Case-insensitive regex sources. Callers may add literal text, never remove them. */
 export const DEFAULT_MATCH_PATTERNS: ReadonlyArray<string> = [
   "error",
   "warn",
@@ -34,8 +43,9 @@ export interface MatchedLine {
 export interface CommandOutputSummary {
   readonly lineCount: number;
   readonly matchedLineCount: number;
+  /** The first and the last matched lines, in output order. */
   readonly matchedLines: ReadonlyArray<MatchedLine>;
-  /** Matched lines past `maxMatchedLines`, only in the log. */
+  /** Matched lines between the first and last returned ones, only in the log. */
   readonly matchedLinesInLogOnly: number;
   /** The last lines, present only for a failed command. */
   readonly tail?: ReadonlyArray<string>;
@@ -43,29 +53,60 @@ export interface CommandOutputSummary {
 
 // oxlint-disable-next-line no-control-regex -- ANSI escapes are control characters by definition.
 const ANSI_ESCAPE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+const LINE_BREAK = /\r\n|\r|\n/;
 
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Caller additions are literal text: a caller regex could backtrack and stall the server. */
 export const compileMatchPatterns = (extra: ReadonlyArray<string> = []): RegExp =>
-  new RegExp([...DEFAULT_MATCH_PATTERNS, ...extra].map((source) => `(?:${source})`).join("|"), "i");
+  new RegExp(
+    [...DEFAULT_MATCH_PATTERNS, ...extra.map(escapeRegExp)]
+      .map((source) => `(?:${source})`)
+      .join("|"),
+    "i",
+  );
 
-const clip = (text: string, maxChars: number): string =>
-  text.length <= maxChars
-    ? text
-    : `${text.slice(0, maxChars)}... (${text.length - maxChars} more chars in log)`;
+const clip = (text: string, maxChars: number, around = 0): string => {
+  if (text.length <= maxChars) return text;
+  const start = Math.max(0, Math.min(around - Math.floor(maxChars / 2), text.length - maxChars));
+  const end = start + maxChars;
+  return `${start > 0 ? `(${start} chars before in log) ...` : ""}${text.slice(start, end)}${
+    end < text.length ? `... (${text.length - end} more chars in log)` : ""
+  }`;
+};
 
-/** Splits a decoded stream into lines, holding a partial last line until more text or `flush`. */
+/**
+ * Splits a decoded stream into lines at \n, \r\n or a lone \r (progress redraws), holding a
+ * partial last line until more text or `flush`.
+ */
 export class LineSplitter {
+  readonly #maxLineChars: number;
   #pending = "";
 
+  constructor(maxLineChars = DEFAULT_OUTPUT_SUMMARY_LIMITS.maxBufferedLineChars) {
+    this.#maxLineChars = maxLineChars;
+  }
+
   push(chunk: string): Array<string> {
-    const parts = (this.#pending + chunk).split("\n");
-    this.#pending = parts.pop() ?? "";
-    return parts.map((part) => (part.endsWith("\r") ? part.slice(0, -1) : part));
+    let text = this.#pending + chunk;
+    // A trailing \r may be the first half of a \r\n split across chunks.
+    const heldReturn = text.endsWith("\r");
+    if (heldReturn) text = text.slice(0, -1);
+    const lines = text.split(LINE_BREAK);
+    let rest = lines.pop() ?? "";
+    while (rest.length >= this.#maxLineChars) {
+      lines.push(rest.slice(0, this.#maxLineChars));
+      rest = rest.slice(this.#maxLineChars);
+    }
+    this.#pending = heldReturn ? `${rest}\r` : rest;
+    return lines;
   }
 
   flush(): Array<string> {
-    const rest = this.#pending;
+    const rest = this.#pending.endsWith("\r") ? this.#pending.slice(0, -1) : this.#pending;
+    const hadPending = this.#pending !== "";
     this.#pending = "";
-    return rest === "" ? [] : [rest.endsWith("\r") ? rest.slice(0, -1) : rest];
+    return hadPending ? [rest] : [];
   }
 }
 
@@ -73,8 +114,12 @@ export class LineSplitter {
 export class OutputSummarizer {
   readonly #pattern: RegExp;
   readonly #limits: OutputSummaryLimits;
-  readonly #matched: Array<MatchedLine> = [];
+  readonly #head: Array<MatchedLine> = [];
+  readonly #lastMatches: Array<MatchedLine> = [];
   readonly #tail: Array<string> = [];
+  #headChars = 0;
+  #lastMatchesChars = 0;
+  #headFull = false;
   #lineCount = 0;
   #matchedLineCount = 0;
 
@@ -86,25 +131,53 @@ export class OutputSummarizer {
   addLine(raw: string): void {
     this.#lineCount += 1;
     const text = raw.replace(ANSI_ESCAPE, "");
-    if (this.#pattern.test(text)) {
-      this.#matchedLineCount += 1;
-      if (this.#matched.length < this.#limits.maxMatchedLines) {
-        this.#matched.push({ line: this.#lineCount, text: clip(text, this.#limits.maxLineChars) });
-      }
-    }
+    const match = this.#pattern.exec(text);
+    if (match !== null) this.#addMatch(text, match.index);
     if (this.#limits.tailLines > 0) {
       this.#tail.push(text);
       if (this.#tail.length > this.#limits.tailLines) this.#tail.shift();
     }
   }
 
+  #addMatch(text: string, index: number): void {
+    this.#matchedLineCount += 1;
+    const entry = { line: this.#lineCount, text: clip(text, this.#limits.maxLineChars, index) };
+    const halfBudget = Math.floor(this.#limits.maxMatchedChars / 2);
+    if (!this.#headFull) {
+      if (
+        this.#head.length < this.#limits.headMatchedLines &&
+        this.#headChars + entry.text.length <= halfBudget
+      ) {
+        this.#head.push(entry);
+        this.#headChars += entry.text.length;
+        return;
+      }
+      this.#headFull = true;
+    }
+    this.#lastMatches.push(entry);
+    this.#lastMatchesChars += entry.text.length;
+    while (
+      this.#lastMatches.length > this.#limits.tailMatchedLines ||
+      (this.#lastMatchesChars > halfBudget && this.#lastMatches.length > 1)
+    ) {
+      this.#lastMatchesChars -= this.#lastMatches.shift()?.text.length ?? 0;
+    }
+  }
+
   finish(failed: boolean): CommandOutputSummary {
+    const matchedLines = [...this.#head, ...this.#lastMatches];
     return {
       lineCount: this.#lineCount,
       matchedLineCount: this.#matchedLineCount,
-      matchedLines: this.#matched,
-      matchedLinesInLogOnly: this.#matchedLineCount - this.#matched.length,
-      ...(failed ? { tail: this.#tail.map((line) => clip(line, this.#limits.maxLineChars)) } : {}),
+      matchedLines,
+      matchedLinesInLogOnly: this.#matchedLineCount - matchedLines.length,
+      ...(failed
+        ? {
+            tail: this.#tail.map((line) =>
+              clip(line, this.#limits.maxLineChars, this.#pattern.exec(line)?.index ?? 0),
+            ),
+          }
+        : {}),
     };
   }
 }
@@ -122,7 +195,7 @@ export const summarizeCommandOutput = (
     options.pattern ?? compileMatchPatterns(),
     options.limits,
   );
-  const splitter = new LineSplitter();
+  const splitter = new LineSplitter(options.limits?.maxBufferedLineChars);
   for (const line of [...splitter.push(text), ...splitter.flush()]) summarizer.addLine(line);
   return summarizer.finish(options.failed);
 };

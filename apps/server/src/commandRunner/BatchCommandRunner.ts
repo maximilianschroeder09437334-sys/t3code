@@ -1,17 +1,6 @@
 /*
- * Batch command runner behind the `t3_run_commands` MCP tool.
- * Agents read raw command output in full; this returns a summary and keeps the rest on disk.
- * - Commands run one after another in `cwd` through `shell` (Node's default when omitted:
- *   cmd.exe on Windows, /bin/sh elsewhere), never with a console window.
- * - Each command gets `timeoutMs`. A timeout or interruption kills its whole process tree.
- * - Every command's combined stdout and stderr, in arrival order, goes to one log file in
- *   `ServerConfig.commandLogsDir`, with a header and an exit line per command.
- * - Each result has the status, exit code, duration, line count and EVERY line matching the
- *   error/warning patterns (defaults plus caller additions, case-insensitive). Only past
- *   `maxMatchedLines` do matches stay in the log alone, and the result counts them.
- * - A failed command (non-zero exit, signal, timeout, spawn error) also returns its last lines.
- * - `stopOnFailure` (default true) skips the commands after a failure and lists them as skipped.
- * Invariant: no matched line and no failing tail is hidden without the result saying so.
+ * Runs `t3_run_commands` batches hidden, one log file per batch, and returns a summary.
+ * Invariant: no matched line or failing tail is dropped without the result saying so.
  */
 // @effect-diagnostics nodeBuiltinImport:off -- Raw pipes stream into one log in arrival order.
 // @effect-diagnostics globalTimers:off -- Timeout and pipe-close timers live in child callbacks.
@@ -19,8 +8,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import * as Context from "effect/Context";
@@ -30,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../config.ts";
+import { shouldExcludeTerminalEnvKey } from "../terminal/Manager.ts";
 import {
   compileMatchPatterns,
   DEFAULT_OUTPUT_SUMMARY_LIMITS,
@@ -45,6 +35,11 @@ export interface BatchCommandRunnerConfig {
   readonly maxTimeoutMs: number;
   /** How long to wait for output pipes after the shell exits, as when a child outlives it. */
   readonly pipeCloseGraceMs: number;
+  /** Whole-batch limit, below the MCP call timeout so partial results still come back. */
+  readonly maxBatchMs: number;
+  /** Logs older than this, or past the newest `maxLogCount`, are deleted when a batch starts. */
+  readonly maxLogAgeMs: number;
+  readonly maxLogCount: number;
   readonly limits: OutputSummaryLimits;
 }
 
@@ -52,6 +47,10 @@ export const DEFAULT_BATCH_COMMAND_RUNNER_CONFIG: Omit<BatchCommandRunnerConfig,
   defaultTimeoutMs: 10 * 60_000,
   maxTimeoutMs: 60 * 60_000,
   pipeCloseGraceMs: 2_000,
+  // Codex's T3 MCP timeout is 65 minutes.
+  maxBatchMs: 60 * 60_000,
+  maxLogAgeMs: 7 * 24 * 60 * 60_000,
+  maxLogCount: 200,
   limits: DEFAULT_OUTPUT_SUMMARY_LIMITS,
 };
 
@@ -72,6 +71,8 @@ export interface CommandRunResult extends CommandOutputSummary {
   readonly exitCode: number | null;
   readonly signal?: string;
   readonly spawnError?: string;
+  /** Something the shell started held the pipes open after it exited; later output is lost. */
+  readonly outputCutAfterExit?: true;
   readonly durationMs: number;
 }
 
@@ -85,6 +86,8 @@ export interface BatchCommandRunResult {
   readonly logPath: string;
   /** Set when the log could not be fully written; the summaries are still complete. */
   readonly logError?: string;
+  /** The batch ran out of `maxBatchMs`; the running command was killed and the rest skipped. */
+  readonly batchTimedOut?: true;
   readonly commands: ReadonlyArray<CommandRunResult | SkippedCommand>;
 }
 
@@ -116,6 +119,7 @@ const killTree = (child: ChildProcess): void => {
   if (isWindows) {
     spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true })
       .on("error", () => child.kill())
+      .on("exit", (code) => code === 0 || child.kill())
       .unref();
     return;
   }
@@ -125,6 +129,16 @@ const killTree = (child: ChildProcess): void => {
     child.kill("SIGKILL");
   }
 };
+
+/** Windows ids are reused at once, so an exited shell's id may name another process. */
+const killTreeIfRunning = (child: ChildProcess): void => {
+  if (child.exitCode === null && child.signalCode === null) killTree(child);
+};
+
+const commandEnv = (): NodeJS.ProcessEnv =>
+  Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !shouldExcludeTerminalEnvKey(key)),
+  );
 
 const runOne = (
   command: string,
@@ -141,11 +155,13 @@ const runOne = (
     const startedAt = performance.now();
     const summarizer = new OutputSummarizer(options.pattern, options.config.limits);
     let timedOut = false;
+    let outputCutAfterExit = false;
     let settled = false;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
     const child = spawn(command, {
       cwd: options.cwd,
+      env: commandEnv(),
       shell: options.shell ?? true,
       windowsHide: true,
       // On Windows a detached child gets its own console window.
@@ -168,7 +184,7 @@ const runOne = (
 
     const timeoutTimer = setTimeout(() => {
       timedOut = true;
-      killTree(child);
+      killTreeIfRunning(child);
     }, options.timeoutMs);
 
     const finish = (exitCode: number | null, signal: string | null, spawnError?: string) => {
@@ -194,6 +210,7 @@ const runOne = (
           exitCode,
           ...(signal === null ? {} : { signal }),
           ...(spawnError === undefined ? {} : { spawnError }),
+          ...(outputCutAfterExit ? { outputCutAfterExit: true as const } : {}),
           durationMs: Math.round(performance.now() - startedAt),
           ...summarizer.finish(status !== "succeeded"),
         }),
@@ -202,7 +219,13 @@ const runOne = (
 
     child.on("error", (error) => finish(null, null, error.message));
     child.on("exit", (code, signal) => {
-      graceTimer = setTimeout(() => finish(code, signal), options.config.pipeCloseGraceMs);
+      clearTimeout(timeoutTimer);
+      graceTimer = setTimeout(() => {
+        outputCutAfterExit = true;
+        // POSIX group ids stay reserved while members live; a Windows id is not safe to reuse.
+        if (!isWindows) killTree(child);
+        finish(code, signal);
+      }, options.config.pipeCloseGraceMs);
     });
     child.on("close", (code, signal) => finish(code, signal));
 
@@ -211,7 +234,7 @@ const runOne = (
       settled = true;
       clearTimeout(timeoutTimer);
       clearTimeout(graceTimer);
-      killTree(child);
+      killTreeIfRunning(child);
     });
   });
 
@@ -228,6 +251,9 @@ const validate = Effect.fnUntraced(function* (
       message: `timeoutMs must be between 1 and ${config.maxTimeoutMs}.`,
     });
   }
+  if (!isAbsolute(input.cwd)) {
+    return yield* new BatchCommandInputError({ message: `cwd must be absolute: ${input.cwd}` });
+  }
   const isDirectory = yield* Effect.promise(() =>
     stat(input.cwd).then(
       (stats) => stats.isDirectory(),
@@ -237,19 +263,42 @@ const validate = Effect.fnUntraced(function* (
   if (!isDirectory) {
     return yield* new BatchCommandInputError({ message: `cwd is not a directory: ${input.cwd}` });
   }
-  const pattern = yield* Effect.try({
-    try: () => compileMatchPatterns(input.extraMatchPatterns),
-    catch: (cause) =>
-      new BatchCommandInputError({ message: `Invalid match pattern: ${String(cause)}` }),
-  });
-  return { timeoutMs, pattern };
+  return { timeoutMs, pattern: compileMatchPatterns(input.extraMatchPatterns) };
 });
 
+/** Best effort: a log another batch still writes or cannot be deleted stays. */
+const pruneLogs = async (config: BatchCommandRunnerConfig, nowMs: number) => {
+  const names = await readdir(config.logsDir).catch(() => []);
+  const logs = await Promise.all(
+    names
+      .filter((name) => name.endsWith(".log"))
+      .map((name) =>
+        stat(join(config.logsDir, name)).then(
+          (stats) => ({ name, modifiedMs: stats.mtimeMs }),
+          () => undefined,
+        ),
+      ),
+  );
+  const newestFirst = logs
+    .filter((log) => log !== undefined)
+    .toSorted((a, b) => b.modifiedMs - a.modifiedMs);
+  // Leave room for the log this batch is about to create.
+  const stale = newestFirst.filter(
+    (log, index) => index >= config.maxLogCount - 1 || nowMs - log.modifiedMs > config.maxLogAgeMs,
+  );
+  await Promise.all(
+    stale.map((log) => rm(join(config.logsDir, log.name), { force: true }).catch(() => undefined)),
+  );
+};
+
 const openLog = Effect.fnUntraced(function* (config: BatchCommandRunnerConfig) {
-  const stamp = DateTime.formatIso(yield* DateTime.now).replace(/[:.]/g, "-");
+  const now = yield* DateTime.now;
+  const nowMs = DateTime.toEpochMillis(now);
+  const stamp = DateTime.formatIso(now).replace(/[:.]/g, "-");
   return yield* Effect.tryPromise({
     try: async () => {
       await mkdir(config.logsDir, { recursive: true });
+      await pruneLogs(config, nowMs);
       const logPath = join(config.logsDir, `${stamp}-${randomUUID().slice(0, 8)}.log`);
       const log = createWriteStream(logPath, { flags: "wx" });
       await new Promise<void>((resolve, reject) => {
@@ -281,8 +330,15 @@ export const make = (config: BatchCommandRunnerConfig): BatchCommandRunner["Serv
       (state) =>
         Effect.gen(function* () {
           const results: Array<CommandRunResult | SkippedCommand> = [];
+          const deadline = performance.now() + config.maxBatchMs;
           let stopped = false;
+          let batchTimedOut = false;
           for (const command of input.commands) {
+            const remainingMs = Math.floor(deadline - performance.now());
+            if (!stopped && remainingMs <= 0) {
+              batchTimedOut = true;
+              stopped = true;
+            }
             if (stopped) {
               results.push({ command, status: "skipped" });
               continue;
@@ -291,7 +347,7 @@ export const make = (config: BatchCommandRunnerConfig): BatchCommandRunner["Serv
             const result = yield* runOne(command, {
               cwd: input.cwd,
               shell: input.shell,
-              timeoutMs,
+              timeoutMs: Math.min(timeoutMs, remainingMs),
               pattern,
               config,
               log: state.log,
@@ -300,6 +356,10 @@ export const make = (config: BatchCommandRunnerConfig): BatchCommandRunner["Serv
               `\n[${result.status} exit=${result.exitCode ?? result.signal ?? "none"} ${result.durationMs}ms]\n\n`,
             );
             results.push(result);
+            if (result.status === "timed_out" && remainingMs < timeoutMs) {
+              batchTimedOut = true;
+              stopped = true;
+            }
             if (result.status !== "succeeded" && stopOnFailure) stopped = true;
           }
           yield* closeLog(state.log);
@@ -307,6 +367,7 @@ export const make = (config: BatchCommandRunnerConfig): BatchCommandRunner["Serv
             ok: results.every((result) => result.status === "succeeded"),
             logPath: state.logPath,
             ...(state.error === undefined ? {} : { logError: state.error }),
+            ...(batchTimedOut ? { batchTimedOut: true as const } : {}),
             commands: results,
           } satisfies BatchCommandRunResult;
         }),

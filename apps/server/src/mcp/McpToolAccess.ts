@@ -161,6 +161,21 @@ export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A,
     undefined,
   );
 
+/** Acts as the caller with powers the caller's own runtime would prompt for, such as a shell. */
+export const actsAsFullAccessCaller = <P, A, E, R>(
+  refusal: string,
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) =>
+  declare(
+    (params: P) =>
+      requireThreadCaller.pipe(
+        Effect.andThen(writingCaller),
+        Effect.tap((caller) => assertFullAccess(caller, refusal)),
+        Effect.flatMap(() => handle(params)),
+      ),
+    undefined,
+  );
+
 /**
  * Changes something that belongs to no thread, such as a pending upload or a
  * scheduled task. Work a linked environment started may not: none of it

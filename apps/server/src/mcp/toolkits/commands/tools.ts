@@ -14,6 +14,7 @@ const CommandResult = Schema.Struct({
   exitCode: Schema.optional(Schema.NullOr(Schema.Int)),
   signal: Schema.optional(Schema.String),
   spawnError: Schema.optional(Schema.String),
+  outputCutAfterExit: Schema.optional(Schema.Boolean),
   durationMs: Schema.optional(Count),
   lineCount: Schema.optional(Count),
   matchedLineCount: Schema.optional(Count),
@@ -42,13 +43,14 @@ const RunCommandsTool = Tool.make("t3_run_commands", {
         "Shell executable, such as bash or pwsh. Default cmd.exe on Windows, sh elsewhere.",
     }),
     matchPatterns: Schema.optional(Schema.Array(Schema.String)).annotate({
-      description: "Extra case-insensitive regexes for lines to keep, beside error/warning ones.",
+      description: "Extra case-insensitive text (not regex) for lines to keep, beside errors.",
     }),
   }),
   success: Schema.Struct({
     ok: Schema.Boolean,
     logPath: Schema.String,
     logError: Schema.optional(Schema.String),
+    batchTimedOut: Schema.optional(Schema.Boolean),
     commands: Schema.Array(CommandResult),
   }),
   failure: OrchestratorMcpFailure,
