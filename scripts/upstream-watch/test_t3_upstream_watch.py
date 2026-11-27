@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 import unittest.mock
 from contextlib import redirect_stdout
@@ -77,6 +76,7 @@ class FakeRunner:
         self.marked, self.tag_sha = marked, tag_sha
         self.list_reply, self.on_start = list_reply, on_start
         self.threads = []
+        self.briefs = {}
         self.calls = []
         self.unexpected = []
 
@@ -124,8 +124,14 @@ class FakeRunner:
                 self.on_start()
             if self.creates:
                 self.threads.insert(0, {"threadId": f"thread-{len(self.threads) + 1}",
-                                        "title": args[3], "status": "idle"})
+                                        "title": args[3], "status": "idle",
+                                        "providerInstanceId": args[5], "model": args[7],
+                                        "createdAt": NOW.isoformat().replace("+00:00", "Z")})
+                self.briefs[self.threads[0]["threadId"]] = stdin
             return w.Result(*self.start)
+        if args[:2] == ["thread", "show"] and args[3:] == ["--messages", "50", "--json"]:
+            text = self.briefs[args[2]]
+            return w.Result(0, json.dumps({"thread": {}, "messages": [{"role": "user", "text": text}]}))
         return self.reject(argv)
 
     def reject(self, argv, why=""):
@@ -307,6 +313,8 @@ class RunTest(WatcherCase):
             "  - orchestration: 2",
             '"Reply OK to open the merge thread."',
             "Do not merge, push, or start any thread or worktree unless Maxi replies OK.",
+            "Do not rename this thread.",
+            f"Watcher report id: v0.1.13@{TAG_SHA}",
         ):
             self.assertIn(text, message)
         state = self.state()
@@ -319,7 +327,8 @@ class RunTest(WatcherCase):
         self.assertEqual(again.thread_starts(), [])
         self.assertNotIn("merge-tree", again.subcommands())
         self.assertEqual(self.statuses(), ["reported", "nothing-new"])
-        self.assertFalse(os.path.exists(self.cfg["statePath"] + ".lock"))
+        with w.run_lock(self.cfg["statePath"] + ".lock"):
+            pass
 
     def test_no_new_tag_writes_no_state(self):
         reported = {"lastReportedTag": "v0.1.13", "reported": {"v0.1.13": TAG_SHA}}
@@ -348,6 +357,28 @@ class RunTest(WatcherCase):
         self.assertEqual(self.statuses(), ["error", "adopted", "nothing-new"])
         self.assertEqual(self.state()["reportThreadId"], "thread-1")
         self.assertNotIn("pending", self.state())
+
+    def test_lost_reply_then_renamed_thread_is_adopted_by_marker(self):
+        runner = FakeRunner(self.cfg, start=(1, "", "socket hang up"), creates=True)
+        self.assertEqual(self.run_watch(runner), 1)
+        runner.threads[0]["title"] = "Upstream merge report"
+        self.assertEqual(self.run_watch(runner), 0)
+        self.assertEqual(len(runner.thread_starts()), 1)
+        self.assertEqual(self.statuses(), ["error", "adopted"])
+        self.assertEqual(self.state()["reportThreadId"], "thread-1")
+
+    def test_lost_reply_then_moved_tag_adopts_the_pending_thread(self):
+        runner = FakeRunner(self.cfg, start=(1, "", "socket hang up"), creates=True)
+        self.assertEqual(self.run_watch(runner), 1)
+        runner.tag_sha = "c" * 40
+        self.assertEqual(self.run_watch(runner), 0)
+        self.assertEqual(len(runner.thread_starts()), 1)
+        self.assertEqual(self.statuses(), ["error", "adopted"])
+        self.assertEqual(self.state()["reported"], {"v0.1.13": TAG_SHA})
+        runner.start = OK_START
+        self.assertEqual(self.run_watch(runner), 0)
+        self.assertEqual(runner.thread_starts()[-1][0][4],
+                         "T3 Code: upstream v0.1.13 re-pushed (cccccccccc), merge?")
 
     def test_failed_state_write_after_start_is_adopted(self):
         runner = FakeRunner(self.cfg)
@@ -392,21 +423,19 @@ class RunTest(WatcherCase):
         self.assertEqual(runner.thread_starts(), [])
         self.assertIn("t3 thread list failed (1): server down", self.last_log())
 
-    def test_overlapping_run_is_refused_and_a_stale_lock_is_taken_over(self):
+    def test_overlapping_run_is_refused_even_when_the_lock_looks_stale(self):
         lock = self.cfg["statePath"] + ".lock"
-        os.makedirs(os.path.dirname(lock), exist_ok=True)
-        with open(lock, "w") as f:
-            f.write("other run")
         runner = FakeRunner(self.cfg)
-        self.assertEqual(self.run_watch(runner), 0)
+        # A lock that looks ancient must not let a second run in while its holder is alive.
+        with w.run_lock(lock), unittest.mock.patch.object(w.os.path, "getmtime", return_value=0.0):
+            self.assertEqual(self.run_watch(runner), 0)
         self.assertEqual(runner.calls, [])
         self.assertEqual(self.statuses(), ["busy"])
 
-        old = time.time() - self.cfg["lockStaleSec"] - 60
-        os.utime(lock, (old, old))
+        # A crash leaves the file but no holder: the next run goes ahead.
+        self.assertTrue(os.path.exists(lock))
         self.assertEqual(self.run_watch(runner), 0)
         self.assertEqual(len(runner.thread_starts()), 1)
-        self.assertFalse(os.path.exists(lock))
 
     def test_repushed_tag_is_reported_once(self):
         w.save_state(self.cfg["statePath"], {"lastReportedTag": "v0.1.13", "reported": {"v0.1.13": "f" * 40}})
@@ -460,7 +489,8 @@ class RunTest(WatcherCase):
 
         self.assertEqual(self.run_watch(broken), 1)
         self.assertIn("error RuntimeError: boom", self.last_log())
-        self.assertFalse(os.path.exists(self.cfg["statePath"] + ".lock"))
+        with w.run_lock(self.cfg["statePath"] + ".lock"):
+            pass
 
 
 def git(*args, stdin=""):

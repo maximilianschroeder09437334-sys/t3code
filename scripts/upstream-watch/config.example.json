@@ -10,7 +10,6 @@
   "t3Command": ["C:/Users/<you>/AppData/Roaming/npm/t3.cmd"],
   "commandTimeoutSec": 600,
   "maxStartAttempts": 3,
-  "lockStaleSec": 7200,
   "statePath": "~/.codex/state/t3-upstream-watch/state.json",
   "logPath": "~/.codex/state/t3-upstream-watch/watch.log",
   "areaRules": {

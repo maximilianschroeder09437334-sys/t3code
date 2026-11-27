@@ -4,8 +4,9 @@ Run: pythonw t3_upstream_watch.py --config <path> [--dry-run]
 Checks the newest upstream tag on the configured channel. Nothing new: one log line, exit 0.
 New tag (or a reported tag re-pushed to a new commit): counts commits and merge conflicts, then
 starts one T3 report thread that asks Maxi for an OK. It never merges, pushes, or opens a merge
-thread itself. One run at a time (lock file next to the state file); the pending report is saved
-before the thread starts, so a lost reply is adopted by title on the next run instead of re-sent.
+thread itself. One run at a time (OS lock on a file next to the state file, freed if the run dies);
+the pending report is saved before the thread starts, so after a lost reply the next run adopts the
+thread (by its saved title, or by the brief's marker line if it was renamed) instead of re-sending.
 
 Config: see config.example.json. Pin t3Command to an absolute path (`where t3` on Windows gives the
 npm t3.cmd shim); a bare name is resolved through PATH/PATHEXT at run time. mirrorPath must be a
@@ -23,11 +24,9 @@ import re
 import shutil
 import subprocess
 import sys
-import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 STABLE_PATTERN = r"^v\d+\.\d+\.\d+$"
@@ -48,7 +47,6 @@ DEFAULTS = {
     "channelPattern": STABLE_PATTERN,
     "commandTimeoutSec": 600,
     "maxStartAttempts": 3,
-    "lockStaleSec": 7200,
 }
 PATH_KEYS = ("mirrorPath", "statePath", "logPath")
 FORK_REF = "refs/watch/fork"
@@ -56,6 +54,12 @@ MIRROR_MARKER = "upstreamWatch.mirror"
 OTHER_AREA = "other"
 TITLE = "T3 Code: upstream {tag} ready, merge?"
 TITLE_REPUSHED = "T3 Code: upstream {tag} re-pushed ({sha}), merge?"
+# Stable line in the brief so a renamed report thread can still be adopted.
+MARKER = "Watcher report id: {tag}@{sha}"
+# Server and watcher clocks may differ slightly when matching createdAt to pending.since.
+ADOPT_CLOCK_SKEW = timedelta(minutes=5)
+# Report threads stay short; the brief must be among this many latest messages to be found.
+ADOPT_SHOW_MESSAGES = 50
 # Scheduled runs have nobody to answer a credential prompt or dialog.
 GIT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
 KILL_GRACE_SEC = 10
@@ -178,7 +182,7 @@ def validate_config(raw: object, source: str = "config") -> dict:
     cmd = cfg["t3Command"]
     if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
         raise ConfigError(f"{source}: t3Command must be a non-empty list of strings")
-    for k in ("commandTimeoutSec", "maxStartAttempts", "lockStaleSec"):
+    for k in ("commandTimeoutSec", "maxStartAttempts"):
         if not isinstance(cfg[k], int) or isinstance(cfg[k], bool) or cfg[k] < 1:
             raise ConfigError(f"{source}: {k} must be a positive integer")
     try:
@@ -211,36 +215,26 @@ def save_state(path: str, state: dict) -> None:
 
 
 @contextmanager
-def run_lock(path: str, stale_sec: float):
+def run_lock(path: str):
+    # An OS lock, not an existence check: it is freed when the holder dies, so there is no stale
+    # lock to take over and no takeover race. The file stays; deleting it would reopen a race.
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    for _ in range(2):
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - os.path.getmtime(path)
-            except FileNotFoundError:
-                continue
-            if age < stale_sec:
-                raise LockBusy(f"another run holds {path} ({int(age)}s old)") from None
-            # Older than any real run can last (lockStaleSec): its owner died without cleanup.
-            os.remove(path)
-    else:
-        raise LockBusy(f"cannot take {path}")
-    token = f"{os.getpid()} {uuid.uuid4()}"
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(token)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT)
     try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise LockBusy(f"another run holds {path}") from None
         yield
     finally:
-        try:
-            with open(path, encoding="utf-8") as f:
-                mine = f.read() == token
-            if mine:
-                os.remove(path)
-        except OSError:
-            pass
+        os.close(fd)
 
 
 def append_log(path: str, now: datetime, status: str, detail: str = "") -> None:
@@ -338,6 +332,10 @@ class Report:
         return TITLE.format(tag=self.tag)
 
     @property
+    def marker(self) -> str:
+        return MARKER.format(tag=self.tag, sha=self.tag_sha)
+
+    @property
     def message(self) -> str:
         verb = "re-pushed (the tag moved to a new commit)" if self.repushed else "released"
         lines = [
@@ -354,6 +352,9 @@ class Report:
             "Instruction: report the numbers above to Maxi in plain words, then ask exactly "
             '"Reply OK to open the merge thread." and stop.',
             "Do not merge, push, or start any thread or worktree unless Maxi replies OK.",
+            "Do not rename this thread.",
+            "",
+            self.marker,
         ]
         return "\n".join(lines)
 
@@ -434,18 +435,49 @@ def build_report(
     )
 
 
-def find_thread(runner: Runner, t3: list[str], cfg: dict, title: str) -> str | None:
-    argv = [*t3, "thread", "list", "--project", cfg["projectId"], "--json"]
+def t3_json(runner: Runner, cfg: dict, argv: list[str], what: str):
     r = runner(argv, timeout=cfg["commandTimeoutSec"])
     if r.code != 0:
-        raise WatchError(f"t3 thread list failed ({r.code}): {r.err.strip()[-300:]}")
+        raise WatchError(f"{what} failed ({r.code}): {r.err.strip()[-300:]}")
     try:
-        threads = json.loads(r.out)
+        return json.loads(r.out)
     except ValueError as e:
-        raise WatchError(f"t3 thread list printed no JSON: {e}") from e
-    for t in threads if isinstance(threads, list) else []:
-        if isinstance(t, dict) and t.get("title") == title:
+        raise WatchError(f"{what} printed no JSON: {e}") from e
+
+
+def parse_time(value: object) -> datetime | None:
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else None
+
+
+def find_thread(runner: Runner, t3: list[str], cfg: dict, pending: dict) -> str | None:
+    """The thread a pending start made: by its saved title or, if renamed, by the brief's marker."""
+    argv = [*t3, "thread", "list", "--project", cfg["projectId"], "--json"]
+    listed = t3_json(runner, cfg, argv, "t3 thread list")
+    threads = [t for t in listed if isinstance(t, dict)] if isinstance(listed, list) else []
+    for t in threads:
+        if t.get("title") == pending.get("title"):
             return str(t.get("threadId"))
+    since, marker = parse_time(pending.get("since")), pending.get("marker")
+    if since is None or not marker:
+        return None
+    report_model = (cfg["reportProvider"], cfg["reportModel"])
+    for t in threads:
+        created = parse_time(t.get("createdAt"))
+        if created is None or created < since - ADOPT_CLOCK_SKEW:
+            continue
+        if (t.get("providerInstanceId"), t.get("model")) != report_model:
+            continue
+        tid = str(t.get("threadId"))
+        argv = [*t3, "thread", "show", tid, "--messages", str(ADOPT_SHOW_MESSAGES), "--json"]
+        shown = t3_json(runner, cfg, argv, "t3 thread show")
+        messages = shown.get("messages") if isinstance(shown, dict) else None
+        for m in messages if isinstance(messages, list) else []:
+            if isinstance(m, dict) and m.get("role") == "user" and marker in str(m.get("text")):
+                return tid
     return None
 
 
@@ -473,14 +505,14 @@ def start_report_thread(runner: Runner, t3: list[str], cfg: dict, report: Report
         return None
 
 
-def mark_reported(cfg: dict, state: dict, report: Report, thread_id: str | None, at: datetime):
+def mark_reported(cfg: dict, state: dict, tag: str, sha: str, thread_id: str | None, at: datetime):
     rest = {k: v for k, v in state.items() if k != "pending"}
     save_state(
         cfg["statePath"],
         {
             **rest,
-            "lastReportedTag": report.tag,
-            "reported": {**(state.get("reported") or {}), report.tag: report.tag_sha},
+            "lastReportedTag": tag,
+            "reported": {**(state.get("reported") or {}), tag: sha},
             "reportedAt": at.astimezone(timezone.utc).isoformat(),
             "reportThreadId": thread_id,
         },
@@ -510,13 +542,15 @@ def run_locked(
         return 0
     pending = state.get("pending")
     attempts = 0
-    if isinstance(pending, dict) and (pending.get("tag"), pending.get("sha")) == (newest, tag_sha):
+    if isinstance(pending, dict) and pending.get("tag") and pending.get("sha"):
         # The last start may have created the thread even though its reply or state write was lost.
-        thread_id = find_thread(runner, t3, cfg, report.title)
+        # Look even if the tag moved since; the next run then reports the move as a re-push.
+        thread_id = find_thread(runner, t3, cfg, pending)
         if thread_id is not None:
-            mark_reported(cfg, state, report, thread_id, now())
-            log("adopted", f"{newest} thread={thread_id}")
+            mark_reported(cfg, state, pending["tag"], pending["sha"], thread_id, now())
+            log("adopted", f"{pending['tag']} thread={thread_id}")
             return 0
+    if isinstance(pending, dict) and (pending.get("tag"), pending.get("sha")) == (newest, tag_sha):
         attempts = int(pending.get("attempts", 0))
         if attempts >= cfg["maxStartAttempts"]:
             log(
@@ -529,12 +563,13 @@ def run_locked(
         "tag": newest,
         "sha": tag_sha,
         "title": report.title,
+        "marker": report.marker,
         "attempts": attempts + 1,
         "since": now().astimezone(timezone.utc).isoformat(),
     }
     save_state(cfg["statePath"], {**state, "pending": pending})
     thread_id = start_report_thread(runner, t3, cfg, report)
-    mark_reported(cfg, state, report, thread_id, now())
+    mark_reported(cfg, state, report.tag, report.tag_sha, thread_id, now())
     log("reported", f"{newest} thread={thread_id} conflicts={len(report.conflicts)}")
     return 0
 
@@ -553,7 +588,7 @@ def run(
 
     try:
         t3 = None if dry_run else resolve_command(cfg["t3Command"], which)
-        with run_lock(cfg["statePath"] + ".lock", cfg["lockStaleSec"]):
+        with run_lock(cfg["statePath"] + ".lock"):
             return run_locked(cfg, runner, t3, dry_run, now, out, log)
     except LockBusy as e:
         log("busy", str(e))
